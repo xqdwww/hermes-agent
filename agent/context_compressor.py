@@ -485,6 +485,7 @@ class ContextCompressor(ContextEngine):
         self._has_ever_warned = False
         self._warned_context_full = False
         self._context_usage_pct = 0.0
+        self._warned_misconfigured = False
 
     def update_model(
         self,
@@ -624,6 +625,7 @@ class ContextCompressor(ContextEngine):
         self._has_ever_warned: bool = False  # separate from turn=0 sentinel
         self._warned_context_full: bool = False  # flag for prompt builder
         self._context_usage_pct: float = 0.0     # last known context usage %
+        self._warned_misconfigured: bool = False  # one-time log for warn >= threshold
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -658,10 +660,27 @@ class ContextCompressor(ContextEngine):
 
         Returns True when:
         - warn_threshold > 0 (feature is enabled)
+        - warn_threshold < compression threshold (guard against misconfiguration)
         - token usage is between warn_threshold and compression threshold
         - cooldown has passed since last warning
         """
         if self.warn_threshold <= 0:
+            return False
+        # Guard: if warn_threshold >= compression threshold, the warning
+        # range [warn, compress) is empty — compression fires first.
+        # Log once and disable.  (Common when user has threshold=0.50
+        # but default warn_threshold=0.60.)
+        if self.warn_threshold >= self.threshold_percent:
+            if not self._warned_misconfigured:
+                self._warned_misconfigured = True
+                logger.warning(
+                    "warn_threshold (%.0f%%) >= compression threshold (%.0f%%). "
+                    "Warning range is empty — topic-split reminders are disabled. "
+                    "Set warn_threshold < %.2f in compression config to enable.",
+                    self.warn_threshold * 100,
+                    self.threshold_percent * 100,
+                    self.threshold_percent,
+                )
             return False
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         if tokens <= 0:

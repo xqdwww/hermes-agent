@@ -2053,3 +2053,16 @@ class TestWarnThreshold:
         cc.increment_turn()
         cc.increment_turn()
         assert cc._current_turn == 3
+
+    def test_warn_threshold_ge_compress_disables_with_log(self):
+        """When warn_threshold >= threshold, should_warn always returns False."""
+        cc = self._make_compressor(
+            threshold_percent=0.50, warn_threshold=0.60,
+        )
+        assert cc.should_warn(50000) is False  # 50% tokens < 60% warn but guard fires first
+        assert cc.should_warn(70000) is False  # 70% tokens, compression would fire
+        # Verify one-time log flag
+        assert cc._warned_misconfigured is True
+        # Session reset should clear the flag
+        cc.on_session_reset()
+        assert cc._warned_misconfigured is False
