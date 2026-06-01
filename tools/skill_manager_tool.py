@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from hermes_constants import get_hermes_home, display_hermes_home
@@ -111,6 +112,13 @@ SKILLS_DIR = HERMES_HOME / "skills"
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
+_SKILL_BACKUP_AUTHOR = {
+    "GIT_AUTHOR_NAME": "Hermes Skill Manager",
+    "GIT_AUTHOR_EMAIL": "skills@hermes.local",
+    "GIT_COMMITTER_NAME": "Hermes Skill Manager",
+    "GIT_COMMITTER_EMAIL": "skills@hermes.local",
+}
+
 
 def _containing_skills_root(skill_path: Path) -> Path:
     """Return the skills root directory (local or external_dirs entry) that
@@ -132,6 +140,115 @@ def _containing_skills_root(skill_path: Path) -> Path:
         except (ValueError, OSError):
             continue
     return SKILLS_DIR
+
+
+def _run_skill_git(skills_root: Path, args: List[str]) -> subprocess.CompletedProcess:
+    """Run git inside ``skills_root`` with deterministic backup identity."""
+    env = os.environ.copy()
+    for key, value in _SKILL_BACKUP_AUTHOR.items():
+        env.setdefault(key, value)
+    return subprocess.run(
+        ["git", "-C", str(skills_root), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def _ensure_skill_git_excludes(skills_root: Path) -> None:
+    """Exclude generated skill caches from the local backup repository."""
+    info_dir = skills_root / ".git" / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    exclude_path = info_dir / "exclude"
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    additions = []
+    for pattern in (".hub/", ".curator_backups/"):
+        if pattern not in existing.splitlines():
+            additions.append(pattern)
+    if additions:
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        exclude_path.write_text(
+            existing + prefix + "\n".join(additions) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _git_backup_skills(skills_root: Path, reason: str) -> Optional[str]:
+    """Commit the current skills tree before agent-managed writes.
+
+    Backup failure is deliberately non-fatal: skill management should not
+    become unavailable because git is missing or a local repo is temporarily
+    unhealthy. Failures are logged for diagnosis.
+    """
+    try:
+        skills_root.mkdir(parents=True, exist_ok=True)
+        if not (skills_root / ".git").exists():
+            init = _run_skill_git(skills_root, ["init"])
+            if init.returncode != 0:
+                logger.warning(
+                    "Could not initialize skills backup repo at %s: %s",
+                    skills_root,
+                    init.stderr.strip(),
+                )
+                return None
+
+        _ensure_skill_git_excludes(skills_root)
+
+        has_head = _run_skill_git(skills_root, ["rev-parse", "--verify", "HEAD"])
+        _run_skill_git(skills_root, ["add", "-A", "--", "."])
+
+        if has_head.returncode != 0:
+            diff = _run_skill_git(skills_root, ["diff", "--cached", "--quiet"])
+            commit_args = ["commit", "-m", "Initialize Hermes skills backup"]
+            if diff.returncode == 0:
+                commit_args.insert(1, "--allow-empty")
+            commit = _run_skill_git(skills_root, commit_args)
+            if commit.returncode != 0:
+                logger.warning(
+                    "Could not create initial skills backup commit at %s: %s",
+                    skills_root,
+                    commit.stderr.strip(),
+                )
+                return None
+            rev = _run_skill_git(skills_root, ["rev-parse", "--short", "HEAD"])
+            return rev.stdout.strip() or None
+
+        status = _run_skill_git(
+            skills_root,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )
+        if status.returncode != 0:
+            logger.warning(
+                "Could not inspect skills backup status at %s: %s",
+                skills_root,
+                status.stderr.strip(),
+            )
+            return None
+        if status.stdout.strip():
+            commit = _run_skill_git(
+                skills_root,
+                ["commit", "-m", f"Backup Hermes skills before {reason}"],
+            )
+            if commit.returncode != 0:
+                logger.warning(
+                    "Could not create skills backup commit at %s: %s",
+                    skills_root,
+                    commit.stderr.strip(),
+                )
+                return None
+
+        rev = _run_skill_git(skills_root, ["rev-parse", "--short", "HEAD"])
+        return rev.stdout.strip() or None
+    except Exception as exc:
+        logger.warning(
+            "Skills git backup failed for %s: %s",
+            skills_root,
+            exc,
+            exc_info=True,
+        )
+        return None
 
 
 def _pinned_guard(name: str) -> Optional[str]:
@@ -512,6 +629,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
 
     # Create the skill directory
     skill_dir = _resolve_skill_dir(name, category)
+    backup_commit = _git_backup_skills(SKILLS_DIR, f"create {name}")
     skill_dir.mkdir(parents=True, exist_ok=True)
 
     # Write SKILL.md atomically
@@ -532,6 +650,8 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     }
     if category:
         result["category"] = category
+    if backup_commit:
+        result["backup_commit"] = backup_commit
     result["hint"] = (
         "To add reference files, templates, or scripts, use "
         "skill_manage(action='write_file', name='{}', file_path='references/example.md', file_content='...')".format(name)
@@ -556,6 +676,7 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
+    backup_commit = _git_backup_skills(_containing_skills_root(existing["path"]), f"edit {name}")
     _atomic_write_text(skill_md, content)
 
     # Security scan — roll back on block
@@ -565,11 +686,14 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
             _atomic_write_text(skill_md, original_content)
         return {"success": False, "error": scan_error}
 
-    return {
+    result = {
         "success": True,
         "message": f"Skill '{name}' updated.",
         "path": str(existing["path"]),
     }
+    if backup_commit:
+        result["backup_commit"] = backup_commit
+    return result
 
 
 def _patch_skill(
@@ -652,6 +776,7 @@ def _patch_skill(
             }
 
     original_content = content  # for rollback
+    backup_commit = _git_backup_skills(_containing_skills_root(skill_dir), f"patch {name}")
     _atomic_write_text(target, new_content)
 
     # Security scan — roll back on block
@@ -660,10 +785,13 @@ def _patch_skill(
         _atomic_write_text(target, original_content)
         return {"success": False, "error": scan_error}
 
-    return {
+    result = {
         "success": True,
         "message": f"Patched {'SKILL.md' if not file_path else file_path} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
     }
+    if backup_commit:
+        result["backup_commit"] = backup_commit
+    return result
 
 
 def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, Any]:

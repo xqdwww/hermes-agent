@@ -65,13 +65,18 @@ def build_write_denied_paths(home: str) -> set[str]:
 
 def build_write_denied_prefixes(home: str) -> list[str]:
     """Return sensitive directory prefixes that must never be written."""
-    return [
+    hermes_home = _hermes_home_path()
+    hermes_root = _hermes_root_path()
+    prefixes = [
         os.path.realpath(p) + os.sep
         for p in [
             os.path.join(home, ".ssh"),
             os.path.join(home, ".aws"),
             os.path.join(home, ".gnupg"),
             os.path.join(home, ".kube"),
+            str(hermes_home / "skills"),
+            str(hermes_root / "skills"),
+            os.path.join(home, ".hermes", "skills"),
             "/etc/sudoers.d",
             "/etc/systemd",
             os.path.join(home, ".docker"),
@@ -80,6 +85,7 @@ def build_write_denied_prefixes(home: str) -> list[str]:
             os.path.join(home, ".config", "gcloud"),
         ]
     ]
+    return list(dict.fromkeys(prefixes))
 
 
 def get_safe_write_root() -> Optional[str]:
