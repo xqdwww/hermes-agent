@@ -390,6 +390,8 @@ class ToolRegistry:
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """Execute a tool handler by name.
 
+        * Task-mode gate check (~1.3 us in IDLE) blocks execution tools
+          when the gate is active (INIT_LOCKED / ROUTE_CARD_SUBMITTED).
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
@@ -397,6 +399,24 @@ class ToolRegistry:
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+
+        # --- Task Mode Gate (~1.3 us fast path in ACTIVE state) ---
+        # This is the HARD gate that blocks tool execution at the registry
+        # level - below plugin hooks, below model_tools.handle_function_call.
+        # Plugins can skip hooks but cannot skip this gate.
+        try:
+            from tools.task_mode_runtime import preflight
+            gate_block = preflight(name)
+            if gate_block is not None:
+                logger.debug("Task mode gate blocked tool '%s': %s",
+                             name, gate_block[:120])
+                return json.dumps({"error": gate_block}, ensure_ascii=False)
+        except Exception:
+            # Fail-open: never let the gate itself become a failure point.
+            # If the gate module can't be imported or preflight raises,
+            # allow the tool to execute normally.
+            pass
+
         try:
             if entry.is_async:
                 from model_tools import _run_async

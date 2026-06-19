@@ -50,6 +50,9 @@ _HERMES_CORE_TOOLS = [
     "todo", "memory",
     # Session history search
     "session_search",
+    # Strict heavy task engine entry for RESEARCH / DECISION /
+    # RESEARCH_DECISION. Legacy research runners remain outside core.
+    "task_engine_runner",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
