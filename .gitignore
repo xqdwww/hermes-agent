@@ -108,6 +108,19 @@ docs/superpowers/*
 # logs, and per-session caches are never artifacts of the codebase.
 .hermes/
 
+# Task engine runtime artifacts and local diagnostics
+.hermes_task_engine_runs/
+work/stress_runs/
+work/agy_logs/
+work/agy_alias_smoke_l1_l2/
+work/real_smoke_l1_l2/
+work/task_engine_simulated*/
+work/*_probe.json
+work/nightly_task_engine_*.json
+work/nightly_task_engine_*.jsonl
+work/agy_model_alias.env
+work/task_engine_closure_audit.json
+
 # Desktop/bootstrap install marker written into the managed checkout root by the
 # bootstrap installer. It is Hermes-managed runtime state, never a code change —
 # ignore it so `hermes update`'s `git stash push --include-untracked` does not
