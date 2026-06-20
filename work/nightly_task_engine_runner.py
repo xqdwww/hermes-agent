@@ -339,7 +339,11 @@ def _tomorrow_next_step(stopped_reason: str, latest: dict[str, Any]) -> str:
     if latest.get("next_action") == "external_calibration_passed_stop_before_final_controller_report":
         return "Continue from final_controller_report wiring; external_calibration smoke completed and stopped before final_controller_report."
     if latest.get("next_action") == "final_controller_report_passed_pipeline_complete":
-        return "RESEARCH_DECISION 16-stage pipeline complete; continue with final output QA/regression only."
+        return (
+            "Archived RESEARCH_DECISION integration-test pipeline completed; "
+            "production path is RESEARCH full -> DECISION full with research_packet_path. "
+            "Continue with final output QA/regression only."
+        )
     return "Continue from L3 R1 synthesis wiring; L1/L2/L2.5 smoke remained healthy."
 
 

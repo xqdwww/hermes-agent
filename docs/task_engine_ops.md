@@ -4,9 +4,56 @@
 
 - `RESEARCH`: PASS in WebUI full-run.
 - `DECISION`: PASS in WebUI full-run.
-- `RESEARCH_DECISION`: PASS in WebUI full-run.
+- `RESEARCH_DECISION`: archived / integration-test only. The 16-stage schema and tests remain, but it is no longer the production default full-run path.
 - Deterministic intercept is active for explicit research, decision, and research-decision tasks.
 - Ordinary chat is not routed through `task_engine_runner` and should continue to use the normal chat path.
+
+## Production Default: Two-Step Heavy Task Flow
+
+Daily production work should use two separate runs:
+
+1. Run `RESEARCH` full to produce `research_evidence_packet.md`.
+2. Run `DECISION` full with the original user decision question plus `research_packet_path=<path to research_evidence_packet.md>`.
+
+Use `RESEARCH -> DECISION` when the task needs fresh evidence gathering before a decision, such as medical, education, policy, product, or future-facing evidence synthesis. Use direct `DECISION` when the user already provides the evidence packet, constraints, options, or factual basis and only needs structured judgment.
+
+Example Python entrypoint:
+
+```bash
+python - <<'PY'
+from tools.task_engine_runner import task_engine_runner
+
+research = task_engine_runner(query="这是一个研究任务。...", mode="RESEARCH", action="full")
+print(research)
+
+decision = task_engine_runner(
+    query="这是一个决策任务。...",
+    mode="DECISION",
+    action="full",
+    research_packet_path="/absolute/path/to/research_evidence_packet.md",
+)
+print(decision)
+PY
+```
+
+`DECISION` may read the research packet as bounded context. It must not run `RESEARCH` L1-L5, and the final report must not dump raw research packet text.
+
+## Archived RESEARCH_DECISION
+
+`RESEARCH_DECISION` still has the canonical 16-stage contract for historical comparison and integration tests. `dry-run` and `contract` remain available.
+
+Real `RESEARCH_DECISION` execution is blocked by default with:
+
+```text
+blocked_reason=RESEARCH_DECISION_ARCHIVED
+```
+
+To force an archived integration run, use one of these explicit overrides:
+
+- Function argument: `allow_archived_research_decision=True`
+- Environment variable: `HERMES_ENABLE_RESEARCH_DECISION=1`
+
+Do not use the override for routine production work.
 
 ## Daily Regression
 
@@ -48,7 +95,7 @@ The health check does not run a real full pipeline. It covers compile, regressio
 
 `DECISION` must not create `source_candidates.json`, `ddgs_gap_sources.json`, `r1_synthesis.md`, `gemini_audit_report.md`, or `research_evidence_packet.md`.
 
-`RESEARCH_DECISION` has 16 stages. It must run the complete `RESEARCH` phase first, require an accepted research evidence packet, and only then run the `DECISION` phase. It must not skip directly to Decision or treat a partial research packet as accepted.
+`RESEARCH_DECISION` has 16 stages and is archived / integration-test only for real execution. It must run the complete `RESEARCH` phase first, require an accepted research evidence packet, and only then run the `DECISION` phase. It must not skip directly to Decision or treat a partial research packet as accepted.
 
 ## WebUI Intercept Regression
 
@@ -274,7 +321,7 @@ It must also include a compact pipeline trace with the expected stage count:
 
 - `RESEARCH`: 6 stages
 - `DECISION`: 10 stages
-- `RESEARCH_DECISION`: 16 stages
+- `RESEARCH_DECISION`: 16 stages, archived / integration-test only for real execution
 
 Do not leak pseudo-tool plans or raw strings such as `web_search`, `api_call`, or `codex_exec` as if they were executed toolchains. If these appear in an intermediate model artifact for a constrained stage, the output must be cleaned or blocked according to the stage gate.
 

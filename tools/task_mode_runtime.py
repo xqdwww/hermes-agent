@@ -2,6 +2,10 @@
 
 States: ACTIVE(default) ↔ INIT_LOCKED ↔ ROUTE_CARD_SUBMITTED → COMPLETED
 
+ROUTE_CARD_SUBMITTED is legacy compatibility for the old route-card review loop.
+Explicit task_engine_runner RESEARCH/DECISION requests should not enter a
+route-card loop; they should call the canonical runner directly.
+
 Performance (measured 2026-06-10):
   - Gate check (IDLE/ACTIVE state):        ~1.3 μs  (single _lock + attr read)
   - activate() with contract + save:       ~34 μs   (Regex + JSON write)
@@ -15,9 +19,10 @@ States:
   INIT_LOCKED           - Most tools blocked. Only clarify/todo/read/search allowed.
                           Triggers when user declares a task type that requires
                           constitutional review before execution.
-  ROUTE_CARD_SUBMITTED  - Partial unlock. Execution tools (terminal, execute_code,
-                          delegate, browser) still blocked; read/search/research
-                          tools allowed.
+  ROUTE_CARD_SUBMITTED  - Deprecated legacy compatibility for historical
+                          route-card review loops. Execution tools (terminal,
+                          execute_code, delegate, browser) still blocked;
+                          read/search/research tools allowed.
   COMPLETED             - Auto-resets to ACTIVE on next conversation turn.
 
 Persisted to ~/.hermes/task_mode_state.json for cross-session state recovery.
@@ -107,7 +112,7 @@ _ALWAYS_ALLOWED: frozenset[str] = frozenset({
     "text_to_speech",
     "process",
     "session_search",
-    "task_engine_runner",  # canonical heavy RESEARCH/DECISION/RESEARCH_DECISION entry
+    "task_engine_runner",  # canonical heavy RESEARCH/DECISION entry; archived RESEARCH_DECISION is runner-gated
     "patch",            # allow patch so agent can update its own todo/plan docs
     "write_file",       # allow write_file for plan documents
 })
@@ -236,9 +241,10 @@ class TaskModeRuntime:
     def submit_route_card(self) -> None:
         """Move from INIT_LOCKED to ROUTE_CARD_SUBMITTED.
 
-        Called after user approves the constitutional review and the Agent
-        produces a ROUTE_CARD.  Execution tools remain blocked but
-        read/search/skill tools are now allowed.
+        Deprecated legacy compatibility for the old route-card review loop.
+        Explicit task_engine_runner RESEARCH/DECISION requests should not call
+        this path. Execution tools remain blocked but read/search/skill tools
+        are now allowed.
         """
         with self._lock:
             if self._state == TaskModeState.INIT_LOCKED:

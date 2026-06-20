@@ -4,24 +4,30 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 from tools.registry import registry
 from tools.task_engine_contracts import (
+    CANONICAL_STAGES,
     ENGINE_DECISION,
     ENGINE_RESEARCH,
     ENGINE_RESEARCH_DECISION,
+    PIPELINE_BLOCKED,
     build_dry_run_plan,
     build_engine_contract,
     canonical_schema,
     detect_task_engine_mode,
+    make_stage_record,
+    planned_outputs,
     render_final_markdown,
     normalize_mode,
     validate_pipeline,
 )
 from tools.task_engine_executors import (
+    _research_evidence_packet_quality_error,
     run_decision_final_smoke,
     run_agy_preflight,
     run_omlx_preflight,
@@ -72,6 +78,7 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                         "contract",
                         "agy-preflight",
                         "omlx-preflight",
+                        "full",
                         "dry-run",
                         "simulated-run",
                         "validate",
@@ -118,7 +125,8 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                         "smoke-research-decision-insight: real RESEARCH L1-L5 plus Decision stages 7-13 only. "
                         "smoke-research-decision-convergence: real RESEARCH L1-L5 plus Decision stages 7-14 only. "
                         "smoke-research-decision-calibration: real RESEARCH L1-L5 plus Decision stages 7-15 only. "
-                        "smoke-research-decision-final: complete real RESEARCH_DECISION 16-stage smoke."
+                        "smoke-research-decision-final: archived integration-only RESEARCH_DECISION 16-stage smoke; "
+                        "blocked by default unless explicitly overridden, and not the production default."
                     ),
                     "default": "contract",
                 },
@@ -129,6 +137,15 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                 "base_dir": {
                     "type": "string",
                     "description": "Optional base directory used to resolve relative artifact paths.",
+                },
+                "research_packet_path": {
+                    "type": "string",
+                    "description": "Optional research_evidence_packet.md path for two-step RESEARCH -> DECISION runs.",
+                },
+                "allow_archived_research_decision": {
+                    "type": "boolean",
+                    "description": "Explicitly allow archived RESEARCH_DECISION real execution. Defaults to false.",
+                    "default": False,
                 },
             },
             "required": ["query"],
@@ -144,6 +161,8 @@ def task_engine_runner(
     action: str = "contract",
     run: dict[str, Any] | None = None,
     base_dir: str | None = None,
+    research_packet_path: str | None = None,
+    allow_archived_research_decision: bool = False,
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
@@ -158,6 +177,17 @@ def task_engine_runner(
             ensure_ascii=False,
             indent=2,
         )
+
+    if action == "full" and normalize_mode(resolved_mode) == ENGINE_RESEARCH_DECISION:
+        if not _research_decision_archive_allowed(allow_archived_research_decision):
+            return json.dumps(
+                _archived_research_decision_response(action="full"),
+                ensure_ascii=False,
+                indent=2,
+            )
+        action = "smoke-research-decision-final"
+    elif action == "full":
+        action = _full_action_for_mode(resolved_mode)
 
     if action == "contract":
         return json.dumps(
@@ -193,6 +223,20 @@ def task_engine_runner(
         result = run_simulated_pipeline(resolved_mode, base_dir=target_dir)
         result["artifact_dir"] = str(target_dir)
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    if action == "archived-research-decision":
+        return json.dumps(
+            _archived_research_decision_response(action="full"),
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    if _is_archived_research_decision_real_action(resolved_mode, action) and not _research_decision_archive_allowed(allow_archived_research_decision):
+        return json.dumps(
+            _archived_research_decision_response(action=action),
+            ensure_ascii=False,
+            indent=2,
+        )
 
     if action == "smoke-research-l1-l2":
         if normalize_mode(resolved_mode) not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
@@ -268,9 +312,32 @@ def task_engine_runner(
                 },
                 ensure_ascii=False,
                 indent=2,
-            )
+        )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_DECISION, "real_smoke_decision_final")
-        result = run_decision_final_smoke(query, base_dir=target_dir)
+        try:
+            resolved_research_packet_path = _resolve_decision_research_packet_path(
+                query=query,
+                mode=resolved_mode,
+                base_dir=base_dir,
+                research_packet_path=research_packet_path,
+            )
+        except _ResearchPacketDiscoveryBlocked as exc:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "pipeline_status": PIPELINE_BLOCKED,
+                    "blocked_stage": "research_packet_discovery",
+                    "blocked_reason": str(exc),
+                    "artifact_dir": str(target_dir),
+                    "message": "DECISION requested latest research packet, but no valid new RESEARCH packet was found.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        kwargs: dict[str, Any] = {"base_dir": target_dir}
+        if resolved_research_packet_path:
+            kwargs["research_packet_path"] = resolved_research_packet_path
+        result = run_decision_final_smoke(query, **kwargs)
         result["artifact_dir"] = str(target_dir)
         return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -479,6 +546,49 @@ def _resolve_mode(mode: str, query: str) -> str | None:
     return normalized
 
 
+def _full_action_for_mode(mode: str) -> str:
+    normalized = normalize_mode(mode)
+    if normalized == ENGINE_RESEARCH:
+        return "smoke-research-l1-l5"
+    if normalized == ENGINE_DECISION:
+        return "smoke-decision-final"
+    if normalized == ENGINE_RESEARCH_DECISION:
+        return "archived-research-decision"
+    return "dry-run"
+
+
+def _research_decision_archive_allowed(explicit: bool = False) -> bool:
+    return bool(explicit) or os.getenv("HERMES_ENABLE_RESEARCH_DECISION") == "1"
+
+
+def _is_archived_research_decision_real_action(mode: str | None, action: str) -> bool:
+    return normalize_mode(mode or "") == ENGINE_RESEARCH_DECISION and action.startswith("smoke-research-decision")
+
+
+def _archived_research_decision_response(*, action: str) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "pipeline_status": "PIPELINE_BLOCKED",
+        "blocked_stage": "research_decision_archived",
+        "blocked_reason": "RESEARCH_DECISION_ARCHIVED",
+        "mode": ENGINE_RESEARCH_DECISION,
+        "action": action,
+        "message": (
+            "RESEARCH_DECISION 16-stage full execution is archived / integration-test only. "
+            "Run RESEARCH full first to produce research_evidence_packet.md, then run DECISION full "
+            "with research_packet_path."
+        ),
+        "two_step_recommendation": [
+            "RESEARCH full -> research_evidence_packet.md",
+            "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
+        ],
+        "allow_override": {
+            "function_arg": "allow_archived_research_decision=True",
+            "environment": "HERMES_ENABLE_RESEARCH_DECISION=1",
+        },
+    }
+
+
 def _resolve_artifact_dir(base_dir: str | None, mode: str, label: str) -> Path:
     if base_dir:
         return Path(base_dir).resolve()
@@ -491,6 +601,131 @@ def _resolve_artifact_dir(base_dir: str | None, mode: str, label: str) -> Path:
     return (root / f"{int(time.time())}_{mode.lower()}_{label}").resolve()
 
 
+class _ResearchPacketDiscoveryBlocked(Exception):
+    pass
+
+
+def _resolve_decision_research_packet_path(
+    *,
+    query: str,
+    mode: str,
+    base_dir: str | None,
+    research_packet_path: str | None,
+) -> str | None:
+    if normalize_mode(mode) != ENGINE_DECISION:
+        return research_packet_path
+    value = (research_packet_path or "").strip()
+    if not value:
+        value = _decision_research_packet_alias_from_query(query)
+    if not value:
+        return None
+    if value.strip().lower() in {"latest", "最新"}:
+        discovered = _find_latest_valid_research_packet(base_dir=base_dir)
+        if discovered is None:
+            raise _ResearchPacketDiscoveryBlocked("no_valid_new_research_packet_found")
+        return str(discovered)
+    return value
+
+
+def _decision_research_packet_alias_from_query(query: str) -> str | None:
+    text = query or ""
+    assignment = re.search(
+        r"(?:research_packet_path|研究成果包)\s*[=:：]\s*([^\s，。；;]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if assignment:
+        value = assignment.group(1).strip().strip("`'\"")
+        if value.lower() == "latest" or value == "最新":
+            return "latest"
+        return value
+    if "最新研究成果包" in text:
+        return "latest"
+    return None
+
+
+def _find_latest_valid_research_packet(*, base_dir: str | None) -> Path | None:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for root in _research_packet_search_roots(base_dir):
+        if not root.exists():
+            continue
+        try:
+            found = list(root.rglob("research_evidence_packet.md")) if root.is_dir() else []
+        except OSError:
+            continue
+        for path in found:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidates.append(resolved)
+
+    candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    for path in candidates:
+        if _is_valid_new_research_packet(path):
+            return path
+    return None
+
+
+def _research_packet_search_roots(base_dir: str | None) -> list[Path]:
+    roots: list[Path] = []
+    if base_dir:
+        base = Path(base_dir).expanduser().resolve()
+        roots.extend([base, base.parent])
+    env_root = os.getenv("HERMES_TASK_ENGINE_ARTIFACT_DIR", "").strip()
+    if env_root:
+        roots.append(Path(env_root).expanduser().resolve())
+    cwd = Path.cwd().resolve()
+    roots.extend([cwd / ".hermes_task_engine_runs", cwd / "validation_outputs", cwd])
+
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+    return deduped
+
+
+def _is_valid_new_research_packet(path: Path) -> bool:
+    if path.name != "research_evidence_packet.md" or path.parent.name != "L5_deepseek_acceptance":
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if _research_evidence_packet_quality_error(text):
+        return False
+    research_root = path.parent.parent
+    stages = []
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH]:
+        outputs = planned_outputs(spec, research_root)
+        record = make_stage_record(
+            spec,
+            base_dir=research_root,
+            created=True,
+            valid=True,
+            status="real",
+            outputs=outputs,
+        )
+        stages.append(record.__dict__)
+    validation = validate_pipeline(
+        ENGINE_RESEARCH,
+        {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l5", "stages": stages},
+        base_dir=research_root,
+    )
+    return validation.get("stage_count") == 6 and validation.get("valid") is True
+
+
 def _task_engine_handler(args: dict[str, Any], **kw) -> str:
     return task_engine_runner(
         query=str(args.get("query", "")),
@@ -498,6 +733,8 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         action=str(args.get("action", "contract")),
         run=args.get("run"),
         base_dir=args.get("base_dir"),
+        research_packet_path=args.get("research_packet_path"),
+        allow_archived_research_decision=bool(args.get("allow_archived_research_decision", False)),
     )
 
 

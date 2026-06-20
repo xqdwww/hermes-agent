@@ -24,6 +24,7 @@ from tools.task_engine_contracts import (
     StageSpec,
     build_engine_contract,
     detect_task_engine_mode,
+    planned_outputs,
     render_final_markdown,
     validate_pipeline,
 )
@@ -88,6 +89,74 @@ ADHD 儿童最新的研究进展和治疗方案；
 一些建议，以及长期发展的路线。
 我想知道是否要主动干预，要主动干预到什么程度？
 """
+
+
+def _complete_research_evidence_packet_text() -> str:
+    return "\n".join(
+        [
+            "research_evidence_packet",
+            "verdict: ACCEPTED",
+            "accepted: true",
+            "checked_stages: [L1_gemini_search, L2_ddgs_supplement, L2_5_codex_evidence_organizer, L3_r1_synthesis, L4_gemini_audit]",
+            "missing_or_invalid_artifacts: []",
+            "audit_summary: L4 audit accepted the compact evidence packet.",
+            "evidence_packet_ready_for_decision: true",
+            "",
+            "## evidence_strength",
+            "Evidence strength: strong for stable current evidence, medium for mechanism transfer, weak for individual long-horizon forecasts.",
+            "",
+            "## controversy",
+            "Controversy: applicability depends on context, population differences, measurement choices, and whether mechanisms transfer to the target scenario.",
+            "",
+            "## evidence_gap",
+            "Evidence gap: direct individual longitudinal evidence and exact future-environment evidence remain unavailable for this decision context.",
+            "",
+            "## evidence_supported",
+            "Evidence supported: current research artifacts and audited synthesis support bounded claims about stable mechanisms and observed evidence.",
+            "",
+            "## reasonable_inference",
+            "Reasonable inference: evidence may be connected to the decision through explicit mechanism chains and stated uncertainty boundaries.",
+            "",
+            "## foresight_hypothesis",
+            "Foresight hypothesis: future-facing claims are conditional hypotheses, not settled facts, and require counter-signals and failure conditions.",
+            "",
+            "scope: acceptance gate plus compact evidence packet; no raw artifact dump and no user-facing advice.",
+        ]
+    )
+
+
+COMPLETE_EXTERNAL_CALIBRATION_FIXTURE = (
+    "calibration_scope\n" + "Scope text. " * 80
+    + "claim_strength_table\n| Claim | Strength | Notes |\n| --- | --- | --- |\n"
+    "| A | supported | grounded in packet |\n"
+    "| B | plausible | bounded inference |\n"
+    "| C | speculative | needs confirmation |\n"
+    "| D | contradicted | conflict noted |\n"
+    + "over_inference_checks\n" + "No overreach. " * 60
+    + "contradiction_checks\n" + "Contradictions are labeled. " * 60
+    + "calibration_verdict\nverdict: calibrated for final controller handoff.\n"
+    "handoff_notes_for_final_controller\nUse calibrated claims only.\n"
+)
+
+
+COMPLETE_EXTERNAL_CALIBRATION_MINIMUM_FIELDS = "\n".join(
+    [
+        "calibration_verdict",
+        "Verdict: plausible and supported in bounded parts; speculative future-facing claims must stay conditional.",
+        "",
+        "agreement_points",
+        "Supported agreement points: convergence correctly preserves structural inversion, mechanism chains, and counter-signals.",
+        "",
+        "disagreement_or_risk_points",
+        "Plausible risk points: some claims may overstate transfer from current ADHD evidence to future AI environments.",
+        "",
+        "missing_considerations",
+        "Missing considerations: direct longitudinal evidence, school context variation, individual developmental differences, and tool-quality drift.",
+        "",
+        "final_adjustment_recommendation",
+        "Final adjustment recommendation: keep the convergence conclusion but label long-horizon individual predictions as speculative.",
+    ]
+)
 
 
 def test_research_decision_schema_has_exact_16_stage_order():
@@ -161,6 +230,42 @@ def test_research_decision_entry_uses_task_engine_runner_without_route_card_loop
     assert "route_card" not in serialized.lower()
     assert "deepseek-v4-flash" not in serialized.lower()
     assert "final_controller_report" in serialized
+
+
+def test_research_decision_full_is_archived_by_default(tmp_path: Path):
+    result = json.loads(
+        task_engine_runner(
+            query=ADHD_PROMPT,
+            mode=ENGINE_RESEARCH_DECISION,
+            action="full",
+            base_dir=str(tmp_path / "archived"),
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["pipeline_status"] == "PIPELINE_BLOCKED"
+    assert result["blocked_reason"] == "RESEARCH_DECISION_ARCHIVED"
+    assert result["mode"] == ENGINE_RESEARCH_DECISION
+    assert result["two_step_recommendation"] == [
+        "RESEARCH full -> research_evidence_packet.md",
+        "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
+    ]
+    assert result["allow_override"]["function_arg"] == "allow_archived_research_decision=True"
+
+
+def test_research_decision_dry_run_remains_available_when_archived(tmp_path: Path):
+    result = json.loads(
+        task_engine_runner(
+            query=ADHD_PROMPT,
+            mode=ENGINE_RESEARCH_DECISION,
+            action="dry-run",
+            base_dir=str(tmp_path / "dry"),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["mode"] == ENGINE_RESEARCH_DECISION
+    assert result["plan"]["stage_count"] == 16
 
 
 def test_task_mode_gate_allows_task_engine_and_blocks_legacy_paths():
@@ -567,9 +672,12 @@ def test_agy_adapter_matches_legacy_call_shape(monkeypatch, tmp_path: Path):
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
         return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "forced failure"})()
 
     monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setenv("GEMINI_DIR", ".gemini")
     monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
     monkeypatch.setattr(executors.subprocess, "run", fake_run)
 
@@ -582,16 +690,21 @@ def test_agy_adapter_matches_legacy_call_shape(monkeypatch, tmp_path: Path):
     else:
         raise AssertionError("forced AGY failure should raise")
 
-    assert len(calls) == 1
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    assert calls[0][0] == ["/opt/homebrew/bin/agy", "models"]
+    command, kwargs = calls[1]
     assert command[:2] == ["/opt/homebrew/bin/agy", "--log-file"]
     assert command[2].startswith("/private/tmp/agy-")
     assert command[3:8] == ["--model", GEMINI_HIGH, "-p", "prompt", "--print-timeout"]
-    assert command[8] == "240s"
-    assert kwargs["timeout"] == 270
+    assert command[8] == "600s"
+    assert kwargs["timeout"] == 630
+    assert Path(kwargs["cwd"]).is_absolute()
+    assert ".hermes" not in Path(kwargs["cwd"]).parts
+    assert kwargs["env"]["GEMINI_DIR"] == str(Path.home() / ".gemini")
     assert "canonical_model='Gemini 3.5 Flash (High)'" in message
     assert "actual_model='Gemini 3.5 Flash (High)'" in message
     assert "log_file='/private/tmp/agy-" in message
+    assert "agy_cwd=" in message
     assert "elapsed_seconds=" in message
     assert "command=" in message
     assert "forced failure" in message
@@ -600,6 +713,93 @@ def test_agy_adapter_matches_legacy_call_shape(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("HERMES_AGY_GEMINI_PRO_HIGH_MODEL", GEMINI_PRO_HIGH)
     assert resolve_agy_model_alias(GEMINI_HIGH) == GEMINI_HIGH
     assert resolve_agy_model_alias(GEMINI_PRO_HIGH) == GEMINI_PRO_HIGH
+
+
+def test_agy_timeout_is_layered_by_stage():
+    import tools.task_engine_executors as executors
+
+    assert executors._agy_timeout_for_stage(CANONICAL_STAGES[ENGINE_RESEARCH][0]) == 600
+    assert executors._agy_timeout_for_stage(CANONICAL_STAGES[ENGINE_RESEARCH][4]) == 600
+    assert executors._agy_timeout_for_stage(CANONICAL_STAGES[ENGINE_DECISION][0]) == 360
+    assert executors._agy_timeout_for_stage(CANONICAL_STAGES[ENGINE_DECISION][1]) == 240
+    external_stage = CANONICAL_STAGES[ENGINE_DECISION][8]
+    assert external_stage.stage_name == "external_calibration"
+    assert executors._agy_timeout_for_stage(external_stage) == 600
+
+
+def test_agy_printmode_timeout_after_auth_success_classification():
+    import tools.task_engine_executors as executors
+
+    log = """
+E log.go] error getting token source: You are not logged into Antigravity.
+I auth.go] ChainedAuth: authenticated via keyring (effective: keyring)
+I server_oauth.go] OAuth: authenticated successfully as user@example.test
+I model_resolver.go] Resolving model Gemini 3.5 Flash (High)
+I model_config_manager.go] Propagating selected model override to backend: label="Gemini 3.5 Flash (High)"
+I http_helpers.go] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse
+E printmode.go] Print mode: timed out after 1195 polls (printed=121)
+stdout: Error: timed out waiting for response
+"""
+
+    assert executors._agy_timeout_response(log) is True
+    assert executors._agy_printmode_timeout_after_auth_success(log, GEMINI_HIGH) is True
+    assert (
+        executors._agy_timeout_blocker_reason(log, GEMINI_HIGH, attempt=1)
+        == executors.AGY_PRINTMODE_TIMEOUT_AFTER_AUTH_SUCCESS
+    )
+
+
+def test_agy_print_timeout_takes_priority_over_keychain_false_negative():
+    import tools.task_engine_executors as executors
+
+    log = """
+You are not logged into Antigravity.
+OAuth: authenticated successfully
+stdout: Error: timed out waiting for response
+E printmode.go] Print mode: timed out after 1195 polls
+"""
+
+    assert executors._agy_timeout_response(log) is True
+    assert executors._agy_keychain_false_negative(log) is False
+    assert executors._agy_timeout_blocker_reason(log, GEMINI_HIGH, attempt=1) == executors.AGY_TIMEOUT_BLOCKED
+
+
+def test_agy_print_timeout_auth_uncertain_classification():
+    import tools.task_engine_executors as executors
+
+    log = """
+You are not logged into Antigravity.
+E printmode.go] Print mode: timed out after 1195 polls
+stdout: Error: timed out waiting for response
+"""
+
+    assert executors._agy_printmode_timeout_auth_uncertain(log) is True
+    assert (
+        executors._agy_timeout_blocker_reason(log, GEMINI_HIGH, attempt=1)
+        == executors.AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN
+    )
+
+
+def test_agy_subprocess_cwd_avoids_hidden_hermes(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    monkeypatch.setenv("HERMES_AGY_CWD", "/Users/xqdwww/.hermes/hermes-agent")
+
+    cwd = Path(executors._agy_subprocess_cwd())
+
+    assert cwd.is_absolute()
+    assert ".hermes" not in cwd.parts
+
+
+def test_agy_subprocess_env_absolutizes_gemini_dir(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    monkeypatch.setenv("GEMINI_DIR", ".gemini")
+
+    env = executors._agy_subprocess_env()
+
+    assert env["GEMINI_DIR"] == str(Path.home() / ".gemini")
+    assert executors._agy_gemini_dir_is_absolute(env) is True
 
 
 def test_agy_keychain_false_negative_classification():
@@ -652,6 +852,7 @@ def test_agy_preflight_retries_keychain_false_negative_once(monkeypatch):
 
     assert result["status"] == "AGY_OK"
     assert len(calls) == 2
+    assert all(command == ["/opt/homebrew/bin/agy", "models"] for command in calls)
     assert all("auth" not in command and "login" not in command for command in calls)
 
 
@@ -690,8 +891,11 @@ def test_run_agy_gemini_retries_keychain_false_negative_then_succeeds(monkeypatc
 
     def fake_run(command, **kwargs):
         calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        long_calls = [call for call in calls if call[-1] != "models"]
         log_file = Path(command[2])
-        if len(calls) == 1:
+        if len(long_calls) == 1:
             log_file.write_text("You are not logged into Antigravity.\nauthenticated via keyring\n", encoding="utf-8")
             return type("Result", (), {"returncode": 1, "stdout": "", "stderr": ""})()
         log_file.write_text("Resolving model Gemini 3.5 Flash (High)\n", encoding="utf-8")
@@ -706,7 +910,9 @@ def test_run_agy_gemini_retries_keychain_false_negative_then_succeeds(monkeypatc
     executor = LocalTaskEngineExecutor()
 
     assert executor.run_agy_gemini(stage, "prompt", GEMINI_HIGH) == "fresh AGY output"
-    assert len(calls) == 2
+    assert len(calls) == 3
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert len([call for call in calls if call[-1] != "models"]) == 2
     assert all("auth" not in command and "login" not in command for command in calls)
 
 
@@ -717,6 +923,8 @@ def test_run_agy_gemini_retries_keychain_false_negative_only_once(monkeypatch, t
 
     def fake_run(command, **kwargs):
         calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
         Path(command[2]).write_text(
             "You are not logged into Antigravity.\nsilent auth succeeded\n",
             encoding="utf-8",
@@ -737,8 +945,173 @@ def test_run_agy_gemini_retries_keychain_false_negative_only_once(monkeypatch, t
     else:
         raise AssertionError("AGY retry failure should block")
 
-    assert len(calls) == 2
+    assert len(calls) == 3
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
     assert "AGY_KEYCHAIN_TIMEOUT_FALSE_NEGATIVE" in message
+    assert "token" not in message.lower()
+
+
+def test_run_agy_gemini_retries_timeout_response_then_succeeds(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+    sleeps = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        long_calls = [call for call in calls if call[-1] != "models"]
+        Path(command[2]).write_text("Resolving model Gemini 3.5 Flash (High)\n", encoding="utf-8")
+        if len(long_calls) == 1:
+            return type("Result", (), {"returncode": 0, "stdout": "Error: timed out waiting for response\n", "stderr": ""})()
+        return type("Result", (), {"returncode": 0, "stdout": "fresh AGY output", "stderr": ""})()
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][0]
+    executor = LocalTaskEngineExecutor()
+
+    assert executor.run_agy_gemini(stage, "prompt", GEMINI_HIGH) == "fresh AGY output"
+    assert len(calls) == 3
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert sleeps == [executors.AGY_KEYCHAIN_RETRY_SLEEP_S]
+    assert all("auth" not in command and "login" not in command for command in calls)
+
+
+def test_run_agy_gemini_blocks_after_repeated_timeout_response_without_valid_artifact(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        Path(command[2]).write_text("Resolving model Gemini 3.5 Flash (High)\n", encoding="utf-8")
+        return type("Result", (), {"returncode": 0, "stdout": "Error: timed out waiting for response\n", "stderr": ""})()
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][0]
+    executor = LocalTaskEngineExecutor()
+
+    try:
+        executor.run_agy_gemini(stage, "prompt", GEMINI_HIGH)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("repeated AGY timeout response should block")
+
+    assert len(calls) == 3
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert "L1_gemini_search: AGY_CALL_BLOCKED" in message
+    assert "reason=AGY_TIMEOUT_BLOCKED" in message
+    assert "actual_model='Gemini 3.5 Flash (High)'" in message
+    assert "log_file='/private/tmp/agy-" in message
+    assert "stdout: Error: timed out waiting for response" in message
+    assert "token" not in message.lower()
+    assert not list(tmp_path.rglob("*.md"))
+
+
+def test_run_agy_gemini_timeout_expired_classifies_auth_uncertain_print_timeout(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        Path(command[2]).write_text(
+            "You are not logged into Antigravity.\nE printmode.go] Print mode: timed out after 1195 polls\n",
+            encoding="utf-8",
+        )
+        raise executors.subprocess.TimeoutExpired(
+            command,
+            kwargs["timeout"],
+            output="Error: timed out waiting for response\n",
+            stderr="",
+        )
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][0]
+    executor = LocalTaskEngineExecutor()
+
+    try:
+        executor.run_agy_gemini(stage, "prompt", GEMINI_HIGH)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("AGY print timeout should block")
+
+    assert len(calls) == 3
+    assert ["--print-timeout", "600s"] == calls[1][-2:]
+    assert "reason=AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN" in message
+    assert "AGY_KEYCHAIN_TIMEOUT_FALSE_NEGATIVE" not in message
+    assert "token" not in message.lower()
+
+
+def test_run_agy_gemini_runs_preflight_once_per_executor(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        Path(command[2]).write_text("Resolving model\n", encoding="utf-8")
+        return type("Result", (), {"returncode": 0, "stdout": "fresh AGY output", "stderr": ""})()
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+
+    executor = LocalTaskEngineExecutor()
+    assert executor.run_agy_gemini(CANONICAL_STAGES[ENGINE_RESEARCH][0], "prompt 1", GEMINI_HIGH) == "fresh AGY output"
+    assert executor.run_agy_gemini(CANONICAL_STAGES[ENGINE_RESEARCH][4], "prompt 2", GEMINI_PRO_HIGH) == "fresh AGY output"
+
+    assert [call for call in calls if call[-1] == "models"] == [["/opt/homebrew/bin/agy", "models"]]
+    assert len([call for call in calls if call[-1] != "models"]) == 2
+
+
+def test_run_agy_gemini_blocks_before_long_prompt_when_preflight_fails(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert command[-1] == "models"
+        return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "You are not logged into Antigravity."})()
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    executor = LocalTaskEngineExecutor()
+    try:
+        executor.run_agy_gemini(CANONICAL_STAGES[ENGINE_RESEARCH][0], "long prompt", GEMINI_HIGH)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("preflight failure should block before AGY long prompt")
+
+    assert calls == [["/opt/homebrew/bin/agy", "models"]]
+    assert "L1_gemini_search: AGY_PREFLIGHT_BLOCKED" in message
+    assert "AGY_AUTH_REQUIRES_USER" in message
     assert "token" not in message.lower()
 
 
@@ -1116,6 +1489,275 @@ def test_evidence_judge_rejects_forbidden_actual_model_alias(monkeypatch):
             assert "forbidden Nemotron-120B actual model alias" in str(exc)
         else:
             raise AssertionError(f"evidence_judge must reject forbidden actual model alias: {bad}")
+
+
+def test_evidence_judge_omlx_retries_empty_content_with_reload(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    class FakeAdmin:
+        def __init__(self, base_url, api_key):
+            calls.append(("admin_init", base_url, bool(api_key)))
+
+        def login(self):
+            calls.append(("login",))
+            return True
+
+        def unload_all(self):
+            calls.append(("unload_all",))
+
+        def load_model(self, model_id):
+            calls.append(("load_model", model_id))
+            return {"success": True}
+
+        def unload_model(self, model_id):
+            calls.append(("unload_model", model_id))
+            return {"success": True}
+
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+        calls.append(("chat", model, bool(api_key), timeout, max_tokens))
+        if len([call for call in calls if call[0] == "chat"]) == 1:
+            return {"choices": [{"message": {"content": ""}}]}
+        return {"choices": [{"message": {"content": "evidence_quality_map\nstrength_by_claim"}}]}
+
+    monkeypatch.setenv("OMLX_API_KEY", "omlx-test-key")
+    monkeypatch.delenv("HERMES_OMLX_NEMOTRON120B_MODEL", raising=False)
+    monkeypatch.setattr(executors, "_OmlxAdmin", FakeAdmin)
+    monkeypatch.setattr(executors, "_omlx_chat_completion", fake_chat)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    executor = LocalTaskEngineExecutor()
+    output = executor.run_omlx_model(stage, NEMOTRON120B, "prompt")
+
+    assert "evidence_quality_map" in output
+    assert len([call for call in calls if call[0] == "chat"]) == 2
+    assert all(call[-1] == 512 for call in calls if call[0] == "chat")
+    assert len([call for call in calls if call[0] == "load_model"]) == 2
+    assert calls.count(("unload_all",)) == 2
+    assert executor.last_omlx_diagnostics["evidence_judge"]["attempt"] == "first"
+
+
+def test_omlx_empty_content_diagnostic_classifies_error_object():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    data = {
+        "error": {
+            "message": "oMLX prefill memory guard rejected this prompt",
+            "code": "prefill_memory_exceeded",
+        },
+        "type": "server_error",
+    }
+
+    diagnostic = executors._omlx_empty_content_diagnostic(
+        stage,
+        NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+        data,
+        attempt="final",
+    )
+
+    assert diagnostic["empty_content"] is True
+    assert diagnostic["empty_content_kind"] == "response_error_object"
+    assert diagnostic["choices_type"] == "missing"
+    assert diagnostic["choices_len"] == 0
+    assert diagnostic["error_type"] == "server_error"
+    assert "prefill_memory_exceeded" in diagnostic["error_summary"]
+    assert diagnostic["blocked_reason"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
+    assert diagnostic["raw_error_code"] == "prefill_memory_exceeded"
+
+
+def test_evidence_judge_prefill_memory_guard_diagnostic_records_request_context(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    class FakeAdmin:
+        def __init__(self, base_url, api_key):
+            self.loaded = {"Qwen2.5-72B-Instruct-abliterated-mlx-4Bit"}
+
+        def login(self):
+            return True
+
+        def get_models(self):
+            ids = [
+                "Qwen2.5-72B-Instruct-abliterated-mlx-4Bit",
+                NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+            ]
+            return [{"id": model_id, "loaded": model_id in self.loaded} for model_id in ids]
+
+        def unload_all(self):
+            calls.append(("unload_all", sorted(self.loaded)))
+            self.loaded.clear()
+
+        def load_model(self, model_id):
+            calls.append(("load_model", model_id))
+            self.loaded.add(model_id)
+            return {"success": True}
+
+        def unload_model(self, model_id):
+            calls.append(("unload_model", model_id))
+            self.loaded.discard(model_id)
+            return {"success": True}
+
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+        calls.append(("chat", model, len(messages), max_tokens))
+        raise RuntimeError(
+            'OMLX chat HTTP 400: {"error":{"message":"oMLX prefill memory guard rejected this prompt",'
+            '"code":"prefill_memory_exceeded","omlx_code":"prefill_memory_exceeded"}}'
+        )
+
+    monkeypatch.setenv("OMLX_API_KEY", "secret-test-key")
+    monkeypatch.delenv("HERMES_OMLX_EVIDENCE_JUDGE_MAX_TOKENS", raising=False)
+    monkeypatch.setattr(executors, "_OmlxAdmin", FakeAdmin)
+    monkeypatch.setattr(executors, "_omlx_chat_completion", fake_chat)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    executor = LocalTaskEngineExecutor()
+    prompt = "judge evidence without storing full prompt secret-test-key"
+
+    try:
+        executor.run_omlx_model(stage, NEMOTRON120B, prompt)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("prefill memory guard must block evidence_judge")
+
+    diagnostic = executor.last_omlx_diagnostics["evidence_judge"]
+    diagnostic_text = json.dumps(diagnostic, ensure_ascii=False, default=str)
+
+    assert "OMLX_PREFILL_MEMORY_GUARD_BLOCKED" in message
+    assert diagnostic["blocked_reason"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
+    assert diagnostic["prompt_chars"] == len(prompt)
+    assert diagnostic["prompt_estimated_tokens"] >= 1
+    assert diagnostic["message_count"] == 1
+    assert diagnostic["system_message_chars"] == 0
+    assert diagnostic["user_message_chars"] == len(prompt)
+    assert diagnostic["max_tokens"] == 512
+    assert diagnostic["temperature"] == 0
+    assert diagnostic["stream"] is False
+    assert diagnostic["actual_model"] == NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+    assert diagnostic["endpoint"].endswith("/v1/chat/completions")
+    assert diagnostic["loaded_models_before_unload"] == ["Qwen2.5-72B-Instruct-abliterated-mlx-4Bit"]
+    assert diagnostic["loaded_models_after_unload"] == []
+    assert diagnostic["loaded_models_after_load"] == [NEMOTRON120B_ACTUAL_MODEL_DEFAULT]
+    assert diagnostic["compact_mode_used"] is False
+    assert diagnostic["compact_budget"] is None
+    assert diagnostic["retry_attempt"] == "final"
+    assert diagnostic["raw_error_code"] == "prefill_memory_exceeded"
+    assert "raw_error_summary" in diagnostic
+    assert "prompt_hash" in diagnostic
+    assert prompt not in diagnostic_text
+    assert "secret-test-key" not in diagnostic_text
+    assert any(call == ("chat", NEMOTRON120B_ACTUAL_MODEL_DEFAULT, 1, 512) for call in calls)
+
+
+def test_omlx_empty_content_diagnostic_keeps_non_prefill_classification():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    diagnostic = executors._omlx_empty_content_diagnostic(
+        stage,
+        NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+        {"choices": [{"message": {"content": ""}}]},
+        attempt="final",
+        request_context={
+            "prompt_chars": 12,
+            "max_tokens": 512,
+            "loaded_models_before_unload": [],
+            "loaded_models_after_unload": [],
+            "loaded_models_after_load": [NEMOTRON120B_ACTUAL_MODEL_DEFAULT],
+            "compact_mode_used": False,
+        },
+    )
+
+    assert diagnostic["blocked_reason"] == "OMLX_EMPTY_CONTENT_BLOCKED"
+    assert diagnostic["empty_content_kind"] == "empty_content_string"
+    assert diagnostic["raw_error_code"] == ""
+    assert diagnostic["prompt_chars"] == 12
+
+
+def test_evidence_judge_empty_content_blocks_and_writes_diagnostic(tmp_path: Path):
+    class EmptyEvidenceExecutor(LocalTaskEngineExecutor):
+        def run_omlx_model(self, stage, model, prompt):
+            if stage.stage_name == "evidence_judge":
+                self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+                self.last_omlx_diagnostics[stage.stage_name] = {
+                    "stage_name": stage.stage_name,
+                    "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+                    "attempt": "final",
+                    "choices_len": 1,
+                    "content_length": 0,
+                    "empty_content": True,
+                }
+                raise RuntimeError("evidence_judge: OMLX_EMPTY_CONTENT_BLOCKED: Nemotron-120B returned empty content")
+            raise AssertionError("Only evidence_judge should run in this targeted smoke")
+
+    base = tmp_path
+    stage_names = [
+        "L1_gemini_search",
+        "L2_ddgs_supplement",
+        "L2_5_codex_evidence_organizer",
+        "L3_r1_synthesis",
+        "L4_gemini_audit",
+        "L5_deepseek_acceptance",
+        "intelligence_layer",
+        "supplementary_search",
+        "structure_mapper",
+    ]
+    prior_stages = []
+    specs = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION]
+    for idx, name in enumerate(stage_names):
+        spec = specs[idx]
+        stage_dir = base / name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        if name == "L2_5_codex_evidence_organizer":
+            artifact_path = stage_dir
+            outputs = {}
+            for required in spec.required_outputs:
+                path = stage_dir / required
+                path.write_text("fresh", encoding="utf-8")
+                outputs[required] = str(path)
+        else:
+            output_name = spec.required_outputs[0] if spec.required_outputs != ("artifact_path",) else "report.md"
+            artifact_path = stage_dir / output_name
+            if name == "L5_deepseek_acceptance":
+                artifact_path.write_text(_complete_research_evidence_packet_text(), encoding="utf-8")
+            else:
+                artifact_path.write_text("fresh", encoding="utf-8")
+            outputs = {output_name: str(artifact_path)} if spec.required_outputs != ("artifact_path",) else {}
+        record = {
+            "stage_name": name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact_path),
+            "outputs": outputs,
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+        }
+        if name == "L5_deepseek_acceptance":
+            record["status"] = "accepted"
+        prior_stages.append(record)
+
+    result = run_research_decision_evidence_judge_smoke(
+        {"mode": ENGINE_RESEARCH_DECISION, "stages": prior_stages},
+        query=ADHD_PROMPT,
+        base_dir=base,
+        executor=EmptyEvidenceExecutor(),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "evidence_judge"
+    error = result["run"]["stages"][-1]["error"]
+    assert "OMLX_EMPTY_CONTENT_BLOCKED" in error
+    diagnostic = base / "evidence_judge" / "evidence_judge.diagnostic.json"
+    assert diagnostic.exists()
+    assert "diagnostic_artifact=" in error
+    data = json.loads(diagnostic.read_text(encoding="utf-8"))
+    assert data["empty_content"] is True
+    assert data["actual_model"] == NEMOTRON120B_ACTUAL_MODEL_DEFAULT
 
 
 def test_premise_auditor_omlx_uses_actual_llama70b_and_retries_incomplete_read(monkeypatch):
@@ -1588,6 +2230,672 @@ def test_l5_output_does_not_contain_final_report_terms(tmp_path: Path):
     assert "长期发展的路线" not in packet
 
 
+def test_internal_profiles_detect_foresight_mechanism_without_new_mode():
+    import tools.task_engine_executors as executors
+
+    profiles = executors._task_engine_profiles_from_query(
+        "这是一个研究决策任务。未来10年 AI 降低知识获取成本后，ADHD 儿童优势/缺陷如何结构性反转？"
+    )
+
+    assert executors.PROFILE_FORESIGHT_MECHANISM in profiles
+    assert len(CANONICAL_STAGES[ENGINE_RESEARCH]) == 6
+    assert len(CANONICAL_STAGES[ENGINE_DECISION]) == 10
+    assert len(CANONICAL_STAGES[ENGINE_RESEARCH_DECISION]) == 16
+    assert CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9].stage_name == "evidence_judge"
+    assert CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9].model == NEMOTRON120B
+    assert CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][13].stage_name == "convergence_report"
+    assert CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][13].model == R1_32B
+
+
+def test_internal_profiles_keep_medical_review_evidence_grounded():
+    import tools.task_engine_executors as executors
+
+    profiles = executors._task_engine_profiles_from_query("ADHD 儿童最新医学研究进展、治疗方案和指南证据综述")
+
+    assert profiles == [executors.PROFILE_EVIDENCE_GROUNDED]
+    assert executors.PROFILE_FORESIGHT_MECHANISM not in profiles
+
+
+def test_foresight_profile_guidance_enters_l1_prompt_only_for_foresight():
+    import tools.task_engine_executors as executors
+
+    foresight = executors._gemini_search_prompt(
+        "未来10年 AI 降低知识获取成本后，ADHD 儿童优势/缺陷如何结构性反转？"
+    )
+    medical = executors._gemini_search_prompt("ADHD 儿童最新医学研究进展、治疗方案和指南证据综述")
+
+    assert "evidence_support" in foresight
+    assert "reasonable_inference" in foresight
+    assert "foresight_hypothesis" in foresight
+    assert "mechanism_chain" in foresight
+    assert "uncertainty_boundary" in foresight
+    assert "counterexample_or_failure" in foresight
+    assert "Return source candidates as concise JSON-compatible notes" in foresight
+    assert "max 8 source_candidates" in foresight
+    assert "coverage_axes" in foresight
+    assert "authoritative_guideline_or_consensus" in foresight
+    assert "systematic_review_or_meta_analysis" in foresight
+    assert "empirical_study_or_RCT" in foresight
+    assert "mechanism_or_theory" in foresight
+    assert "intervention_or_practice" in foresight
+    assert "local_or_contextual_source" in foresight
+    assert "controversy_or_counterevidence" in foresight
+    assert "recent_update" in foresight
+    assert "evidence_type, coverage_axis, and why_relevant" in foresight
+    assert "known_gaps_for_L2" in foresight
+    assert "do not present L1 inference as evidence" in foresight
+    assert "Do not write long analysis" in foresight
+    assert "final-style prose" in foresight
+    assert "Return strict JSON only" not in foresight
+    assert "max 6 source_candidates" not in foresight
+    assert "foresight_hypothesis" not in medical
+    assert "mechanism_chain" not in medical
+
+
+def test_foresight_profile_guidance_enters_l3_and_l4_prompts(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = []
+    for name in ("L1_gemini_search", "L2_ddgs_supplement", "L2_5_codex_evidence_organizer"):
+        stage_dir = tmp_path / name
+        stage_dir.mkdir()
+        artifact = stage_dir / ("report.md" if name != "L2_5_codex_evidence_organizer" else "claims.md")
+        artifact.write_text("fresh evidence", encoding="utf-8")
+        stages.append({
+            "stage_name": name,
+            "artifact_path": str(artifact),
+            "outputs": {},
+        })
+    l3_prompt = executors._r1_synthesis_prompt_from_artifacts(
+        stages,
+        base_dir=tmp_path,
+        query="未来10年 AI 结构性反转 机制推理",
+    )
+    assert "evidence_support" in l3_prompt
+    assert "reasonable_inference" in l3_prompt
+    assert "foresight_hypothesis" in l3_prompt
+    assert "counterexample_or_failure" in l3_prompt
+
+    l3_dir = tmp_path / "L3_r1_synthesis"
+    l3_dir.mkdir()
+    l3_artifact = l3_dir / "r1_synthesis.md"
+    l3_artifact.write_text("fresh synthesis", encoding="utf-8")
+    l4_prompt = executors._gemini_audit_prompt_from_artifacts(
+        stages + [{"stage_name": "L3_r1_synthesis", "artifact_path": str(l3_artifact), "outputs": {}}],
+        base_dir=tmp_path,
+        query="未来10年 AI 结构性反转 机制推理",
+    )
+    assert "Audit whether L3 explicitly separates evidence_support" in l4_prompt
+    assert "uncertainty_boundary" in l4_prompt
+
+
+def test_decision_prompt_can_accept_research_packet_path_without_research_stages(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text(
+        "verdict: ACCEPTED\naccepted: true\nclaim: research packet evidence summary\nexecutor_model: hidden-metadata\n",
+        encoding="utf-8",
+    )
+
+    prompt = executors._decision_intelligence_prompt(
+        "这是一个决策任务。请基于研究包判断。",
+        base_dir=tmp_path / "decision",
+        research_packet_path=packet,
+    )
+
+    assert "optional_research_evidence_packet_context" in prompt
+    assert "research_packet_path:" in prompt
+    assert "research packet evidence summary" in prompt
+    assert "research_packet_digest:" in prompt
+    assert "do not dump raw research packet into the final report" in prompt
+    assert "do not run or invent RESEARCH L1-L5 artifacts" in prompt
+    assert "L1_gemini_search" not in prompt
+    assert "L5_deepseek_acceptance" not in prompt
+    assert "executor_model:" not in prompt
+
+
+def test_decision_research_packet_context_prioritizes_fixed_section_digest(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text(
+        "verdict: ACCEPTED\naccepted: true\nraw preface should not be the digest\n\n"
+        "## evidence_strength\nStrong evidence section for DECISION use.\n\n"
+        "## controversy\nControversy section for DECISION use.\n\n"
+        "## evidence_gap\nEvidence gap section for DECISION use.\n\n"
+        "## evidence_supported\nEvidence supported section for DECISION use.\n\n"
+        "## reasonable_inference\nReasonable inference section for DECISION use.\n\n"
+        "## foresight_hypothesis\nForesight hypothesis section for DECISION use.\n",
+        encoding="utf-8",
+    )
+
+    context = executors._decision_research_packet_context(packet)
+
+    assert "research_packet_digest:" in context
+    assert "## evidence_strength" in context
+    assert "## reasonable_inference" in context
+    assert "## foresight_hypothesis" in context
+    assert "raw preface should not be the digest" not in context
+
+
+def test_l5_packet_records_foresight_acceptance_requirements(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    records = []
+    for name in ("L1_gemini_search", "L2_ddgs_supplement", "L2_5_codex_evidence_organizer", "L3_r1_synthesis", "L4_gemini_audit"):
+        stage_dir = tmp_path / name
+        stage_dir.mkdir()
+        artifact = stage_dir / "artifact.md"
+        artifact.write_text("证据 evidence。合理推断。前瞻假设。机制链条。uncertainty_boundary。counterexample_or_failure。", encoding="utf-8")
+        records.append({"stage_name": name, "artifact_path": str(artifact), "outputs": {}})
+
+    packet = executors._research_acceptance_packet_from_artifacts(
+        records,
+        base_dir=tmp_path,
+        query="未来10年 AI 结构性反转 机制推理",
+    )
+
+    assert executors.PROFILE_FORESIGHT_MECHANISM in packet["research_packet_profile"]
+    joined = "\n".join(packet["profile_acceptance_requirements"])
+    assert "evidence / inference / hypothesis distinction" in joined
+    assert "mechanism_chain" in joined
+    assert "uncertainty_boundary" in joined
+    assert "counterexample_or_failure" in joined
+    requirement_map = packet["artifact_summaries"]["_foresight_requirement_map"]
+    assert "uncertainty_boundary: detected" in requirement_map
+    assert "counterexample_or_failure: detected" in requirement_map
+
+
+def test_l5_research_packet_quality_blocks_missing_fixed_sections():
+    import tools.task_engine_executors as executors
+
+    thin = (
+        "research_evidence_packet\n"
+        "verdict: ACCEPTED\n"
+        "accepted: true\n"
+        "evidence_packet_ready_for_decision: true\n"
+        "audit_summary: accepted\n"
+    )
+
+    error = executors._research_evidence_packet_quality_error(thin)
+
+    assert error.startswith("missing_research_packet_sections:")
+    assert "evidence_strength" in error
+    assert "foresight_hypothesis" in error
+
+
+def test_l5_research_packet_quality_blocks_acceptance_summary_only():
+    import tools.task_engine_executors as executors
+
+    section_body = "Requirements satisfied and accepted for decision handoff only. No reusable content is provided."
+    text = "\n".join(
+        [
+            "research_evidence_packet",
+            "verdict: ACCEPTED",
+            "accepted: true",
+            "evidence_packet_ready_for_decision: true",
+            "",
+            *[f"## {heading}\n{section_body}\n" for heading in executors.RESEARCH_PACKET_FIXED_HEADINGS],
+        ]
+    )
+
+    assert executors._research_evidence_packet_quality_error(text) == "acceptance_summary_only"
+
+
+def test_l5_research_packet_quality_blocks_raw_metadata():
+    import tools.task_engine_executors as executors
+
+    text = _complete_research_evidence_packet_text() + "\nexecutor_model: hidden\n"
+
+    assert executors._research_evidence_packet_quality_error(text) == "raw_metadata_leak"
+
+
+def test_l5_research_packet_quality_accepts_compact_evidence_packet():
+    import tools.task_engine_executors as executors
+
+    text = _complete_research_evidence_packet_text()
+
+    assert "verdict: ACCEPTED" in text
+    assert "accepted: true" in text
+    assert executors._research_evidence_packet_quality_error(text) == ""
+    executors._assert_artifact_quality(CANONICAL_STAGES[ENGINE_RESEARCH][-1], text)
+
+
+def test_foresight_l5_maps_boundary_and_counterexample_synonyms():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "artifact_summaries": {
+            "L3_r1_synthesis": (
+                "基础证据 evidence。合理推断 hypothesis。输入变量 → 中介机制 → 输出变量构成机制链条。"
+                "边界条件包括 AI 反馈质量与学校要求；失效条件是孩子不保留验证步骤。"
+                "反证信号包括兴趣驱动下降和延迟反馈耐受没有改善。"
+            )
+        },
+    }
+
+    assert executors._research_packet_profile_acceptance_issues(packet) == []
+
+
+def test_foresight_l5_accepts_without_direct_future_evidence_when_boundaries_present():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "artifact_summaries": {
+            "L1_gemini_search": "基础证据来自 ADHD 执行功能研究和学习支持 evidence basis。",
+            "L3_r1_synthesis": (
+                "这不是直接未来证据，而是合理推断 / hypothesis。"
+                "输入变量 → 中介机制 → 输出变量构成机制链条。"
+                "不确定性边界明确，置信中等；反例和失败条件包括学校环境不变、AI 使用缺少验证。"
+            ),
+            "L4_gemini_audit": "未把前瞻假设伪装成医学定论。",
+        },
+    }
+
+    assert executors._research_packet_profile_acceptance_issues(packet) == []
+
+
+def test_foresight_l5_rejects_missing_uncertainty_or_counterexample():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "artifact_summaries": {
+            "L3_r1_synthesis": "基础证据 evidence。合理推断 hypothesis。机制链条：输入变量 → 中介机制 → 输出变量。"
+        },
+    }
+
+    issues = executors._research_packet_profile_acceptance_issues(packet)
+
+    assert "foresight_mechanism_missing:uncertainty_boundary" in issues
+    assert "foresight_mechanism_missing:counterexample_or_failure" in issues
+
+
+def test_output_quality_profile_blocks_foresight_final_without_mechanism_chain():
+    import tools.task_engine_executors as executors
+
+    text = "# 前瞻报告\n\n关键驱动变量：AI。确定性等级：中。情景分叉：A/B。可观察指标：核查事实。"
+    errors = executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_FORESIGHT_MECHANISM],
+        stage_name="final_controller_report",
+    )
+
+    assert "missing_mechanism_chain" in errors
+
+
+def test_convergence_report_foresight_prompt_requires_quality_fields(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = []
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][:13]:
+        stage_dir = tmp_path / spec.stage_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        artifact = stage_dir / "artifact.md"
+        artifact.write_text("fresh stage artifact", encoding="utf-8")
+        stages.append({
+            "stage_name": spec.stage_name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact),
+            "outputs": {},
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+        })
+
+    prompt = executors._convergence_report_prompt_from_artifacts(
+        stages,
+        query="未来10年 AI 结构性反转 ADHD 机制推理",
+        base_dir=tmp_path,
+    )
+
+    assert "key_drivers" in prompt
+    assert "mechanism_chain" in prompt
+    assert "scenario_branches" in prompt
+    assert "counter_signals" in prompt
+    assert "falsification_signals" in prompt
+    assert "uncertainty_boundary" in prompt
+    assert "certainty_levels" in prompt
+    assert "Do not rename these headings" in prompt
+    assert "## key_drivers" in prompt
+    assert "## mechanism_chain" in prompt
+    assert "## scenario_branches" in prompt
+    assert "## counter_signals" in prompt
+    assert "## certainty_levels" in prompt
+    assert "## uncertainty_boundary" in prompt
+
+
+def _decision_prior_stage_records(tmp_path: Path) -> list[dict[str, object]]:
+    stages: list[dict[str, object]] = []
+    for spec in CANONICAL_STAGES[ENGINE_DECISION][:7]:
+        stage_dir = tmp_path / spec.stage_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        artifact = stage_dir / spec.required_outputs[0]
+        artifact.write_text(f"{spec.stage_name} fresh artifact", encoding="utf-8")
+        stages.append({
+            "stage_name": spec.stage_name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact),
+            "outputs": {spec.required_outputs[0]: str(artifact)},
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+        })
+    return stages
+
+
+def _decision_final_prior_stage_records(tmp_path: Path) -> list[dict[str, object]]:
+    stages: list[dict[str, object]] = []
+    for spec in CANONICAL_STAGES[ENGINE_DECISION][:9]:
+        stage_dir = tmp_path / spec.stage_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        artifact = stage_dir / spec.required_outputs[0]
+        artifact.write_text(f"{spec.stage_name} fresh artifact", encoding="utf-8")
+        stages.append({
+            "stage_name": spec.stage_name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact),
+            "outputs": {spec.required_outputs[0]: str(artifact)},
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+        })
+    return stages
+
+
+def test_decision_convergence_prompt_with_research_packet_requires_fixed_foresight_headings(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text("compact research packet digest", encoding="utf-8")
+    stage = CANONICAL_STAGES[ENGINE_DECISION][7]
+
+    prompt = executors._decision_stage_prompt(
+        stage,
+        _decision_prior_stage_records(tmp_path),
+        query="未来10年 AI 降低知识获取成本后 ADHD 结构性反转 decision",
+        base_dir=tmp_path,
+        research_packet_path=packet,
+    )
+
+    for heading in (
+        "## key_drivers",
+        "## mechanism_chain",
+        "## scenario_branches",
+        "## counter_signals",
+        "## certainty_levels",
+        "## uncertainty_boundary",
+    ):
+        assert heading in prompt
+    assert "Do not rename these headings" in prompt
+    assert "Do not translate these headings" in prompt
+    assert "Do not merge these headings" in prompt
+    assert "Do not omit these headings" in prompt
+    assert "research_packet_digest" in prompt
+
+
+def test_decision_convergence_prompt_standalone_and_research_packet_paths_match_fixed_headings(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][7]
+    stages = _decision_prior_stage_records(tmp_path)
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text("compact research packet digest", encoding="utf-8")
+    kwargs = {
+        "stage": stage,
+        "stages": stages,
+        "query": "future scenario structural reversal for ADHD and AI",
+        "base_dir": tmp_path,
+    }
+
+    standalone = executors._decision_stage_prompt(**kwargs)
+    with_packet = executors._decision_stage_prompt(**kwargs, research_packet_path=packet)
+
+    fixed_headings = (
+        "## key_drivers",
+        "## mechanism_chain",
+        "## scenario_branches",
+        "## counter_signals",
+        "## certainty_levels",
+        "## uncertainty_boundary",
+    )
+    for heading in fixed_headings:
+        assert heading in standalone
+        assert heading in with_packet
+
+
+def test_decision_convergence_prompt_does_not_add_foresight_headings_for_evidence_grounded(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    prompt = executors._decision_stage_prompt(
+        CANONICAL_STAGES[ENGINE_DECISION][7],
+        _decision_prior_stage_records(tmp_path),
+        query="ADHD 儿童医学研究进展和治疗方案证据综述",
+        base_dir=tmp_path,
+    )
+
+    assert "## key_drivers" not in prompt
+    assert "## mechanism_chain" not in prompt
+    assert "## scenario_branches" not in prompt
+    assert "## counter_signals" not in prompt
+    assert "## certainty_levels" not in prompt
+
+
+def test_convergence_report_foresight_quality_gate_blocks_missing_fields():
+    import tools.task_engine_executors as executors
+
+    text = "convergence_decision_framework\n确定性等级：中。"
+    errors = executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_FORESIGHT_MECHANISM],
+        stage_name="convergence_report",
+    )
+
+    assert "missing_key_drivers" in errors
+    assert "missing_mechanism_chain" in errors
+    assert "missing_scenario_branches" in errors
+    assert "missing_counter_signals" in errors
+
+
+def test_convergence_report_foresight_quality_gate_blocks_missing_certainty_levels():
+    import tools.task_engine_executors as executors
+
+    text = (
+        "## key_drivers\nAI feedback cost.\n"
+        "## mechanism_chain\ninput variable -> mediating mechanism -> output variable.\n"
+        "## scenario_branches\nScenario A verifies; Scenario B does not.\n"
+        "## counter_signals\nobservable signal shows no decline.\n"
+        "## uncertainty_boundary\nevidence stops at current research."
+    )
+    errors = executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_FORESIGHT_MECHANISM],
+        stage_name="convergence_report",
+    )
+
+    assert "missing_certainty_levels" in errors
+
+
+def test_convergence_report_foresight_quality_gate_accepts_required_fields():
+    import tools.task_engine_executors as executors
+
+    text = (
+        "## key_drivers\nAI feedback cost, task selection pressure.\n"
+        "## mechanism_chain\ninput variable -> mediating mechanism -> output variable.\n"
+        "## scenario_branches\nScenario A keeps verification; Scenario B outsources verification.\n"
+        "## counter_signals\nfalsification_signals: observable signal shows no decline in validation behavior.\n"
+        "## certainty_levels\nhigh / medium / low.\n"
+        "## uncertainty_boundary\nevidence stops at current ADHD and learning-support research."
+    )
+
+    assert executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_FORESIGHT_MECHANISM],
+        stage_name="convergence_report",
+    ) == []
+
+
+def test_output_quality_profile_accepts_future_scenario_alias_with_fixed_headings():
+    import tools.task_engine_executors as executors
+
+    text = (
+        "## key_drivers\nAI.\n"
+        "## mechanism_chain\ninput variable -> mediating mechanism -> output variable.\n"
+        "## scenario_branches\nScenario A; Scenario B.\n"
+        "## counter_signals\nobservable signal.\n"
+        "## certainty_levels\nhigh / medium / low.\n"
+        "## uncertainty_boundary\nboundary."
+    )
+
+    assert executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_FUTURE_SCENARIO],
+        stage_name="convergence_report",
+    ) == []
+
+
+def test_output_quality_profile_accepts_foresight_structure_inside_user_sections():
+    import tools.task_engine_executors as executors
+
+    text = (
+        "## 未来优势变陷阱 Top5\n关键驱动变量：AI 降低知识获取成本。确定性等级：高 / 中 / 低。\n"
+        "## 未来缺陷变优势 Top5\n输入变量 → 中介机制 → 输出变量：低价值重复减少 → 任务价值敏感度提升 → 筛选优势。\n"
+        "## 最危险的错误培养路径\n情景分叉：情景 A 保留验证；情景 B 替代判断。\n"
+        "## danger_flag\n可观察指标 / 反证信号：是否保留推理痕迹。"
+    )
+
+    assert executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_FORESIGHT_MECHANISM],
+        stage_name="final_controller_report",
+    ) == []
+
+
+def test_user_forbids_advice_still_blocks_advice_terms():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "这是一个决策任务。不要建议，不要培养计划，不要文献综述。",
+        "output_quality_profile": [executors.PROFILE_EVIDENCE_GROUNDED],
+    }
+
+    try:
+        executors._assert_final_controller_packet_quality(packet, "# 决策任务最终报告\n\n## 下一步\n建议方向：专业评估。")
+    except RuntimeError as exc:
+        assert "forbidden_user_terms" in str(exc)
+    else:
+        raise AssertionError("user-forbidden advice terms must be blocked")
+
+
+def test_decision_final_packet_with_research_packet_requires_evidence_boundary_keys(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    research_packet = tmp_path / "research_evidence_packet.md"
+    research_packet.write_text("compact research packet digest", encoding="utf-8")
+
+    packet = executors._decision_final_controller_packet(
+        _decision_final_prior_stage_records(tmp_path),
+        query="未来10年 AI 降低知识获取成本后 ADHD 结构性反转 decision，需要证据边界",
+        base_dir=tmp_path,
+        research_packet_path=research_packet,
+    )
+
+    requirements = packet["final_report_requirements"]
+    assert requirements["evidence_boundary_required"] is True
+    assert requirements["evidence_boundary_heading"] == "## 证据边界"
+    assert requirements["evidence_boundary_keys"] == ["evidence_strength", "controversy", "evidence_gap"]
+    assert "not a literature review" in requirements["evidence_boundary_policy"]
+
+
+def test_final_controller_quality_blocks_evidence_grounded_without_boundary_fields():
+    import tools.task_engine_executors as executors
+
+    errors = executors._quality_profile_errors(
+        "# 决策任务最终报告\n\n## 结论\n只有判断，没有边界字段。",
+        [executors.PROFILE_EVIDENCE_GROUNDED],
+        stage_name="final_controller_report",
+    )
+
+    assert "missing_evidence_strength" in errors
+    assert "missing_controversy" in errors
+    assert "missing_gap" in errors
+
+
+def test_final_controller_quality_accepts_short_evidence_boundary_section():
+    import tools.task_engine_executors as executors
+
+    text = "\n".join([
+        "# 决策任务最终报告",
+        "",
+        "## 证据边界",
+        "evidence_strength: strong for ADHD execution support; medium for AI-mediated feedback; weak for ten-year individual forecasts.",
+        "controversy: structural reversal depends on school context, tool design, and verification habits.",
+        "evidence_gap: no direct longitudinal evidence for a 100x lower knowledge-cost environment.",
+    ])
+
+    assert executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_EVIDENCE_GROUNDED],
+        stage_name="final_controller_report",
+    ) == []
+
+
+def test_user_forbids_literature_review_allows_short_evidence_boundary():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": _decision_future_query(),
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "research_evidence_packet_context": "research_packet_excerpt: compact digest only",
+    }
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 证据边界" in text
+    assert "evidence_strength:" in text
+    assert "controversy:" in text
+    assert "evidence_gap:" in text
+    assert "文献综述" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_report_with_evidence_boundary_does_not_emit_raw_metadata():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": _decision_future_query(),
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "research_evidence_packet_context": (
+            "research_packet_path: /tmp/research_evidence_packet.md\n"
+            "research_packet_excerpt:\n"
+            "artifact_path: raw/path\nexecutor_model: raw model\nvalid_for_pipeline: true\n"
+        ),
+    }
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "artifact_path:" not in text
+    assert "executor_model:" not in text
+    assert "valid_for_pipeline:" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
 def test_research_decision_intelligence_uses_gemini_high_and_stops_before_stage8(tmp_path: Path):
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
@@ -1816,6 +3124,10 @@ def test_agy_preflight_success_lists_required_models(monkeypatch):
     assert result["blocked_stage"] == ""
     assert result["blocked_reason"] == ""
     assert result["command"] == ["/opt/homebrew/bin/agy", "models"]
+    assert Path(calls[0][1]["cwd"]).is_absolute()
+    assert ".hermes" not in Path(calls[0][1]["cwd"]).parts
+    assert result["agy_cwd"] == calls[0][1]["cwd"]
+    assert result["gemini_dir_absolute"] is None
     assert result["required_models"] == [GEMINI_HIGH, GEMINI_PRO_HIGH]
     assert result["missing_models"] == []
     assert GEMINI_HIGH in result["models"]
@@ -2351,7 +3663,103 @@ def test_structure_mapper_output_forbidden_final_or_later_stage_terms_blocked(tm
 
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "structure_mapper"
-    assert "forbidden later-stage/final tokens" in result["run"]["stages"][-1]["error"]
+    error = result["run"]["stages"][-1]["error"]
+    assert "forbidden later-stage/final tokens" in error
+    assert "debug_artifact=" in error
+    assert (tmp_path / "structure_mapper" / "structure_mapper.invalid.md").exists()
+
+
+def test_structure_mapper_allows_later_convergence_handoff_language():
+    import tools.task_engine_executors as executors
+
+    allowed = """problem_axes
+- Map the attention problem into task-initiation, working-memory, and verification axes.
+unknowns_for_later_stages
+- for later convergence, compare low-intensity scaffolding against school-first support.
+- convergence should consider whether internal mind-wandering is a risk amplifier.
+- 后续收敛阶段应考虑家庭执行成本。
+- 供收敛阶段参考：把柔术反馈回路作为保护因素。
+"""
+
+    assert executors._structure_mapper_forbidden_tokens(allowed) == []
+
+
+def test_structure_mapper_blocks_structural_convergence_heading():
+    import tools.task_engine_executors as executors
+
+    assert "later_stage_heading" in executors._structure_mapper_forbidden_tokens("## convergence_report\nThis is a later stage body.")
+    assert "later_stage_heading" in executors._structure_mapper_forbidden_tokens("# evidence_judge\nThis is a later stage body.")
+
+
+def test_structure_mapper_blocks_pipeline_complete_marker():
+    import tools.task_engine_executors as executors
+
+    assert "pipeline_status=PIPELINE_COMPLETE" in executors._structure_mapper_forbidden_tokens(
+        "problem_axes\npipeline_status=PIPELINE_COMPLETE"
+    )
+
+
+def test_structure_mapper_blocks_final_conclusion_heading():
+    import tools.task_engine_executors as executors
+
+    assert "final_conclusion_heading" in executors._structure_mapper_forbidden_tokens("## 最终结论\n用户应该...")
+
+
+def test_evidence_judge_prefill_block_writes_diagnostic(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = []
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][:9]:
+        stage_dir = tmp_path / spec.stage_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        outputs = executors.planned_outputs(spec, tmp_path)
+        for output in outputs.values():
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            body = "fresh source"
+            if spec.stage_name == "L5_deepseek_acceptance":
+                body = _complete_research_evidence_packet_text()
+            output_path.write_text(body, encoding="utf-8")
+        artifact = executors._primary_output_path(spec, outputs, stage_dir)
+        stages.append({
+            "stage_name": spec.stage_name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact),
+            "outputs": outputs,
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+            "status": "accepted" if spec.stage_name == "L5_deepseek_acceptance" else "real",
+        })
+
+    class AlwaysPrefillExecutor(LocalTaskEngineExecutor):
+        def run_omlx_model(self, stage, model, prompt):
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            self.last_omlx_diagnostics[stage.stage_name] = {
+                "stage_name": stage.stage_name,
+                "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+                "empty_content_kind": "response_error_object",
+                "error_summary": "prefill_memory_exceeded",
+            }
+            raise RuntimeError("prefill_memory_exceeded")
+
+    result = executors.run_research_decision_evidence_judge_smoke(
+        {"stages": stages},
+        query="未来10年 AI 结构性反转 ADHD",
+        base_dir=tmp_path,
+        executor=AlwaysPrefillExecutor(),
+    )
+
+    diagnostic_path = tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "evidence_judge"
+    assert diagnostic_path.exists()
+    assert diagnostic["error_summary"] == "prefill_memory_exceeded"
+    assert "diagnostic_artifact=" in result["run"]["stages"][-1]["error"]
 
 
 def test_evidence_judge_uses_nemotron_and_stops_before_premise_auditor(tmp_path: Path):
@@ -2454,7 +3862,73 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
 
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "evidence_judge"
-    assert "forbidden later-stage/final tokens" in result["run"]["stages"][-1]["error"]
+    error = result["run"]["stages"][-1]["error"]
+    assert "forbidden later-stage/final tokens" in error
+    assert "debug_artifact=" in error
+    assert (tmp_path / "evidence_judge" / "evidence_judge.invalid.md").exists()
+
+
+def test_evidence_judge_allows_handoff_to_later_stage_language():
+    import tools.task_engine_executors as executors
+
+    allowed = """evidence_quality_map
+- Claim A is supported.
+- convergence should consider uncertainty boundaries.
+- This issue should be revisited in convergence after premise and alternative stages.
+"""
+
+    assert executors._evidence_judge_forbidden_tokens(allowed) == []
+
+
+def test_evidence_judge_allows_premise_audit_referral_language():
+    import tools.task_engine_executors as executors
+
+    allowed = """applicability_assessment
+- Claim B is plausible but requires premise audit.
+- handoff to premise_auditor: verify school-system assumptions.
+- next stage should consider whether the premise holds under different classroom conditions.
+"""
+
+    assert executors._evidence_judge_forbidden_tokens(allowed) == []
+
+
+def test_evidence_judge_blocks_structural_later_stage_heading():
+    import tools.task_engine_executors as executors
+
+    assert "later_stage_heading" in executors._evidence_judge_forbidden_tokens("## convergence_report\nThis is a later stage body.")
+    assert "later_stage_heading" in executors._evidence_judge_forbidden_tokens("# premise_auditor\nThis is a later stage body.")
+
+
+def test_evidence_judge_blocks_final_controller_marker():
+    import tools.task_engine_executors as executors
+
+    assert "final_controller_report" in executors._evidence_judge_forbidden_tokens("evidence_quality_map\nfinal_controller_report")
+
+
+def test_divergence_gates_allow_convergence_handoff_language():
+    import tools.task_engine_executors as executors
+
+    allowed = """stage body
+- convergence should consider uncertainty boundaries.
+- for later convergence, retain this as a low-confidence handoff.
+- 后续收敛阶段应考虑执行功能与 AI 反馈质量。
+- 供收敛阶段参考，不是最终结论。
+"""
+
+    assert executors._premise_auditor_forbidden_tokens(allowed) == []
+    assert executors._alternative_generator_forbidden_tokens(allowed) == []
+    assert executors._insight_harvester_forbidden_tokens(allowed) == []
+
+
+def test_divergence_gates_block_structural_later_stage_headings():
+    import tools.task_engine_executors as executors
+
+    assert "later_stage_heading" in executors._premise_auditor_forbidden_tokens("## convergence_report\nbody")
+    assert "later_stage_heading" in executors._alternative_generator_forbidden_tokens("## convergence_report\nbody")
+    assert "later_stage_heading" in executors._insight_harvester_forbidden_tokens("## convergence_report\nbody")
+    assert "pipeline_status=PIPELINE_COMPLETE" in executors._alternative_generator_forbidden_tokens(
+        "option_tradeoffs\npipeline_status=PIPELINE_COMPLETE"
+    )
 
 
 def test_premise_auditor_uses_llama70b_and_stops_before_alternative_generator(tmp_path: Path):
@@ -2564,6 +4038,8 @@ def test_premise_auditor_output_forbidden_final_or_later_stage_terms_blocked(tmp
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "premise_auditor"
     assert "forbidden later-stage/final tokens" in result["run"]["stages"][-1]["error"]
+    assert "debug_artifact=" in result["run"]["stages"][-1]["error"]
+    assert (tmp_path / "premise_auditor" / "premise_auditor.invalid.md").exists()
 
 
 def test_alternative_generator_uses_gemma431b_and_stops_before_insight_harvester(tmp_path: Path):
@@ -2680,6 +4156,8 @@ def test_alternative_generator_output_forbidden_final_or_later_stage_terms_block
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "alternative_generator"
     assert "forbidden later-stage/final tokens" in result["run"]["stages"][-1]["error"]
+    assert "debug_artifact=" in result["run"]["stages"][-1]["error"]
+    assert (tmp_path / "alternative_generator" / "alternative_generator.invalid.md").exists()
 
 
 def test_insight_harvester_uses_gemma431b_and_stops_before_convergence_report(tmp_path: Path):
@@ -2816,6 +4294,8 @@ def test_insight_harvester_output_forbidden_final_or_later_stage_terms_blocked(t
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "insight_harvester"
     assert "forbidden later-stage/final tokens" in result["run"]["stages"][-1]["error"]
+    assert "debug_artifact=" in result["run"]["stages"][-1]["error"]
+    assert (tmp_path / "insight_harvester" / "insight_harvester.invalid.md").exists()
 
 
 def test_convergence_report_uses_r1_and_stops_before_external_calibration(tmp_path: Path):
@@ -3084,7 +4564,7 @@ def test_external_calibration_wrapper_success_uses_gpt_bridge_without_gemini(mon
     wrapper = tmp_path / "chatgpt_app_bridge_http_cli.py"
     wrapper.write_text(
         "import json\n"
-        "print(json.dumps({'success': True, 'response': 'calibration_scope\\nclaim_strength_table\\ncalibration_verdict: supported'}))\n",
+        "print(json.dumps({'success': True, 'response': " + repr(COMPLETE_EXTERNAL_CALIBRATION_MINIMUM_FIELDS) + "}))\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("HERMES_GPT_BRIDGE_CMD", raising=False)
@@ -3127,7 +4607,7 @@ def test_external_calibration_wrapper_failure_falls_back_to_gemini(monkeypatch, 
             assert stage.model == GEMINI_PRO_HIGH
             assert model == GEMINI_PRO_HIGH
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
-            return "calibration_scope\nclaim_strength_table\ncalibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
     stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][14]
     executor = FallbackExecutor()
@@ -3179,7 +4659,7 @@ def test_external_calibration_gpt_unavailable_falls_back_to_gemini_pro(monkeypat
             assert stage.model == GEMINI_PRO_HIGH
             assert model == GEMINI_PRO_HIGH
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
-            return "calibration_scope\nclaim_strength_table\ncalibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
     stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][14]
     executor = FallbackExecutor()
@@ -3189,6 +4669,124 @@ def test_external_calibration_gpt_unavailable_falls_back_to_gemini_pro(monkeypat
     assert "executor_model: Gemini 3.1 Pro (High)" in output
     assert "GPT_BRIDGE_UNAVAILABLE:GPT_BRIDGE_AUTH_BLOCKED" in output
     assert "calibration_verdict" in output
+
+
+def test_external_calibration_gpt_header_only_retries_and_saves_diagnostic(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_bridge(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "calibration_scope\nclaim_strength_table\ncalibration_verdict\n"
+        return COMPLETE_EXTERNAL_CALIBRATION_MINIMUM_FIELDS
+
+    monkeypatch.setattr(executors, "_run_gpt_bridge_calibration", fake_bridge)
+    monkeypatch.setattr(executors, "_gpt_bridge_executor_model", lambda: "ChatGPT App Bridge")
+    monkeypatch.setattr(executors, "_gpt_bridge_header_retry_wait_s", lambda: 0)
+
+    class NoGeminiExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
+            raise AssertionError("Gemini fallback should not run after GPT retry succeeds")
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][14]
+    executor = NoGeminiExecutor()
+    output = executor.run_external_calibration(stage, {"prompt": "calibrate this", "base_dir": str(tmp_path)})
+
+    assert len(calls) == 2
+    assert "GPT_BRIDGE_TARGETED_RETRY_USED" in output
+    assert "calibration_verdict" in output
+    invalid = tmp_path / "external_calibration" / "external_calibration.invalid.md"
+    diagnostic = json.loads((tmp_path / "external_calibration" / "external_calibration.diagnostic.json").read_text(encoding="utf-8"))
+    assert invalid.exists()
+    assert diagnostic["attempt"] == "gpt_bridge_first"
+    assert diagnostic["executor_model"] == "ChatGPT App Bridge"
+    assert diagnostic["fallback_used"] is False
+    assert diagnostic["raw_length"] > 0
+    assert "external_calibration_header_only" in diagnostic["error_summary"]
+
+
+def test_external_calibration_gpt_header_only_retry_fails_then_fallback_gemini(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_bridge(prompt: str) -> str:
+        calls.append(prompt)
+        return "calibration_scope\nclaim_strength_table\ncalibration_verdict\n"
+
+    monkeypatch.setattr(executors, "_run_gpt_bridge_calibration", fake_bridge)
+    monkeypatch.setattr(executors, "_gpt_bridge_executor_model", lambda: "ChatGPT App Bridge")
+    monkeypatch.setattr(executors, "_gpt_bridge_header_retry_wait_s", lambda: 0)
+
+    class FallbackExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
+            self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
+            return COMPLETE_EXTERNAL_CALIBRATION_MINIMUM_FIELDS
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][14]
+    executor = FallbackExecutor()
+    output = executor.run_external_calibration(stage, {"prompt": "calibrate this", "base_dir": str(tmp_path)})
+
+    assert len(calls) == 2
+    assert executor.last_executor_models["external_calibration"] == GEMINI_PRO_HIGH
+    assert "GPT_BRIDGE_INVALID_FIRST:external_calibration_header_only" in output
+    assert "GPT_BRIDGE_INVALID_RETRY:external_calibration_header_only" in output
+    assert "calibration_verdict" in output
+
+
+def test_external_calibration_header_only_blocks_and_saves_gemini_diagnostic(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    monkeypatch.setattr(
+        executors,
+        "_run_gpt_bridge_calibration",
+        lambda prompt: (_ for _ in ()).throw(RuntimeError("GPT_BRIDGE_NOT_CONFIGURED")),
+    )
+
+    class HeaderOnlyGeminiExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
+            self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
+            return "calibration_scope\nclaim_strength_table\ncalibration_verdict\n"
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][14]
+    try:
+        HeaderOnlyGeminiExecutor().run_external_calibration(stage, {"prompt": "calibrate this", "base_dir": str(tmp_path)})
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("header-only external calibration must block")
+
+    assert "artifact_quality_error:external_calibration_header_only" in message
+    diagnostic = json.loads((tmp_path / "external_calibration" / "external_calibration.diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["attempt"] == "gemini_fallback"
+    assert diagnostic["fallback_used"] is True
+    assert diagnostic["executor_model"] == GEMINI_PRO_HIGH
+
+
+def test_external_calibration_quality_allows_minimum_required_fields():
+    import tools.task_engine_executors as executors
+
+    text = "external_calibration\nexecutor_model: ChatGPT App Bridge\nfallback_reasons: []\n\n" + COMPLETE_EXTERNAL_CALIBRATION_MINIMUM_FIELDS
+
+    assert executors._external_calibration_quality_error(text) == ""
+
+
+def test_external_calibration_quality_allows_agreement_with_convergence_when_fields_complete():
+    import tools.task_engine_executors as executors
+
+    text = "\n".join(
+        [
+            "calibration_verdict: supported overall; convergence is plausible and no major contradiction is found.",
+            "agreement_points: supported agreement with convergence on key_drivers, mechanism_chain, scenario_branches, and counter_signals.",
+            "disagreement_or_risk_points: speculative risk remains for individual forecasts and future AI environment assumptions.",
+            "missing_considerations: missing direct longitudinal evidence, tool quality drift, and school context variation.",
+            "final_adjustment_recommendation: keep convergence unchanged but mark long-horizon claims as plausible or speculative.",
+        ]
+    )
+
+    assert executors._external_calibration_quality_error(text) == ""
 
 
 def test_external_calibration_blocks_when_gpt_and_gemini_unavailable(monkeypatch):
@@ -3253,7 +4851,7 @@ def test_external_calibration_uses_bridge_or_gemini_and_stops_before_final_contr
             assert "convergence_report.md" in packet["prompt"]
             assert "research_evidence_packet.md" in packet["prompt"]
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
-            return "calibration_scope\nclaim_strength_table\nsupported / plausible / speculative / contradicted\ncalibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
     result = run_research_decision_l1_l15_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
 
@@ -3369,7 +4967,7 @@ def test_final_controller_report_completes_16_stage_pipeline(tmp_path: Path):
 
         def run_external_calibration(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
-            return "calibration_scope\nclaim_strength_table\ncalibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
         def run_final_controller_report(self, stage, packet):
             assert stage.stage_name == "final_controller_report"
@@ -3379,7 +4977,13 @@ def test_final_controller_report_completes_16_stage_pipeline(tmp_path: Path):
             assert "convergence_report" in packet["excerpts"]
             assert len(packet["stage_trace"]) == 15
             self.last_executor_models[stage.stage_name] = "Hermes Controller"
-            return "# ADHD 儿童研究决策报告\n\n家长行为培训详细方案\n\n三年级准备路线"
+            return (
+                "# ADHD 儿童研究决策报告\n\n"
+                "证据强度：行为支持较强；争议：个体差异和学校环境会影响效果；缺口：长期个体化路线仍需复盘。\n\n"
+                "家长行为培训详细方案\n"
+                "周期：4-6 周；频率：每天练一个目标、每周复盘；步骤：提示、执行、反馈；记录指标：启动时间和提醒次数；调整规则：失败时降难度。\n\n"
+                "三年级准备路线"
+            )
 
     result = run_research_decision_l1_l16_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
 
@@ -3449,7 +5053,7 @@ def test_decision_final_smoke_completes_10_stage_pipeline_without_research(tmp_p
         def run_external_calibration(self, stage, packet):
             assert "research_evidence_packet" not in packet["prompt"]
             self.last_executor_models[stage.stage_name] = "ChatGPT App Bridge"
-            return "calibration_scope\nclaim_strength_table\ncalibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
         def run_final_controller_report(self, stage, packet):
             assert stage.stage_name == "final_controller_report"
@@ -3457,7 +5061,14 @@ def test_decision_final_smoke_completes_10_stage_pipeline_without_research(tmp_p
             assert "external_calibration" in packet["excerpts"]
             assert "L5_deepseek_acceptance" not in packet["excerpts"]
             self.last_executor_models[stage.stage_name] = "Hermes Controller"
-            return "# ADHD 决策报告\n\n家长行为培训详细方案\n\n三年级准备路线"
+            return (
+                "# 决策任务最终报告\n\n"
+                "decision_mode=true\n\n"
+                "## 决策问题\nADHD 是否要主动干预。\n\n"
+                "## 建议方向\n先确认约束和升级阈值。\n\n"
+                "证据强度：行为支持较强；争议：个体差异明显；缺口：本轮未执行 RESEARCH L1-L5。\n"
+                "周期：4-6 周；频率：每天；步骤：观察、记录、复盘；记录指标：启动时间；调整规则：失败时降难度。"
+            )
 
     result = run_decision_final_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
 
@@ -3565,6 +5176,424 @@ def test_artifact_quality_token_detection_is_head_scoped():
     assert executors._artifact_error_token(quoted_late) == ""
 
 
+
+def test_external_calibration_quality_blocks_truncated_claim_strength_table():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][8]
+    half = (
+        "calibration_scope\nThis begins a calibration but is incomplete.\n\n"
+        "claim_strength_table"
+    )
+
+    try:
+        executors._assert_artifact_quality(stage, half)
+    except RuntimeError as exc:
+        assert "artifact_quality_error:external_calibration_header_only" in str(exc)
+    else:
+        raise AssertionError("truncated external calibration should be blocked")
+
+
+def test_external_calibration_quality_allows_complete_calibration_fixture():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][8]
+    complete = (
+        "calibration_scope\n" + "Scope text. " * 80
+        + "claim_strength_table\n| Claim | Strength | Notes |\n| --- | --- | --- |\n"
+        "| A | supported | grounded in packet |\n"
+        "| B | plausible | bounded inference |\n"
+        "| C | speculative | needs confirmation |\n"
+        "| D | contradicted | conflict noted |\n"
+        + "over_inference_checks\n" + "No overreach. " * 60
+        + "contradiction_checks\n" + "Contradictions are labeled. " * 60
+        + "calibration_verdict\nverdict: calibrated for final controller handoff.\n"
+        "handoff_notes_for_final_controller\nUse calibrated claims only.\n"
+    )
+
+    assert executors._external_calibration_quality_error(complete) == ""
+    executors._assert_artifact_quality(stage, complete)
+
+
+def test_final_controller_quality_blocks_raw_and_truncated_outputs():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+
+    for text in (
+        "# Final\n\npersona raw: convergence dump",
+        "# Final\n\nThe evidence pac",
+    ):
+        try:
+            executors._assert_artifact_quality(stage, text)
+        except RuntimeError as exc:
+            assert "artifact_quality_error:" in str(exc)
+        else:
+            raise AssertionError("invalid final controller artifact should be blocked")
+
+
+def test_final_controller_quality_blocks_decision_mode_family_advice_leak():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+    bad = "# ADHD 儿童研究决策报告\n\ndecision_mode=true\n\n## 家长行为培训详细方案\n..."
+
+    try:
+        executors._assert_artifact_quality(stage, bad)
+    except RuntimeError as exc:
+        assert "artifact_quality_error:decision_mode_family_advice_leak" in str(exc)
+    else:
+        raise AssertionError("DECISION final artifact should not leak family research-decision template")
+
+
+def test_research_decision_final_strips_external_calibration_raw_metadata_from_body():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": ADHD_PROMPT,
+        "stage_trace": [],
+        "excerpts": {
+            "external_calibration": (
+                "external_calibration\n"
+                "executor_model: Gemini 3.1 Pro (High)\n"
+                "fallback_reasons: [\"GPT bridge unavailable\"]\n"
+                "### calibration_verdict\nConditionally accepted with bounded caveats."
+            ),
+            "convergence_report": "convergence_report\n### synthesis\nUse a stepped intervention frame.",
+            "evidence_judge": "evidence_judge\nEvidence is strongest for behavioral scaffolding.",
+            "premise_auditor": "premise_auditor\nAvoid overclaiming mechanism certainty.",
+            "alternative_generator": "alternative_generator\nAlternative path is school-first support.",
+        },
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "external_calibration executor_model" not in text
+    assert "executor_model:" not in text
+    assert "fallback_reasons:" not in text
+    assert "Conditionally accepted" in text
+    executors._assert_artifact_quality(CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][-1], text)
+
+
+def test_research_decision_final_quality_allows_executor_model_only_in_compact_trace(tmp_path: Path):
+    import tools.task_engine_contracts as contracts
+
+    artifact = tmp_path / "final_controller_report" / "final_decision_report.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("# ADHD 儿童研究决策报告\n\n## 结论摘要\n正文不含 raw metadata。", encoding="utf-8")
+    run = {
+        "stages": [
+            {
+                "stage_name": "final_controller_report",
+                "owner": "Controller",
+                "model": FINAL_CONTROLLER,
+                "executor_model": "Hermes Controller",
+                "artifact_path": str(artifact),
+                "valid_for_pipeline": True,
+            },
+            {
+                "stage_name": "external_calibration",
+                "owner": "GPT Bridge or Gemini/agy",
+                "model": "GPT Bridge or Gemini/agy",
+                "executor_model": "Gemini 3.1 Pro (High)",
+                "artifact_path": "external_calibration/external_calibration.md",
+                "valid_for_pipeline": True,
+            },
+        ]
+    }
+    validation = {"valid": True, "pipeline_status": PIPELINE_COMPLETE, "errors": [], "stage_count": 2}
+
+    markdown = contracts.render_final_markdown(ENGINE_RESEARCH_DECISION, run, validation, base_dir=tmp_path)
+
+    body = markdown.split("Compact Pipeline Trace:", 1)[0]
+    trace = markdown.split("Compact Pipeline Trace:", 1)[1]
+    assert "executor_model" not in body
+    assert "executor_model=Gemini 3.1 Pro (High)" in trace
+    assert "pipeline_status=PIPELINE_COMPLETE" in markdown
+
+
+def test_research_decision_final_quality_blocks_external_calibration_metadata_in_body():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][-1]
+    bad = "# ADHD 儿童研究决策报告\n\n## 证据与校准边界\n外部校准摘要：external_calibration executor_model: Gemini 3.1 Pro (High)"
+
+    try:
+        executors._assert_artifact_quality(stage, bad)
+    except RuntimeError as exc:
+        assert "artifact_quality_error:raw_intermediate_dump" in str(exc)
+    else:
+        raise AssertionError("raw external_calibration metadata in final body should be blocked")
+
+
+def _decision_future_query() -> str:
+    return (
+        "这是一个 DECISION 任务。不要家长建议，不要培养计划，不要文献综述。"
+        "请只输出：未来优势变陷阱 Top5；未来缺陷变优势 Top5；"
+        "最危险的错误培养路径；最反直觉但值得追踪的假设；danger_flag。"
+    )
+
+
+def _valid_decision_five_section_report() -> str:
+    return "\n".join(
+        [
+            "# 决策任务最终报告",
+            "",
+            "decision_mode=true",
+            "",
+            "## 未来优势变陷阱 Top5",
+            "关键驱动变量：AI 降低知识获取成本、即时反馈变多、验证成本相对升高。确定性等级：高 / 中 / 低。",
+            "1. 快速理解可能变成未经验证的快速接受。",
+            "2. 兴趣驱动可能变成持续换题。",
+            "3. 即时反馈偏好可能削弱慢变量耐受。",
+            "4. 发散思维可能变成观点过剩。",
+            "5. 低价值重复抗拒可能削弱必要核查。",
+            "",
+            "## 未来缺陷变优势 Top5",
+            "输入变量 → 中介机制 → 输出变量：低价值重复减少 → 任务价值敏感度放大 → 筛选任务和发现异常的优势。",
+            "1. 对低价值重复敏感。",
+            "2. 联想跳跃利于问题发现。",
+            "3. 非线性推进利于个性化学习。",
+            "4. 内在想法多可形成创意池。",
+            "5. 运动纪律可支撑长期项目。",
+            "",
+            "## 最危险的错误培养路径",
+            "情景分叉：情景 A 保留验证；情景 B 用即时答案替代判断。",
+            "把速度和产出放在目标选择、事实核查和收束能力之前。",
+            "",
+            "## 最反直觉但值得追踪的假设",
+            "未来稀缺的可能是停下来判断问题是否值得，而不是更快得到答案。",
+            "",
+            "## danger_flag",
+            "证据强度：基础执行功能证据较强；争议：未来 AI 场景差异大；缺口：缺少长期直接证据。可观察指标 / 反证信号：是否保留推理痕迹。",
+            "如果长期依赖即时答案、跳过验证、频繁换题且很少闭环，风险升高。",
+        ]
+    )
+
+
+def test_decision_final_quality_blocks_raw_external_calibration_dump():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+    bad = _valid_decision_five_section_report() + "\nexternal_calibration executor_model: ChatGPT App Bridge fallback_reasons: []"
+
+    try:
+        executors._assert_artifact_quality(stage, bad)
+    except RuntimeError as exc:
+        assert "artifact_quality_error:raw_intermediate_dump" in str(exc)
+    else:
+        raise AssertionError("raw external_calibration dump should be blocked")
+
+
+def test_decision_final_quality_blocks_evidence_judge_raw_table():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+    bad = (
+        _valid_decision_five_section_report()
+        + "\n**Evidence Judge – DECISION Stage**\n"
+        + "| Artifact (Stage) | Content Summary | Strength / Quality of Evidence |\n"
+        + "| --- | --- | --- |\n"
+        + "| evidence_judge | raw table | Low – intensity |\n"
+    )
+
+    try:
+        executors._assert_artifact_quality(stage, bad)
+    except RuntimeError as exc:
+        assert "artifact_quality_error:raw_intermediate_dump" in str(exc) or "artifact_quality_error:raw_table_dump" in str(exc)
+    else:
+        raise AssertionError("Evidence Judge raw table should be blocked")
+
+
+def test_decision_final_quality_blocks_truncated_tail_fragments():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+    for tail in ("deficit neutr", "Low – inten", "最危险的错误培养路径 ... 过"):
+        bad = _valid_decision_five_section_report() + "\n" + tail
+        try:
+            executors._assert_artifact_quality(stage, bad)
+        except RuntimeError as exc:
+            assert "artifact_quality_error:truncated_tail" in str(exc)
+        else:
+            raise AssertionError(f"truncated tail should be blocked: {tail}")
+
+
+def test_decision_final_packet_quality_blocks_user_forbidden_advice_terms():
+    import tools.task_engine_executors as executors
+
+    packet = {"mode": ENGINE_DECISION, "query": _decision_future_query()}
+    bad = _valid_decision_five_section_report() + "\n## 下一步\n建议方向：先做专业评估。"
+
+    try:
+        executors._assert_final_controller_packet_quality(packet, bad)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "forbidden_user_terms" in message
+        assert "下一步" in message
+        assert "建议方向" in message
+        assert "专业评估" in message
+    else:
+        raise AssertionError("user-forbidden advice terms should be blocked")
+
+
+def test_decision_final_packet_quality_accepts_valid_five_section_answer():
+    import tools.task_engine_executors as executors
+
+    packet = {"mode": ENGINE_DECISION, "query": _decision_future_query()}
+    text = _valid_decision_five_section_report()
+
+    executors._assert_final_controller_packet_quality(packet, text)
+    executors._assert_artifact_quality(CANONICAL_STAGES[ENGINE_DECISION][-1], text)
+
+
+def test_decision_final_uses_foresight_template_from_profile_without_exact_query_phrases():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "这是一个 DECISION 任务。未来10年 AI 降低知识获取成本后 ADHD 儿童结构性反转判断。",
+        "output_quality_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "excerpts": {},
+        "convergence_fixed_section_digest": (
+            "## key_drivers\nAI feedback cost.\n"
+            "## mechanism_chain\ninput variable -> mediating mechanism -> output variable.\n"
+            "## scenario_branches\nScenario A keeps verification; Scenario B bypasses it.\n"
+            "## counter_signals\nobservable signal.\n"
+            "## certainty_levels\nhigh / medium / low.\n"
+            "## uncertainty_boundary\nfuture evidence boundary."
+        ),
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 未来优势变陷阱 Top5" in text
+    assert "## convergence_fixed_section_digest" in text
+    assert "## key_drivers" in text
+    assert "## mechanism_chain" in text
+    assert "## scenario_branches" in text
+    assert "## certainty_levels" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_packet_absorbs_convergence_fixed_sections(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = _decision_final_prior_stage_records(tmp_path)
+    convergence_path = tmp_path / "convergence_report" / "convergence_report.md"
+    convergence_path.write_text(
+        "\n".join(
+            [
+                "## key_drivers",
+                "AI cost collapse and verification scarcity.",
+                "## mechanism_chain",
+                "input variable -> mediating mechanism -> output variable.",
+                "## scenario_branches",
+                "Scenario A keeps verification; Scenario B outsources judgment.",
+                "## counter_signals",
+                "observable signal: child keeps slow-loop completion.",
+                "## certainty_levels",
+                "high / medium / low by claim.",
+                "## uncertainty_boundary",
+                "No direct ten-year individual evidence.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    packet = executors._decision_final_controller_packet(
+        stages,
+        query="未来10年 AI 降低知识获取成本后 ADHD 结构性反转 decision",
+        base_dir=tmp_path,
+    )
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "convergence_fixed_section_digest" in text
+    assert "AI cost collapse" in text
+    assert "input variable -> mediating mechanism -> output variable" in text
+    assert "Scenario A keeps verification" in text
+    assert "high / medium / low" in text
+
+
+def test_decision_final_foresight_template_preserves_user_top5_structure():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": _decision_future_query(),
+        "output_quality_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "excerpts": {},
+        "convergence_fixed_section_digest": "## key_drivers\nAI.\n## mechanism_chain\ninput variable -> mediating mechanism -> output variable.\n## scenario_branches\nScenario A; Scenario B.\n## counter_signals\nobservable signal.\n## certainty_levels\nhigh / medium / low.\n## uncertainty_boundary\nboundary.",
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 未来优势变陷阱 Top5" in text
+    assert "## 未来缺陷变优势 Top5" in text
+    assert "## danger_flag" in text
+
+
+def test_decision_final_generic_template_unaffected_without_foresight_profile():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "这是一个普通 DECISION 任务。是否应该主动干预？",
+        "output_quality_profile": [],
+        "excerpts": {},
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 决策判断" in text
+    assert "## 未来优势变陷阱 Top5" not in text
+    assert "convergence_fixed_section_digest" not in text
+
+
+def test_final_controller_gate_block_saves_invalid_and_diagnostic(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    monkeypatch.setattr(executors, "_final_controller_report_from_packet", lambda packet: "# 决策任务最终报告\n\n## 结论\n缺少前瞻字段。")
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "未来10年 AI 降低知识获取成本后 ADHD 结构性反转 decision",
+        "base_dir": str(tmp_path),
+        "output_quality_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "excerpts": {},
+    }
+
+    try:
+        LocalTaskEngineExecutor().run_final_controller_report(stage, packet)
+    except RuntimeError as exc:
+        assert "output_quality_profile_error" in str(exc)
+    else:
+        raise AssertionError("foresight final gate should block missing required fields")
+
+    invalid = tmp_path / "final_controller_report" / "final_decision_report.invalid.md"
+    diagnostic = tmp_path / "final_controller_report" / "final_controller_report.diagnostic.json"
+    assert invalid.exists()
+    data = json.loads(diagnostic.read_text(encoding="utf-8"))
+    assert data["stage_name"] == "final_controller_report"
+    assert data["executor_model"] == "Hermes Controller"
+    assert "missing_key_drivers" in data["error_summary"]
+
+
+def test_final_controller_gate_still_blocks_missing_foresight_fields():
+    import tools.task_engine_executors as executors
+
+    errors = executors._quality_profile_errors(
+        "# 决策任务最终报告\n\n## 结论\n只有泛泛判断。",
+        [executors.PROFILE_FORESIGHT_MECHANISM],
+        stage_name="final_controller_report",
+    )
+
+    assert "missing_key_drivers" in errors
+    assert "missing_mechanism_chain" in errors
+    assert "missing_scenario_branches" in errors
+    assert "missing_certainty_levels" in errors
+
+
 def test_task_engine_runner_decision_final_action_does_not_use_research(tmp_path: Path, monkeypatch):
     import tools.task_engine_runner as runner
 
@@ -3597,6 +5626,155 @@ def test_task_engine_runner_decision_final_action_does_not_use_research(tmp_path
     assert result["status"] == "ok"
     assert result["pipeline_status"] == PIPELINE_COMPLETE
     assert result["artifact_dir"] == str(tmp_path)
+    assert len(calls) == 1
+
+
+def _write_valid_new_research_packet_run(root: Path) -> Path:
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH]:
+        outputs = planned_outputs(spec, root)
+        body = _complete_research_evidence_packet_text() if spec.stage_name == "L5_deepseek_acceptance" else f"{spec.stage_name} artifact"
+        for output in outputs.values():
+            path = Path(output)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+    return root / "L5_deepseek_acceptance" / "research_evidence_packet.md"
+
+
+def _assert_decision_latest_alias_resolves(query: str, tmp_path: Path, monkeypatch) -> None:
+    import tools.task_engine_runner as runner
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("HERMES_TASK_ENGINE_ARTIFACT_DIR", raising=False)
+    packet = _write_valid_new_research_packet_run(tmp_path / "research_artifacts")
+    captured = {}
+
+    def fake_decision_smoke(query, *, base_dir, research_packet_path=None):
+        captured["research_packet_path"] = research_packet_path
+        return {
+            "status": "ok",
+            "pipeline_status": PIPELINE_COMPLETE,
+            "full_pipeline_validation": {"valid": True, "stage_count": 10},
+            "run": {"mode": ENGINE_DECISION, "execution_mode": "real-smoke-decision-final", "stages": []},
+        }
+
+    monkeypatch.setattr(runner, "run_decision_final_smoke", fake_decision_smoke)
+
+    result = json.loads(
+        task_engine_runner(
+            query=query,
+            mode=ENGINE_DECISION,
+            action="smoke-decision-final",
+            base_dir=str(tmp_path / "decision_artifacts"),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert captured["research_packet_path"] == str(packet.resolve())
+
+
+def test_decision_chinese_latest_research_packet_alias_resolves(tmp_path: Path, monkeypatch):
+    _assert_decision_latest_alias_resolves("这是一个决策任务。最新研究成果包。", tmp_path, monkeypatch)
+
+
+def test_decision_chinese_based_on_latest_research_packet_alias_resolves(tmp_path: Path, monkeypatch):
+    _assert_decision_latest_alias_resolves("这是一个决策任务。请基于最新研究成果包继续判断。", tmp_path, monkeypatch)
+
+
+def test_decision_chinese_research_packet_equals_latest_alias_resolves(tmp_path: Path, monkeypatch):
+    _assert_decision_latest_alias_resolves("这是一个决策任务。研究成果包=最新。", tmp_path, monkeypatch)
+
+
+def test_decision_chinese_research_packet_equals_latest_english_alias_resolves(tmp_path: Path, monkeypatch):
+    _assert_decision_latest_alias_resolves("这是一个决策任务。研究成果包=latest。", tmp_path, monkeypatch)
+
+
+def test_decision_chinese_research_packet_path_alias_resolves(tmp_path: Path, monkeypatch):
+    import tools.task_engine_runner as runner
+
+    captured = {}
+    packet = tmp_path / "research_evidence_packet.md"
+
+    def fake_decision_smoke(query, *, base_dir, research_packet_path=None):
+        captured["research_packet_path"] = research_packet_path
+        return {
+            "status": "ok",
+            "pipeline_status": PIPELINE_COMPLETE,
+            "full_pipeline_validation": {"valid": True, "stage_count": 10},
+            "run": {"mode": ENGINE_DECISION, "execution_mode": "real-smoke-decision-final", "stages": []},
+        }
+
+    monkeypatch.setattr(runner, "run_decision_final_smoke", fake_decision_smoke)
+
+    result = json.loads(
+        task_engine_runner(
+            query=f"这是一个决策任务。研究成果包：{packet}",
+            mode=ENGINE_DECISION,
+            action="smoke-decision-final",
+            base_dir=str(tmp_path / "decision_artifacts"),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert captured["research_packet_path"] == str(packet)
+
+
+def test_decision_latest_research_packet_alias_fails_closed_when_missing(tmp_path: Path, monkeypatch):
+    import tools.task_engine_runner as runner
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("HERMES_TASK_ENGINE_ARTIFACT_DIR", raising=False)
+    monkeypatch.setattr(
+        runner,
+        "run_decision_final_smoke",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("DECISION must not run without a valid research packet")),
+    )
+
+    result = json.loads(
+        task_engine_runner(
+            query="这是一个决策任务。使用最新研究成果包。",
+            mode=ENGINE_DECISION,
+            action="smoke-decision-final",
+            base_dir=str(tmp_path / "decision_artifacts"),
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["pipeline_status"] == PIPELINE_BLOCKED
+    assert result["blocked_stage"] == "research_packet_discovery"
+    assert result["blocked_reason"] == "no_valid_new_research_packet_found"
+
+
+def test_plain_decision_does_not_trigger_research_packet_alias(tmp_path: Path, monkeypatch):
+    import tools.task_engine_runner as runner
+
+    _write_valid_new_research_packet_run(tmp_path / "research_artifacts")
+    calls = []
+
+    def fake_decision_smoke(query, *, base_dir):
+        calls.append((query, base_dir))
+        return {
+            "status": "ok",
+            "pipeline_status": PIPELINE_COMPLETE,
+            "full_pipeline_validation": {"valid": True, "stage_count": 10},
+            "run": {"mode": ENGINE_DECISION, "execution_mode": "real-smoke-decision-final", "stages": []},
+        }
+
+    monkeypatch.setattr(runner, "run_decision_final_smoke", fake_decision_smoke)
+
+    result = json.loads(
+        task_engine_runner(
+            query="这是一个决策任务。请直接执行 DECISION full。",
+            mode=ENGINE_DECISION,
+            action="smoke-decision-final",
+            base_dir=str(tmp_path / "decision_artifacts"),
+        )
+    )
+
+    assert result["status"] == "ok"
     assert len(calls) == 1
 
 
@@ -3646,7 +5824,7 @@ def test_final_controller_legacy_artifact_cannot_complete(tmp_path: Path):
 
         def run_external_calibration(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
-            return "calibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
         def run_final_controller_report(self, stage, packet):
             raise AssertionError("final_controller_report must not run with legacy external_calibration")
@@ -3695,7 +5873,7 @@ def test_final_controller_output_forbidden_tool_chain_blocked(tmp_path: Path):
 
         def run_external_calibration(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
-            return "calibration_verdict: plausible"
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
 
         def run_final_controller_report(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "Hermes Controller"
@@ -3880,17 +6058,7 @@ def _make_run(tmp_path: Path, mode: str) -> dict:
             artifact = stage_dir / spec.required_outputs[0]
             body = "ok"
             if spec.stage_name == "L5_deepseek_acceptance":
-                body = "\n".join(
-                    [
-                        "research_evidence_packet",
-                        "verdict: ACCEPTED",
-                        "accepted: true",
-                        "checked_stages: [L1_gemini_search, L2_ddgs_supplement, L2_5_codex_evidence_organizer, L3_r1_synthesis, L4_gemini_audit]",
-                        "missing_or_invalid_artifacts: []",
-                        "audit_summary: ok",
-                        "evidence_packet_ready_for_decision: true",
-                    ]
-                )
+                body = _complete_research_evidence_packet_text()
             if spec.stage_name == "final_controller_report":
                 body = "FINAL CONTROLLER BODY"
             artifact.write_text(body, encoding="utf-8")

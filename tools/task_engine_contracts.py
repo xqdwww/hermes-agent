@@ -515,6 +515,45 @@ def _validate_l5_acceptance_artifact(errors: list[str], artifact: Path) -> None:
             errors.append(f"L5_deepseek_acceptance:checked_stage_missing:{stage_name}")
     if "final_controller_report" in lowered:
         errors.append("L5_deepseek_acceptance:forbidden_final_controller_report")
+    for token in ("artifact_path", "executor_model", "valid_for_pipeline", "stage_name", "owner="):
+        if token in lowered:
+            errors.append(f"L5_deepseek_acceptance:raw_metadata:{token}")
+    required_sections = (
+        "evidence_strength",
+        "controversy",
+        "evidence_gap",
+        "evidence_supported",
+        "reasonable_inference",
+        "foresight_hypothesis",
+    )
+    missing_sections = [section for section in required_sections if f"## {section}" not in lowered]
+    if missing_sections:
+        errors.append("L5_deepseek_acceptance:missing_evidence_packet_sections:" + ",".join(missing_sections))
+    for section in required_sections:
+        body = _markdown_section_body(text, section)
+        if f"## {section}" in lowered and len(body) < 60:
+            errors.append(f"L5_deepseek_acceptance:thin_evidence_packet_section:{section}")
+    combined_sections = "\n".join(_markdown_section_body(text, section).lower() for section in required_sections)
+    if not combined_sections.strip():
+        errors.append("L5_deepseek_acceptance:acceptance_summary_only")
+    elif "accepted" in combined_sections and not any(
+        term in combined_sections
+        for term in ("evidence", "证据", "inference", "推断", "hypothesis", "假设", "gap", "缺口", "controvers", "争议")
+    ):
+        errors.append("L5_deepseek_acceptance:acceptance_summary_only")
+
+
+def _markdown_section_body(text: str, heading: str) -> str:
+    marker = f"## {heading}"
+    lowered = (text or "").lower()
+    start = lowered.find(marker.lower())
+    if start < 0:
+        return ""
+    body_start = start + len(marker)
+    next_index = lowered.find("\n## ", body_start)
+    if next_index < 0:
+        next_index = len(text or "")
+    return (text or "")[body_start:next_index].strip()
 
 
 def _divergence_unique_model_count(by_name: dict[str, dict[str, Any]]) -> int:
