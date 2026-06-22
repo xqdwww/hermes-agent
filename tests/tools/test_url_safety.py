@@ -167,11 +167,12 @@ class TestIsSafeUrl:
             # 100.0.0.1 is a global IP, not in CGNAT range
             assert is_safe_url("http://legit-host.example/") is True
 
-    def test_benchmark_ip_blocked_for_non_allowlisted_host(self):
+    def test_benchmark_ip_allowed_by_fake_ip_exemption(self):
+        """198.18.x.x (RFC 2544 Benchmark / Clash fake-IP) passes SSRF check."""
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("198.18.0.23", 0)),
         ]):
-            assert is_safe_url("https://example.com/file.jpg") is False
+            assert is_safe_url("https://example.com/file.jpg") is True
 
     def test_qq_multimedia_hostname_allowed_with_benchmark_ip(self):
         with patch("socket.getaddrinfo", return_value=[
@@ -179,17 +180,19 @@ class TestIsSafeUrl:
         ]):
             assert is_safe_url("https://multimedia.nt.qq.com.cn/download?id=123") is True
 
-    def test_qq_multimedia_hostname_exception_is_exact_match(self):
+    def test_qq_multimedia_subdomain_allowed_by_fake_ip_exemption(self):
+        """Subdomain of QQ multimedia also resolves to fake-IP and passes."""
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("198.18.0.23", 0)),
         ]):
-            assert is_safe_url("https://sub.multimedia.nt.qq.com.cn/download?id=123") is False
+            assert is_safe_url("https://sub.multimedia.nt.qq.com.cn/download?id=123") is True
 
-    def test_qq_multimedia_hostname_exception_requires_https(self):
+    def test_qq_multimedia_http_allowed_by_fake_ip_exemption(self):
+        """HTTP (non-HTTPS) to fake-IP hostname also passes — exemption is IP-based."""
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("198.18.0.23", 0)),
         ]):
-            assert is_safe_url("http://multimedia.nt.qq.com.cn/download?id=123") is False
+            assert is_safe_url("http://multimedia.nt.qq.com.cn/download?id=123") is True
 
     def test_qq_multimedia_hostname_dns_failure_still_blocked(self):
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name resolution failed")):
@@ -220,7 +223,7 @@ class TestIsBlockedIp:
     @pytest.mark.parametrize("ip_str", [
         "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
         "169.254.169.254", "0.0.0.0", "224.0.0.1", "255.255.255.255",
-        "100.64.0.1", "100.100.100.100", "100.127.255.254", "198.18.0.23",
+        "100.64.0.1", "100.100.100.100", "100.127.255.254",
         "::1", "fe80::1", "fc00::1", "fd12::1", "ff02::1",
         "::ffff:127.0.0.1", "::ffff:169.254.169.254",
     ])
@@ -230,11 +233,53 @@ class TestIsBlockedIp:
 
     @pytest.mark.parametrize("ip_str", [
         "8.8.8.8", "93.184.216.34", "1.1.1.1", "100.0.0.1",
+        "198.18.0.23", "198.19.255.254",  # RFC 2544 Benchmark / Clash fake-IP
         "2606:4700::1", "2001:4860:4860::8888",
     ])
     def test_allowed_ips(self, ip_str):
         ip = ipaddress.ip_address(ip_str)
         assert _is_blocked_ip(ip) is False, f"{ip_str} should be allowed"
+
+
+class TestFakeIpExemption:
+    """Fake-IP range (198.18.0.0/15) must be exempted from SSRF blocking."""
+
+    def test_fake_ip_exempted(self):
+        """198.18.0.1 is NOT blocked by _is_blocked_ip."""
+        ip = ipaddress.ip_address("198.18.0.1")
+        assert _is_blocked_ip(ip) is False
+
+    def test_fake_ip_upper_bound_exempted(self):
+        """198.19.255.254 (upper bound of 198.18/15) is NOT blocked."""
+        ip = ipaddress.ip_address("198.19.255.254")
+        assert _is_blocked_ip(ip) is False
+
+    def test_near_fake_ip_still_evaluated_normally(self):
+        """198.17.255.255 (just below 198.18/15) is globally routable,
+        so _is_blocked_ip returns False by the generic public-IP path."""
+        ip = ipaddress.ip_address("198.17.255.255")
+        assert _is_blocked_ip(ip) is False
+
+    def test_ipv4_mapped_fake_ip_exempted(self):
+        """::ffff:198.18.0.1 (IPv4-mapped fake-IP) is NOT blocked."""
+        ip = ipaddress.ip_address("::ffff:198.18.0.1")
+        assert _is_blocked_ip(ip) is False
+
+    def test_fake_ip_is_safe_url_integration(self):
+        """Any hostname resolving to 198.18.x.x passes is_safe_url."""
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("198.18.42.99", 0)),
+        ]):
+            assert is_safe_url("https://some-random-public-site.com/page") is True
+
+    def test_fake_ip_does_not_override_always_blocked(self):
+        """Metadata IPs are ALWAYS blocked, even if coincidentally in fake-IP range
+        (they aren't, but this verifies order: always-blocked fires first)."""
+        # 169.254.169.254 is link-local, not fake-IP — but verify the floor holds
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("169.254.169.254", 0)),
+        ]):
+            assert is_safe_url("http://169.254.169.254/latest/meta-data/") is False
 
 
 class TestGlobalAllowPrivateUrls:
@@ -533,6 +578,7 @@ class TestIPv4MappedIPv6SSRF:
         "::ffff:8.8.8.8",          # Public DNS
         "::ffff:93.184.216.34",    # example.com
         "::ffff:100.0.0.1",        # Not in CGNAT range
+        "::ffff:198.18.0.23",      # RFC 2544 / Clash fake-IP (exempt)
     ])
     def test_ipv4_mapped_allowed_ips(self, ip_str):
         """IPv4-mapped IPv6 addresses that should be allowed."""

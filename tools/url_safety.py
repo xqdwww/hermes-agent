@@ -81,6 +81,18 @@ _TRUSTED_PRIVATE_IP_HOSTS = frozenset({
 # VPNs, and some cloud internal networks.
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
+# 198.18.0.0/15 — IANA Network Interconnect Device Benchmark Testing (RFC 2544).
+# Legitimately used by Clash / OpenClash / Mihomo in fake-IP mode for DNS
+# interception.  No real internal services exist in this range; exempting it
+# from private-IP blocking does not weaken SSRF protection against actual
+# private networks (10/8, 172.16/12, 192.168/16) or cloud metadata endpoints
+# (which are guarded by _ALWAYS_BLOCKED_IPS / _ALWAYS_BLOCKED_NETWORKS).
+#
+# python3 -c "import ipaddress; print(ipaddress.ip_address('198.18.0.1').is_private)"  → True
+_FAKE_IP_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+)
+
 # ---------------------------------------------------------------------------
 # Global toggle: allow private/internal IP resolution
 # ---------------------------------------------------------------------------
@@ -147,16 +159,34 @@ def _reset_allow_private_cache() -> None:
     _cached_allow_private = False
 
 
+def _is_fake_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True when *ip* belongs to a known proxy / fake-IP range.
+
+    Fake-IP ranges (e.g. Clash/OpenClash ``198.18.0.0/15``) must be
+    exempted from private-IP blocking so agents behind proxy DNS can
+    reach public URLs.  The exemption does **not** override the
+    always-blocked floor (cloud metadata IPs / link-local) which is
+    checked separately and earlier in ``is_safe_url``.
+    """
+    return any(ip in net for net in _FAKE_IP_NETWORKS)
+
+
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP should be blocked for SSRF protection."""
     # IPv4-mapped IPv6 addresses (``::ffff:x.x.x.x``) should be checked
     # by their embedded IPv4 address, not as IPv6
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         embedded_ip = ip.ipv4_mapped
+        if _is_fake_ip(embedded_ip):
+            return False  # proxy fake-IP, not real private infra
         return (embedded_ip.is_private or embedded_ip.is_loopback or
                 embedded_ip.is_link_local or embedded_ip.is_reserved or
                 embedded_ip.is_multicast or embedded_ip.is_unspecified or
                 embedded_ip in _CGNAT_NETWORK)
+
+    # Exempt known proxy / fake-IP ranges before generic private check
+    if _is_fake_ip(ip):
+        return False
 
     # Standard IPv4/IPv6 address checking
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
