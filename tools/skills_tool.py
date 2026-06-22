@@ -489,6 +489,51 @@ def _parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     return parse_frontmatter(content)
 
 
+def _markdown_sections(content: str) -> List[Tuple[str, int, int]]:
+    matches = list(re.finditer(r"^##\s+(.+?)\s*$", content, flags=re.MULTILINE))
+    sections: List[Tuple[str, int, int]] = []
+    for idx, match in enumerate(matches):
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(content)
+        sections.append((match.group(1).strip(), match.start(), end))
+    return sections
+
+
+def _select_markdown_section(content: str, section: str | None) -> Tuple[str, str | None, List[str], str | None]:
+    """Return selected content, matched section, available sections, or error."""
+    requested = str(section or "").strip()
+    if not requested:
+        return content, None, [], None
+
+    sections = _markdown_sections(content)
+    if not sections:
+        return content, None, [], None
+
+    requested_key = requested.casefold()
+    available = [title for title, _, _ in sections]
+    for title, start, end in sections:
+        if title.casefold() == requested_key:
+            return content[start:end].strip(), title, available, None
+
+    return content, None, available, f"Section '{requested}' not found."
+
+
+def _file_result_with_section(result: Dict[str, Any], section: str | None) -> Dict[str, Any]:
+    selected_content, matched_section, available_sections, section_error = _select_markdown_section(
+        str(result.get("content") or ""),
+        section,
+    )
+    if section_error:
+        return {
+            "success": False,
+            "error": section_error,
+            "available_sections": available_sections,
+            "hint": "Call skill_view without section for the full file, or choose one of the available_sections.",
+        }
+    result["content"] = selected_content
+    result["section"] = matched_section
+    return result
+
+
 def _get_category_from_path(skill_path: Path) -> Optional[str]:
     """
     Extract category from skill path based on directory structure.
@@ -755,6 +800,7 @@ def _serve_plugin_skill(
     *,
     preprocess: bool = True,
     session_id: str | None = None,
+    section: str | None = None,
 ) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
@@ -839,13 +885,29 @@ def _serve_plugin_skill(
                 "Could not preprocess plugin skill %s:%s", namespace, bare, exc_info=True
             )
 
+    selected_content, matched_section, available_sections, section_error = _select_markdown_section(
+        rendered_content,
+        section,
+    )
+    if section_error:
+        return json.dumps(
+            {
+                "success": False,
+                "error": section_error,
+                "available_sections": available_sections,
+                "hint": "Call skill_view without section for the full skill, or choose one of the available_sections.",
+            },
+            ensure_ascii=False,
+        )
+
     return json.dumps(
         {
             "success": True,
             "name": f"{namespace}:{bare}",
-            "content": f"{banner}{rendered_content}" if banner else rendered_content,
+            "content": f"{banner}{selected_content}" if banner else selected_content,
             "description": description,
             "linked_files": None,
+            "section": matched_section,
             "readiness_status": SkillReadinessStatus.AVAILABLE.value,
         },
         ensure_ascii=False,
@@ -855,6 +917,7 @@ def _serve_plugin_skill(
 def skill_view(
     name: str,
     file_path: str = None,
+    section: str = None,
     task_id: str = None,
     preprocess: bool = True,
 ) -> str:
@@ -865,6 +928,7 @@ def skill_view(
         name: Name or path of the skill (e.g., "axolotl" or "03-fine-tuning/axolotl").
             Qualified names like "plugin:skill" resolve to plugin-provided skills.
         file_path: Optional path to a specific file within the skill (e.g., "references/api.md")
+        section: Optional SKILL.md section name matching a ``##`` heading
         task_id: Optional task identifier used to probe the active backend
         preprocess: Apply configured SKILL.md template and inline shell rendering
             to main skill content. Internal slash/preload callers disable this
@@ -936,6 +1000,7 @@ def skill_view(
                     bare,
                     preprocess=preprocess,
                     session_id=task_id,
+                    section=section,
                 )
 
             # Plugin exists but this specific skill is missing?
@@ -1243,13 +1308,16 @@ def skill_view(
                 )
 
             return json.dumps(
-                {
-                    "success": True,
-                    "name": name,
-                    "file": file_path,
-                    "content": content,
-                    "file_type": target_file.suffix,
-                },
+                _file_result_with_section(
+                    {
+                        "success": True,
+                        "name": name,
+                        "file": file_path,
+                        "content": content,
+                        "file_type": target_file.suffix,
+                    },
+                    section,
+                ),
                 ensure_ascii=False,
             )
 
@@ -1413,15 +1481,31 @@ def skill_view(
                     "Could not preprocess skill content for %s", skill_name, exc_info=True
                 )
 
+        selected_content, matched_section, available_sections, section_error = _select_markdown_section(
+            rendered_content,
+            section,
+        )
+        if section_error:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": section_error,
+                    "available_sections": available_sections,
+                    "hint": "Call skill_view without section for the full skill, or choose one of the available_sections.",
+                },
+                ensure_ascii=False,
+            )
+
         result = {
             "success": True,
             "name": skill_name,
             "description": frontmatter.get("description", ""),
             "tags": tags,
             "related_skills": related_skills,
-            "content": rendered_content,
+            "content": selected_content,
             "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None,
+            "section": matched_section,
             "linked_files": linked_files if linked_files else None,
             "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'"
             if linked_files
@@ -1551,6 +1635,10 @@ SKILL_VIEW_SCHEMA = {
                 "type": "string",
                 "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
             },
+            "section": {
+                "type": "string",
+                "description": "OPTIONAL: Return only the matching markdown section whose heading starts with '## ' (for example COMMANDS or PITFALLS). Omit for full content.",
+            },
         },
         "required": ["name"],
     },
@@ -1571,7 +1659,10 @@ def _skill_view_with_bump(args, **kw):
     telemetry failure never breaks the tool call."""
     name = args.get("name", "")
     result = skill_view(
-        name, file_path=args.get("file_path"), task_id=kw.get("task_id")
+        name,
+        file_path=args.get("file_path"),
+        section=args.get("section"),
+        task_id=kw.get("task_id"),
     )
     try:
         parsed = json.loads(result)

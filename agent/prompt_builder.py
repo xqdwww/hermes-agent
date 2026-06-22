@@ -169,6 +169,38 @@ SESSION_SEARCH_GUIDANCE = (
     "asking them to repeat themselves."
 )
 
+TASK_ENGINE_RUNNER_GUIDANCE = (
+    "Heavy task engine entry discipline: when `task_engine_runner` is available "
+    "and the user explicitly asks for `task_engine_runner dry-run`, "
+    "`task_engine_runner simulated-run`, or states that the request is a "
+    "RESEARCH, DECISION, or RESEARCH_DECISION task, call `task_engine_runner` "
+    "immediately with the matching supported action/mode. RESEARCH and DECISION "
+    "are production-supported modes. RESEARCH_DECISION real full execution is "
+    "archived / integration-test only and is not the production default; for "
+    "production research-to-decision work, run RESEARCH full to produce "
+    "`research_evidence_packet.md`, then run DECISION full with "
+    "`research_packet_path`. Do not hand-write ROUTE_CARD, "
+    "EXECUTION_CONTRACT, stage plans, or confirmation prompts for these requests. "
+    "Do not answer the substantive research/decision question directly unless "
+    "the runner returns a validated final report. Ordinary chat that does not "
+    "match those heavy modes should not use the task engine."
+)
+
+OBSERVATION_REDUCER_GUIDANCE = (
+    "## Evidence Cards\n"
+    "Large tool observations may be reduced before entering context. A reduced "
+    "observation appears as `[OBSERVATION:<tool>]` with a short summary and a "
+    "`full:` path to the raw output, for example:\n"
+    "[OBSERVATION:terminal] exit=1 | cmd: npm run test\n"
+    "summary: 45 passed, 2 failed (test_auth.py:34, test_api.py:89)\n"
+    "full: /tmp/hermes/observations/run_20260610_143052/\n"
+    "Treat Evidence Cards as faithful summaries of tool output. If the card lacks "
+    "details needed for correctness, inspect the referenced raw files or rerun a "
+    "targeted command/read. Prefer `read_file(path, offset, limit)` with a narrow "
+    "range instead of reading whole large files. When using `skill_view`, request "
+    "the needed section, e.g. `skill_view(name=\"example\", section=\"COMMANDS\")`."
+)
+
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
     "or discovering a non-trivial workflow, save the approach as a "
@@ -886,7 +918,7 @@ CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-_SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_SNAPSHOT_VERSION = 2
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -979,6 +1011,8 @@ def _build_snapshot_entry(
         "category": category,
         "frontmatter_name": str(frontmatter.get("name", skill_name)),
         "description": description,
+        "hidden": bool(frontmatter.get("hidden", False)),
+        "disabled": bool(frontmatter.get("disabled", False)),
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
     }
@@ -1098,16 +1132,24 @@ def build_skills_system_prompt(
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
+    skill_count = 0
+    hidden_skill_count = 0
 
     if snapshot is not None:
         # Fast path: use pre-parsed metadata from disk
-        for entry in snapshot.get("skills", []):
+        skill_entries = snapshot.get("skills", [])
+        for entry in skill_entries:
             if not isinstance(entry, dict):
                 continue
+            skill_count += 1
+            if entry.get("hidden"):
+                hidden_skill_count += 1
             skill_name = entry.get("skill_name") or ""
             category = entry.get("category") or "general"
             frontmatter_name = entry.get("frontmatter_name") or skill_name
             platforms = entry.get("platforms") or []
+            if entry.get("hidden"):
+                continue
             if not skill_matches_platform({"platforms": platforms}):
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
@@ -1129,10 +1171,15 @@ def build_skills_system_prompt(
         # Cold path: full filesystem scan + write snapshot for next time
         skill_entries: list[dict] = []
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
+            skill_count += 1
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
             entry = _build_snapshot_entry(skill_file, skills_dir, frontmatter, desc)
             skill_entries.append(entry)
+            if entry.get("hidden"):
+                hidden_skill_count += 1
             if not is_compatible:
+                continue
+            if frontmatter.get("hidden"):
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
@@ -1186,6 +1233,8 @@ def build_skills_system_prompt(
                 if not is_compatible:
                     continue
                 entry = _build_snapshot_entry(skill_file, ext_dir, frontmatter, desc)
+                if entry.get("hidden"):
+                    continue
                 skill_name = entry["skill_name"]
                 frontmatter_name = entry["frontmatter_name"]
                 if frontmatter_name in seen_skill_names:
@@ -1235,10 +1284,7 @@ def build_skills_system_prompt(
                 if name in seen:
                     continue
                 seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
+                index_lines.append(f"    - {name}")
 
         result = (
             "## Skills (mandatory)\n"
@@ -1262,6 +1308,21 @@ def build_skills_system_prompt(
             "\n"
             "Only proceed without loading a skill if genuinely none are relevant to the task."
         )
+
+    # ── Statistics logging ────────────────────────────────────────────
+    _visible_skills = sum(len(skills) for skills in skills_by_category.values())
+    _skill_index_token_estimate = len(result) // 4 if result else 0
+    logger.info(
+        "Skills prompt built: skill_count=%d hidden_skill_count=%d visible_skill_count=%d "
+        "skill_index_token_estimate=%d total_system_prompt_token_estimate=%d "
+        "duplicated_context_blocks_count=%d",
+        skill_count,
+        hidden_skill_count,
+        _visible_skills,
+        _skill_index_token_estimate,
+        _skill_index_token_estimate,
+        0,  # No duplicate context blocks in skills index
+    )
 
     # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:

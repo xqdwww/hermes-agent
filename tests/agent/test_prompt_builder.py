@@ -262,7 +262,8 @@ class TestBuildSkillsSystemPrompt:
         )
         result = build_skills_system_prompt()
         assert "python-debug" in result
-        assert "Debug Python scripts" in result
+        # Descriptions are no longer included in the index — only skill names
+        assert "Debug Python scripts" not in result
         assert "available_skills" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
@@ -322,7 +323,8 @@ class TestBuildSkillsSystemPrompt:
             result = build_skills_system_prompt()
 
         assert "imessage" in result
-        assert "Send iMessages" in result
+        # Descriptions are no longer included in the index — only skill names
+        assert "Send iMessages" not in result
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
         """Skills in the user's disabled list should not appear in the system prompt."""
