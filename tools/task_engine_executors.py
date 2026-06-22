@@ -71,6 +71,7 @@ AGY_TIMEOUT_RESPONSE = "AGY_TIMEOUT_RESPONSE"
 AGY_TIMEOUT_BLOCKED = "AGY_TIMEOUT_BLOCKED"
 AGY_PRINTMODE_TIMEOUT_AFTER_AUTH_SUCCESS = "AGY_PRINTMODE_TIMEOUT_AFTER_AUTH_SUCCESS"
 AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN = "AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN"
+AGY_LOCATION_UNSUPPORTED = "AGY_LOCATION_UNSUPPORTED"
 AGY_KEYCHAIN_RETRY_SLEEP_S = 2
 AGY_STABLE_CWD_DEFAULT = Path("/Users/xqdwww/Workspace/AI_Core/hermes-agent")
 PROFILE_EVIDENCE_GROUNDED = "evidence_grounded"
@@ -382,7 +383,17 @@ class LocalTaskEngineExecutor:
                     break
                 keychain_false_negative = _agy_keychain_false_negative(combined)
                 auth_negative = _agy_auth_negative(combined)
+                location_unsupported = _agy_location_unsupported(combined)
                 if result.returncode != 0:
+                    failure_reason = f"returncode={result.returncode}"
+                    if location_unsupported:
+                        failure_reason = AGY_LOCATION_UNSUPPORTED
+                    elif keychain_false_negative:
+                        failure_reason = AGY_KEYCHAIN_FALSE_NEGATIVE
+                    elif auth_negative and attempt > 0:
+                        failure_reason = "AGY_AUTH_BLOCKED"
+                    elif auth_negative:
+                        failure_reason = "AGY_AUTH_REQUIRES_USER"
                     last_error = _format_agy_failure(
                         stage=stage,
                         command=command,
@@ -394,15 +405,7 @@ class LocalTaskEngineExecutor:
                         log_text=log_text,
                         elapsed=elapsed,
                         agy_cwd=agy_cwd,
-                        reason=(
-                            AGY_KEYCHAIN_FALSE_NEGATIVE
-                            if keychain_false_negative
-                            else "AGY_AUTH_BLOCKED"
-                            if auth_negative and attempt > 0
-                            else "AGY_AUTH_REQUIRES_USER"
-                            if auth_negative
-                            else f"returncode={result.returncode}"
-                        ),
+                        reason=failure_reason,
                     )
                     if (keychain_false_negative or auth_negative) and attempt == 0:
                         time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
@@ -422,7 +425,7 @@ class LocalTaskEngineExecutor:
                     log_text=log_text,
                     elapsed=elapsed,
                     agy_cwd=agy_cwd,
-                    reason="empty_stdout",
+                    reason=AGY_LOCATION_UNSUPPORTED if location_unsupported else "empty_stdout",
                 )
                 break
             except subprocess.TimeoutExpired as exc:
@@ -8377,6 +8380,8 @@ def _agy_preflight_blocked(
 def _classify_agy_preflight_block(stdout: str, stderr: str) -> str:
     combined = "\n".join(part for part in (stdout, stderr) if part)
     lowered = combined.lower()
+    if _agy_location_unsupported(combined):
+        return AGY_LOCATION_UNSUPPORTED
     if "authentication timed out" in lowered or ("silent auth" in lowered and "timed out" in lowered):
         return "AGY_AUTH_TIMEOUT"
     if _agy_timeout_response(combined):
@@ -8426,6 +8431,13 @@ def _agy_auth_negative(output: str) -> bool:
         "you are not logged into antigravity" in lowered
         or "not logged into antigravity" in lowered
         or "not authenticated" in lowered
+    )
+
+
+def _agy_location_unsupported(output: str) -> bool:
+    lowered = (output or "").lower()
+    return "user location is not supported for the api use" in lowered or (
+        "failed_precondition" in lowered and "location" in lowered and "not supported" in lowered
     )
 
 
@@ -8564,6 +8576,9 @@ def _agy_key_lines(stdout: str, stderr: str, log_text: str) -> list[str]:
         "print mode",
         "error",
         "failed",
+        "failed_precondition",
+        "location",
+        "not supported",
         "timeout",
         "operation not permitted",
     )

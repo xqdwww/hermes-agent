@@ -858,6 +858,18 @@ def test_agy_keychain_false_negative_classification():
     assert executors._classify_agy_preflight_block("", truly_logged_out) == "AGY_AUTH_REQUIRES_USER"
 
 
+def test_agy_location_unsupported_classification():
+    import tools.task_engine_executors as executors
+
+    log = (
+        "agent executor error: FAILED_PRECONDITION (code 400): "
+        "User location is not supported for the API use."
+    )
+
+    assert executors._agy_location_unsupported(log) is True
+    assert executors._classify_agy_preflight_block("", log) == executors.AGY_LOCATION_UNSUPPORTED
+
+
 def test_agy_preflight_retries_keychain_false_negative_once(monkeypatch):
     import tools.task_engine_executors as executors
 
