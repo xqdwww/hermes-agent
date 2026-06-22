@@ -14196,7 +14196,25 @@ class HermesCLI:
                     paste_file = paste_dir / f"paste_{_paste_counter[0]}_{datetime.now().strftime('%H%M%S')}.txt"
                     paste_file.write_text(pasted_text, encoding="utf-8")
                     logger.info("Collapsed paste #%d: %d lines, %d chars -> %s", _paste_counter[0], line_count + 1, len(pasted_text), paste_file)
-                    placeholder = f"[Pasted text #{_paste_counter[0]}: {line_count + 1} lines \u2192 {paste_file}]"
+                    # ── Compress paste via hybrid compressor (regex + 9B) ──
+                    compressed_file = paste_file
+                    try:
+                        compressor_script = _hermes_home / "scripts" / "paste_compressor.py"
+                        if compressor_script.exists():
+                            compressed_path = paste_file.with_name(f"{paste_file.stem}_compressed.txt")
+                            import subprocess as _sp
+                            result = _sp.run(
+                                [sys.executable, str(compressor_script), str(paste_file), "--output", str(compressed_path)],
+                                capture_output=True, timeout=30,
+                            )
+                            if result.returncode == 0 and compressed_path.exists():
+                                compressed_file = compressed_path
+                                logger.info("Compressed paste #%d: %d -> %d chars", _paste_counter[0], len(pasted_text), compressed_path.stat().st_size)
+                            else:
+                                logger.debug("Paste compression skipped (rc=%d): %s", result.returncode, result.stderr.decode(errors="replace")[:200])
+                    except Exception as _exc:
+                        logger.debug("Paste compression failed (will use raw): %s", _exc)
+                    placeholder = f"[Pasted text #{_paste_counter[0]}: {line_count + 1} lines → {compressed_file}]"
                     prefix = ""
                     if buf.cursor_position > 0 and buf.text[buf.cursor_position - 1] != '\n':
                         prefix = "\n"
