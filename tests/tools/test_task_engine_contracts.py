@@ -910,7 +910,7 @@ def test_agy_preflight_retries_keychain_false_negative_once(monkeypatch):
     assert all("auth" not in command and "login" not in command for command in calls)
 
 
-def test_agy_preflight_does_not_retry_true_logged_out(monkeypatch):
+def test_agy_preflight_true_logged_out_runs_bare_refresh_then_requires_manual_login(monkeypatch):
     import tools.task_engine_executors as executors
 
     calls = []
@@ -934,8 +934,63 @@ def test_agy_preflight_does_not_retry_true_logged_out(monkeypatch):
     result = run_agy_preflight()
 
     assert result["status"] == "BLOCKED_STATUS"
-    assert result["blocked_reason"] == "AGY_AUTH_REQUIRES_USER"
-    assert len(calls) == 1
+    assert result["blocked_reason"] == executors.REQUIRES_MANUAL_AGY_LOGIN
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
+    assert executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(calls[2])
+
+
+def test_agy_preflight_models_empty_runs_bare_refresh_and_print_mode_passes(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if command == ["/opt/homebrew/bin/agy"]:
+            return type("Result", (), {"returncode": 0, "stdout": "Antigravity CLI\nxqdwww@gmail.com\n", "stderr": ""})()
+        Path(command[2]).write_text("Resolving model Gemini 3.1 Pro (High)\n", encoding="utf-8")
+        return type("Result", (), {"returncode": 0, "stdout": executors.AGY_INTERNAL_PREFLIGHT_SENTINEL, "stderr": ""})()
+
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+
+    result = run_agy_preflight()
+
+    assert result["status"] == "AGY_OK"
+    assert result["auth_refresh"]["status"] == "AGY_AUTH_REFRESH_OK"
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
+    assert executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(calls[2])
+
+
+def test_agy_preflight_location_unsupported_refreshes_then_fails_closed(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    calls = []
+    location_error = "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": location_error})()
+        if command == ["/opt/homebrew/bin/agy"]:
+            return type("Result", (), {"returncode": 0, "stdout": "Antigravity CLI\nxqdwww@gmail.com\n", "stderr": ""})()
+        Path(command[2]).write_text(location_error, encoding="utf-8")
+        return type("Result", (), {"returncode": 1, "stdout": "", "stderr": location_error})()
+
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+
+    result = run_agy_preflight()
+
+    assert result["status"] == "BLOCKED_STATUS"
+    assert result["blocked_reason"] == executors.AGY_LOCATION_UNSUPPORTED
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
+    assert executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(calls[2])
 
 
 def test_run_agy_gemini_retries_keychain_false_negative_then_succeeds(monkeypatch, tmp_path: Path):
@@ -1083,6 +1138,8 @@ def test_run_agy_gemini_timeout_expired_classifies_auth_uncertain_print_timeout(
         calls.append(command)
         if command[-1] == "models":
             return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        if command == ["/opt/homebrew/bin/agy"]:
+            return type("Result", (), {"returncode": 0, "stdout": "Antigravity CLI\nxqdwww@gmail.com\n", "stderr": ""})()
         Path(command[2]).write_text(
             "You are not logged into Antigravity.\nE printmode.go] Print mode: timed out after 1195 polls\n",
             encoding="utf-8",
@@ -1109,9 +1166,11 @@ def test_run_agy_gemini_timeout_expired_classifies_auth_uncertain_print_timeout(
     else:
         raise AssertionError("AGY print timeout should block")
 
-    assert len(calls) == 3
+    assert len(calls) >= 4
     assert ["--print-timeout", "600s"] == calls[1][-2:]
-    assert "reason=AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN" in message
+    assert calls[2] == ["/opt/homebrew/bin/agy"]
+    assert any(executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(call) for call in calls)
+    assert f"reason={executors.REQUIRES_MANUAL_AGY_LOGIN}" in message
     assert "AGY_KEYCHAIN_TIMEOUT_FALSE_NEGATIVE" not in message
     assert "token" not in message.lower()
 
@@ -1147,6 +1206,11 @@ def test_run_agy_gemini_blocks_before_long_prompt_when_preflight_fails(monkeypat
 
     def fake_run(command, **kwargs):
         calls.append(command)
+        if command == ["/opt/homebrew/bin/agy"]:
+            return type("Result", (), {"returncode": 1, "stdout": "Open browser and enter authorization code ABC123", "stderr": ""})()
+        if executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(command):
+            Path(command[2]).write_text("not authenticated\n", encoding="utf-8")
+            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "You are not logged into Antigravity."})()
         assert command[-1] == "models"
         return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "You are not logged into Antigravity."})()
 
@@ -1163,10 +1227,80 @@ def test_run_agy_gemini_blocks_before_long_prompt_when_preflight_fails(monkeypat
     else:
         raise AssertionError("preflight failure should block before AGY long prompt")
 
-    assert calls == [["/opt/homebrew/bin/agy", "models"]]
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
     assert "L1_gemini_search: AGY_PREFLIGHT_BLOCKED" in message
-    assert "AGY_AUTH_REQUIRES_USER" in message
-    assert "token" not in message.lower()
+    assert executors.REQUIRES_MANUAL_AGY_LOGIN in message
+
+
+def test_run_agy_gemini_empty_print_response_refreshes_and_retries(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        if command == ["/opt/homebrew/bin/agy"]:
+            return type("Result", (), {"returncode": 0, "stdout": "Antigravity CLI\nxqdwww@gmail.com\n", "stderr": ""})()
+        Path(command[2]).write_text("Resolving model Gemini 3.5 Flash (High)\n", encoding="utf-8")
+        if executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(command):
+            return type("Result", (), {"returncode": 0, "stdout": executors.AGY_INTERNAL_PREFLIGHT_SENTINEL, "stderr": ""})()
+        original_print_calls = [
+            call for call in calls
+            if call[-1] != "models" and call != ["/opt/homebrew/bin/agy"] and executors.AGY_INTERNAL_PREFLIGHT_SENTINEL not in " ".join(call)
+        ]
+        if len(original_print_calls) == 1:
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return type("Result", (), {"returncode": 0, "stdout": "fresh AGY output", "stderr": ""})()
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][0]
+    executor = LocalTaskEngineExecutor()
+
+    assert executor.run_agy_gemini(stage, "prompt", GEMINI_HIGH) == "fresh AGY output"
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert ["/opt/homebrew/bin/agy"] in calls
+    assert any(executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(call) for call in calls)
+
+
+def test_run_agy_gemini_empty_sentinel_after_refresh_fails_closed(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "models":
+            return type("Result", (), {"returncode": 0, "stdout": "Gemini 3.5 Flash (High)\nGemini 3.1 Pro (High)\n", "stderr": ""})()
+        if command == ["/opt/homebrew/bin/agy"]:
+            return type("Result", (), {"returncode": 0, "stdout": "Antigravity CLI\nxqdwww@gmail.com\n", "stderr": ""})()
+        Path(command[2]).write_text("Resolving model Gemini 3.5 Flash (High)\n", encoding="utf-8")
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setenv("HERMES_AGY_MODEL_ALIAS_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(executors.shutil, "which", lambda name: "/opt/homebrew/bin/agy")
+    monkeypatch.setattr(executors.subprocess, "run", fake_run)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][0]
+    executor = LocalTaskEngineExecutor()
+    try:
+        executor.run_agy_gemini(stage, "prompt", GEMINI_HIGH)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("empty sentinel after refresh should block")
+
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert ["/opt/homebrew/bin/agy"] in calls
+    assert any(executors.AGY_INTERNAL_PREFLIGHT_SENTINEL in " ".join(call) for call in calls)
+    assert f"reason={executors.AGY_PRINT_MODE_EMPTY_RESPONSE}" in message
 
 
 def test_l2_5_codex_handoff_smoke_writes_protocol_files(tmp_path: Path):
@@ -3787,7 +3921,10 @@ def test_agy_preflight_success_lists_required_models(monkeypatch):
 def test_agy_preflight_blocks_auth_required(monkeypatch):
     import tools.task_engine_executors as executors
 
+    calls = []
+
     def fake_run(command, **kwargs):
+        calls.append(command)
         return type(
             "Result",
             (),
@@ -3805,15 +3942,21 @@ def test_agy_preflight_blocks_auth_required(monkeypatch):
 
     assert result["status"] == "BLOCKED_STATUS"
     assert result["blocked_stage"] == "agy_preflight"
-    assert result["blocked_reason"] == "AGY_AUTH_REQUIRES_USER"
-    assert "not logged into Antigravity" in result["stderr_tail"]
+    assert result["blocked_reason"] == executors.REQUIRES_MANUAL_AGY_LOGIN
+    assert result["auth_refresh"]["bare_agy"]["command"] == ["/opt/homebrew/bin/agy"]
+    assert "not logged into Antigravity" in result["auth_refresh"]["print_mode_sentinel"]["stderr_tail"]
     assert result["authorization_code_note"] == "authorization code must be entered by user manually"
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
 
 
 def test_agy_preflight_blocks_authorization_code_required(monkeypatch):
     import tools.task_engine_executors as executors
 
+    calls = []
+
     def fake_run(command, **kwargs):
+        calls.append(command)
         return type(
             "Result",
             (),
@@ -3831,15 +3974,20 @@ def test_agy_preflight_blocks_authorization_code_required(monkeypatch):
 
     assert result["status"] == "BLOCKED_STATUS"
     assert result["blocked_stage"] == "agy_preflight"
-    assert result["blocked_reason"] == "AGY_AUTH_REQUIRES_USER"
-    assert "authorization code" in result["stdout_tail"]
+    assert result["blocked_reason"] == executors.REQUIRES_MANUAL_AGY_LOGIN
+    assert "authorization code" in result["auth_refresh"]["bare_agy"]["stdout_tail"]
     assert result["authorization_code_note"] == "authorization code must be entered by user manually"
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
 
 
 def test_agy_preflight_blocks_silent_auth_timeout(monkeypatch):
     import tools.task_engine_executors as executors
 
+    calls = []
+
     def fake_run(command, **kwargs):
+        calls.append(command)
         return type(
             "Result",
             (),
@@ -3857,7 +4005,9 @@ def test_agy_preflight_blocks_silent_auth_timeout(monkeypatch):
 
     assert result["status"] == "BLOCKED_STATUS"
     assert result["blocked_stage"] == "agy_preflight"
-    assert result["blocked_reason"] == "AGY_AUTH_TIMEOUT"
+    assert result["blocked_reason"] == executors.REQUIRES_MANUAL_AGY_LOGIN
+    assert calls[0] == ["/opt/homebrew/bin/agy", "models"]
+    assert calls[1] == ["/opt/homebrew/bin/agy"]
 
 
 def test_agy_preflight_blocks_missing_required_models(monkeypatch):

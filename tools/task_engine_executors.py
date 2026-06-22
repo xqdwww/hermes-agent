@@ -73,6 +73,11 @@ AGY_PRINTMODE_TIMEOUT_AFTER_AUTH_SUCCESS = "AGY_PRINTMODE_TIMEOUT_AFTER_AUTH_SUC
 AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN = "AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN"
 AGY_LOCATION_UNSUPPORTED = "AGY_LOCATION_UNSUPPORTED"
 AGY_KEYCHAIN_RETRY_SLEEP_S = 2
+AGY_INTERNAL_PREFLIGHT_SENTINEL = "HERMES_AGY_INTERNAL_PREFLIGHT_OK"
+AGY_BARE_REFRESH_TIMEOUT_S = 30
+REQUIRES_MANUAL_AGY_LOGIN = "REQUIRES_MANUAL_AGY_LOGIN"
+REQUIRES_BARE_AGY_REFRESH = "REQUIRES_BARE_AGY_REFRESH"
+AGY_PRINT_MODE_EMPTY_RESPONSE = "AGY_PRINT_MODE_EMPTY_RESPONSE"
 AGY_STABLE_CWD_DEFAULT = Path("/Users/xqdwww/Workspace/AI_Core/hermes-agent")
 PROFILE_EVIDENCE_GROUNDED = "evidence_grounded"
 PROFILE_FORESIGHT_MECHANISM = "foresight_mechanism"
@@ -149,6 +154,14 @@ def run_agy_preflight(timeout_s: int = 45) -> dict[str, Any]:
             combined = "\n".join(part for part in (stdout, stderr) if part)
             models = _parse_agy_models(stdout)
             if result.returncode == 0:
+                if not combined.strip():
+                    refresh = _run_agy_auth_refresh_gate(
+                        agy_path=agy_path,
+                        agy_cwd=agy_cwd,
+                        agy_env=agy_env,
+                        timeout_s=timeout_s,
+                    )
+                    return _agy_preflight_from_refresh(refresh, agy_cwd=agy_cwd, gemini_dir_absolute=_agy_gemini_dir_is_absolute(agy_env))
                 missing = [model for model in AGY_PREFLIGHT_REQUIRED_MODELS if model not in combined]
                 if not missing:
                     return _agy_preflight_result(
@@ -183,6 +196,14 @@ def run_agy_preflight(timeout_s: int = 45) -> dict[str, Any]:
                 agy_cwd=agy_cwd,
                 gemini_dir_absolute=_agy_gemini_dir_is_absolute(agy_env),
             )
+            if last_blocked and _agy_reason_requires_refresh(reason, combined):
+                refresh = _run_agy_auth_refresh_gate(
+                    agy_path=agy_path,
+                    agy_cwd=agy_cwd,
+                    agy_env=agy_env,
+                    timeout_s=timeout_s,
+                )
+                return _agy_preflight_from_refresh(refresh, agy_cwd=agy_cwd, gemini_dir_absolute=_agy_gemini_dir_is_absolute(agy_env))
         except subprocess.TimeoutExpired as exc:
             elapsed = time.time() - started
             stdout = _decode_timeout_part(exc.stdout)
@@ -200,6 +221,14 @@ def run_agy_preflight(timeout_s: int = 45) -> dict[str, Any]:
                 agy_cwd=agy_cwd,
                 gemini_dir_absolute=_agy_gemini_dir_is_absolute(agy_env),
             )
+            if _agy_reason_requires_refresh(reason, "\n".join(part for part in (stdout, stderr) if part)):
+                refresh = _run_agy_auth_refresh_gate(
+                    agy_path=agy_path,
+                    agy_cwd=agy_cwd,
+                    agy_env=agy_env,
+                    timeout_s=timeout_s,
+                )
+                return _agy_preflight_from_refresh(refresh, agy_cwd=agy_cwd, gemini_dir_absolute=_agy_gemini_dir_is_absolute(agy_env))
         if last_blocked and last_blocked.get("blocked_reason") == AGY_KEYCHAIN_FALSE_NEGATIVE and attempt == 0:
             time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
             continue
@@ -407,6 +436,31 @@ class LocalTaskEngineExecutor:
                         agy_cwd=agy_cwd,
                         reason=failure_reason,
                     )
+                    if _agy_reason_requires_refresh(failure_reason, combined):
+                        refresh = _run_agy_auth_refresh_gate(
+                            agy_path=agy_path,
+                            agy_cwd=agy_cwd,
+                            agy_env=agy_env,
+                            timeout_s=min(timeout_s, 90),
+                            model=actual_model,
+                        )
+                        if refresh.get("status") == "AGY_AUTH_REFRESH_OK" and attempt == 0:
+                            time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
+                            continue
+                        last_error = _format_agy_failure(
+                            stage=stage,
+                            command=command,
+                            canonical_model=model,
+                            actual_model=actual_model,
+                            log_file=log_file,
+                            stdout=stdout,
+                            stderr=stderr,
+                            log_text=log_text,
+                            elapsed=elapsed,
+                            agy_cwd=agy_cwd,
+                            reason=str(refresh.get("blocked_reason") or failure_reason),
+                        ) + _agy_refresh_failure_suffix(refresh)
+                        break
                     if (keychain_false_negative or auth_negative) and attempt == 0:
                         time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
                         continue
@@ -427,6 +481,31 @@ class LocalTaskEngineExecutor:
                     agy_cwd=agy_cwd,
                     reason=AGY_LOCATION_UNSUPPORTED if location_unsupported else "empty_stdout",
                 )
+                refresh_reason = AGY_LOCATION_UNSUPPORTED if location_unsupported else "empty_stdout"
+                if _agy_reason_requires_refresh(refresh_reason, combined):
+                    refresh = _run_agy_auth_refresh_gate(
+                        agy_path=agy_path,
+                        agy_cwd=agy_cwd,
+                        agy_env=agy_env,
+                        timeout_s=min(timeout_s, 90),
+                        model=actual_model,
+                    )
+                    if refresh.get("status") == "AGY_AUTH_REFRESH_OK" and attempt == 0:
+                        time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
+                        continue
+                    last_error = _format_agy_failure(
+                        stage=stage,
+                        command=command,
+                        canonical_model=model,
+                        actual_model=actual_model,
+                        log_file=log_file,
+                        stdout=stdout,
+                        stderr=stderr,
+                        log_text=log_text,
+                        elapsed=elapsed,
+                        agy_cwd=agy_cwd,
+                        reason=str(refresh.get("blocked_reason") or refresh_reason),
+                    ) + _agy_refresh_failure_suffix(refresh)
                 break
             except subprocess.TimeoutExpired as exc:
                 elapsed = time.time() - started
@@ -456,6 +535,31 @@ class LocalTaskEngineExecutor:
                     agy_cwd=agy_cwd,
                     reason=reason,
                 )
+                if _agy_reason_requires_refresh(reason, combined):
+                    refresh = _run_agy_auth_refresh_gate(
+                        agy_path=agy_path,
+                        agy_cwd=agy_cwd,
+                        agy_env=agy_env,
+                        timeout_s=min(timeout_s, 90),
+                        model=actual_model,
+                    )
+                    if refresh.get("status") == "AGY_AUTH_REFRESH_OK" and attempt == 0:
+                        time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
+                        continue
+                    last_error = _format_agy_failure(
+                        stage=stage,
+                        command=command,
+                        canonical_model=model,
+                        actual_model=actual_model,
+                        log_file=log_file,
+                        stdout=stdout,
+                        stderr=stderr,
+                        log_text=log_text,
+                        elapsed=elapsed,
+                        agy_cwd=agy_cwd,
+                        reason=str(refresh.get("blocked_reason") or reason),
+                    ) + _agy_refresh_failure_suffix(refresh)
+                    break
                 if (timeout_response or keychain_false_negative) and attempt == 0:
                     time.sleep(AGY_KEYCHAIN_RETRY_SLEEP_S)
                     continue
@@ -8489,6 +8593,239 @@ def _agy_gemini_dir_is_absolute(env: dict[str, str]) -> bool | None:
     if not value:
         return None
     return Path(value).expanduser().is_absolute()
+
+
+def _agy_reason_requires_refresh(reason: str, output: str = "") -> bool:
+    combined = output or ""
+    normalized = (reason or "").strip()
+    if normalized == AGY_KEYCHAIN_FALSE_NEGATIVE:
+        return False
+    if _agy_location_unsupported(combined):
+        return True
+    if _agy_auth_negative(combined):
+        return True
+    if not combined.strip() and normalized in {"", "empty_stdout", "timeout_after=0s"}:
+        return True
+    return normalized in {
+        "AGY_AUTH_TIMEOUT",
+        "AGY_AUTH_REQUIRES_USER",
+        "AGY_AUTH_BLOCKED",
+        AGY_LOCATION_UNSUPPORTED,
+        AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN,
+        AGY_PRINTMODE_TIMEOUT_AFTER_AUTH_SUCCESS,
+        "empty_stdout",
+    } or (normalized.startswith("timeout_after=") and not combined.strip())
+
+
+def _agy_manual_login_required(output: str) -> bool:
+    lowered = (output or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            "authorization code",
+            "verification code",
+            "enter code",
+            "google authorization",
+            "requires user confirmation",
+            "manual login",
+        )
+    )
+
+
+def _agy_command_result_dict(
+    *,
+    command: list[str],
+    returncode: int | str,
+    stdout: str,
+    stderr: str,
+    elapsed: float,
+    timeout: bool = False,
+    log_file: Path | None = None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "command": command,
+        "returncode": returncode,
+        "timeout": timeout,
+        "elapsed_seconds": round(elapsed, 2),
+        "stdout_len": len(stdout or ""),
+        "stdout_tail": _tail_text(stdout),
+        "stderr_tail": _tail_text(stderr),
+    }
+    if log_file:
+        data["log_file"] = str(log_file)
+        data["log_tail"] = _tail_text(_read_text(log_file))
+    return data
+
+
+def _run_agy_auth_refresh_gate(
+    *,
+    agy_path: str,
+    agy_cwd: str,
+    agy_env: dict[str, str],
+    timeout_s: int,
+    model: str | None = None,
+) -> dict[str, Any]:
+    bare_timeout = min(max(int(timeout_s or AGY_BARE_REFRESH_TIMEOUT_S), 15), AGY_BARE_REFRESH_TIMEOUT_S)
+    bare_command = [agy_path]
+    bare_started = time.time()
+    try:
+        bare = subprocess.run(
+            bare_command,
+            capture_output=True,
+            text=True,
+            timeout=bare_timeout,
+            cwd=agy_cwd,
+            env=agy_env,
+        )
+        bare_stdout = bare.stdout or ""
+        bare_stderr = bare.stderr or ""
+        bare_result = _agy_command_result_dict(
+            command=bare_command,
+            returncode=bare.returncode,
+            stdout=bare_stdout,
+            stderr=bare_stderr,
+            elapsed=time.time() - bare_started,
+        )
+    except subprocess.TimeoutExpired as exc:
+        bare_stdout = _decode_timeout_part(exc.stdout)
+        bare_stderr = _decode_timeout_part(exc.stderr)
+        bare_result = _agy_command_result_dict(
+            command=bare_command,
+            returncode="timeout",
+            stdout=bare_stdout,
+            stderr=bare_stderr,
+            elapsed=time.time() - bare_started,
+            timeout=True,
+        )
+
+    actual_model = model or resolve_agy_model_alias(GEMINI_PRO_HIGH)
+    sentinel_log = Path(f"/private/tmp/agy-refresh-{uuid.uuid4().hex[:8]}.log")
+    sentinel_command = [
+        agy_path,
+        "--log-file",
+        str(sentinel_log),
+        "--model",
+        actual_model,
+        "-p",
+        f"Reply exactly: {AGY_INTERNAL_PREFLIGHT_SENTINEL}",
+        "--print-timeout",
+        f"{min(max(int(timeout_s or 45), 30), 120)}s",
+    ]
+    sentinel_started = time.time()
+    try:
+        sentinel = subprocess.run(
+            sentinel_command,
+            capture_output=True,
+            text=True,
+            timeout=min(max(int(timeout_s or 45), 30), 120) + 30,
+            cwd=agy_cwd,
+            env=agy_env,
+        )
+        sentinel_stdout = sentinel.stdout or ""
+        sentinel_stderr = sentinel.stderr or ""
+        sentinel_result = _agy_command_result_dict(
+            command=sentinel_command,
+            returncode=sentinel.returncode,
+            stdout=sentinel_stdout,
+            stderr=sentinel_stderr,
+            elapsed=time.time() - sentinel_started,
+            log_file=sentinel_log,
+        )
+    except subprocess.TimeoutExpired as exc:
+        sentinel_stdout = _decode_timeout_part(exc.stdout)
+        sentinel_stderr = _decode_timeout_part(exc.stderr)
+        sentinel_result = _agy_command_result_dict(
+            command=sentinel_command,
+            returncode="timeout",
+            stdout=sentinel_stdout,
+            stderr=sentinel_stderr,
+            elapsed=time.time() - sentinel_started,
+            timeout=True,
+            log_file=sentinel_log,
+        )
+
+    sentinel_log_text = _read_text(sentinel_log)
+    sentinel_combined = "\n".join(part for part in (sentinel_stdout, sentinel_stderr, sentinel_log_text) if part)
+    bare_combined = "\n".join(part for part in (bare_stdout, bare_stderr) if part)
+    if sentinel_result["returncode"] == 0 and AGY_INTERNAL_PREFLIGHT_SENTINEL in sentinel_stdout.strip():
+        return {
+            "status": "AGY_AUTH_REFRESH_OK",
+            "blocked_reason": "",
+            "bare_agy": bare_result,
+            "print_mode_sentinel": sentinel_result,
+            "print_mode_sentinel_text": AGY_INTERNAL_PREFLIGHT_SENTINEL,
+        }
+
+    if _agy_location_unsupported(sentinel_combined):
+        reason = AGY_LOCATION_UNSUPPORTED
+    elif _agy_manual_login_required(bare_combined) or _agy_manual_login_required(sentinel_combined) or _agy_auth_negative(sentinel_combined):
+        reason = REQUIRES_MANUAL_AGY_LOGIN
+    elif not sentinel_stdout.strip():
+        reason = AGY_PRINT_MODE_EMPTY_RESPONSE
+    elif _agy_timeout_response(sentinel_combined):
+        reason = AGY_PRINTMODE_TIMEOUT_AUTH_UNCERTAIN if _agy_auth_negative(sentinel_combined) else AGY_TIMEOUT_BLOCKED
+    else:
+        reason = REQUIRES_BARE_AGY_REFRESH
+    return {
+        "status": "BLOCKED_STATUS",
+        "blocked_reason": reason,
+        "bare_agy": bare_result,
+        "print_mode_sentinel": sentinel_result,
+        "print_mode_sentinel_text": AGY_INTERNAL_PREFLIGHT_SENTINEL,
+    }
+
+
+def _agy_preflight_from_refresh(
+    refresh: dict[str, Any],
+    *,
+    agy_cwd: str,
+    gemini_dir_absolute: bool | None,
+) -> dict[str, Any]:
+    sentinel = refresh.get("print_mode_sentinel") if isinstance(refresh, dict) else {}
+    if not isinstance(sentinel, dict):
+        sentinel = {}
+    command = list(sentinel.get("command") or [])
+    stdout = str(sentinel.get("stdout_tail") or "")
+    stderr = str(sentinel.get("stderr_tail") or "")
+    elapsed = float(sentinel.get("elapsed_seconds") or 0)
+    if refresh.get("status") == "AGY_AUTH_REFRESH_OK":
+        result = _agy_preflight_result(
+            "AGY_OK",
+            command=command,
+            elapsed=elapsed,
+            stdout=stdout,
+            stderr=stderr,
+            models=[],
+            agy_cwd=agy_cwd,
+            gemini_dir_absolute=gemini_dir_absolute,
+        )
+        result["auth_refresh"] = refresh
+        return result
+    result = _agy_preflight_blocked(
+        str(refresh.get("blocked_reason") or REQUIRES_BARE_AGY_REFRESH),
+        command=command,
+        elapsed=elapsed,
+        stdout=stdout,
+        stderr=stderr,
+        models=[],
+        agy_cwd=agy_cwd,
+        gemini_dir_absolute=gemini_dir_absolute,
+    )
+    result["auth_refresh"] = refresh
+    return result
+
+
+def _agy_refresh_failure_suffix(refresh: dict[str, Any]) -> str:
+    if not isinstance(refresh, dict):
+        return ""
+    summary = {
+        "status": refresh.get("status"),
+        "blocked_reason": refresh.get("blocked_reason"),
+        "bare_agy": refresh.get("bare_agy"),
+        "print_mode_sentinel": refresh.get("print_mode_sentinel"),
+        "print_mode_sentinel_text": refresh.get("print_mode_sentinel_text"),
+    }
+    return "\nauth_refresh=" + json.dumps(summary, ensure_ascii=False)
 
 
 def _agy_preflight_result(
