@@ -64,6 +64,30 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+_LIGHTWEIGHT_DIAGNOSTIC_REQUEST_RE = re.compile(
+    r"(最少步骤诊断|快速判断一下|不用查|minimal steps diagnose)",
+    re.IGNORECASE,
+)
+_LIGHTWEIGHT_DIAGNOSTIC_LIVE_CONTEXT_RE = re.compile(
+    r"(查日志|看一下日志|日志|check logs?|look at (?:the )?(?:build output|logs?)|build output)",
+    re.IGNORECASE,
+)
+
+
+def _should_disable_tools_for_lightweight_diagnostic(user_message: str | None) -> bool:
+    """Return True for explicitly lightweight diagnostics that need no tools.
+
+    The gate is intentionally narrow: plain concision requests keep normal tool
+    access, and any request to inspect logs/build output/live state keeps tools.
+    """
+    text = str(user_message or "").strip()
+    if not text:
+        return False
+    if _LIGHTWEIGHT_DIAGNOSTIC_LIVE_CONTEXT_RE.search(text):
+        return False
+    return bool(_LIGHTWEIGHT_DIAGNOSTIC_REQUEST_RE.search(text))
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -423,6 +447,29 @@ def run_conversation(
     # the review fork runs on its own thread with a fresh context,
     # so the foreground value here does not leak into it.
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
+
+    # --- Task Mode Gate: cross-session state recovery (~31.9 us) ---
+    # Recovers gate state from ~/.hermes/task_mode_state.json so a gate
+    # activated in a previous session persists across sessions.  Returns
+    # None when the gate is inactive (ACTIVE state) — the common case.
+    # When the gate is active, injects the state string into the system
+    # prompt context so the Agent knows it must complete the constitutional
+    # review before execution tools are available.
+    try:
+        from tools.task_mode_runtime import activate_or_resume
+        gate_state = activate_or_resume(
+            user_input=user_message or "",
+            session_id=getattr(agent, "session_id", ""),
+        )
+        if gate_state:
+            logger.info(
+                "Task mode gate active: state=%s session=%s",
+                gate_state,
+                getattr(agent, "session_id", "")[:16],
+            )
+    except Exception:
+        # Fail-open: never let the gate become a conversation blocker
+        pass
 
     # If the previous turn activated fallback, restore the primary
     # runtime so this turn gets a fresh attempt with the preferred model.
@@ -1096,6 +1143,52 @@ def run_conversation(
         # lone surrogates (U+D800-U+DFFF) that crash json.dumps() inside
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
+
+        # ── Payload diagnostics ───────────────────────────────────────
+        # Computes a full breakdown of the API payload before any API
+        # call is made.  The hard diagnostic guard blocks the call when
+        # overhead is suspiciously large relative to user input.
+        try:
+            from agent.payload_diagnostics import (
+                _message_to_text,
+                hard_diagnostic_guard,
+                log_payload_summary,
+                payload_breakdown,
+            )
+
+            _current_user_text = ""
+            for _m in reversed(api_messages):
+                if _m.get("role") == "user":
+                    _current_user_text = _message_to_text(_m)
+                    break
+
+            _breakdown = payload_breakdown(
+                api_messages,
+                tools=agent.tools or None,
+                current_user_input=_current_user_text,
+            )
+
+            log_payload_summary(_breakdown)
+
+            _guard_msg = hard_diagnostic_guard(_breakdown, api_messages)
+            if _guard_msg is not None:
+                # Emit the diagnostic to the user and abort
+                agent._vprint(f"\n{agent.log_prefix}{_guard_msg}")
+                final_response = _guard_msg
+                failed = True
+                _turn_exit_reason = "payload_diagnostic_guard"
+                messages.append({"role": "assistant", "content": final_response})
+                api_call_count -= 1
+                agent._api_call_count = api_call_count
+                try:
+                    agent.iteration_budget.refund()
+                except Exception:
+                    pass
+                break
+        except ImportError:
+            pass
+        except Exception as _diag_exc:
+            logger.warning("Payload diagnostics failed (non-fatal): %s", _diag_exc)
 
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)

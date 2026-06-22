@@ -1098,6 +1098,14 @@ DEFAULT_CONFIG = {
         "max_line_length": 2000,
     },
 
+    # Observation reducer replaces large tool outputs in model context with
+    # compact Evidence Cards while writing the full raw output to
+    # /tmp/hermes/observations/<run_id>/. Set enabled:false to restore the
+    # previous behavior where tool messages carry raw outputs directly.
+    "observation_reducer": {
+        "enabled": True,
+    },
+
     # Tool loop guardrails nudge models when they repeat failed or
     # non-progressing tool calls. Soft warnings are always-on by default;
     # hard stops are opt-in so interactive CLI/TUI sessions keep flowing.
