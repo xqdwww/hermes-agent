@@ -48,6 +48,25 @@ from tools.task_engine_executors import (
     run_simulated_pipeline,
 )
 
+LEGACY_RESEARCH_DECISION_BANNED_TERMS = (
+    "RESEARCH_DECISION 16-stage smoke",
+    "完整 RESEARCH_DECISION 16-stage",
+    "direct RESEARCH_DECISION full",
+    "archived 16-stage full",
+    "legacy full",
+    "16-stage smoke",
+)
+LEGACY_RESEARCH_DECISION_ALLOWED_TERMS = (
+    "stage_count: 16",
+    "L1-L14 + external_calibration + final_controller",
+    "two-step E2E validation",
+    "RESEARCH full + DECISION full",
+    "current-run validation",
+)
+LEGACY_RESEARCH_DECISION_AUDIT_CONTEXTS = {"legacy_term_audit", "banned_term_check", "test_assertion"}
+DIRECT_LEGACY_RESEARCH_DECISION_FULL = "DIRECT_LEGACY_RESEARCH_DECISION_FULL"
+TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
+
 
 TASK_ENGINE_RUNNER_SCHEMA = {
     "type": "function",
@@ -125,8 +144,8 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                         "smoke-research-decision-insight: real RESEARCH L1-L5 plus Decision stages 7-13 only. "
                         "smoke-research-decision-convergence: real RESEARCH L1-L5 plus Decision stages 7-14 only. "
                         "smoke-research-decision-calibration: real RESEARCH L1-L5 plus Decision stages 7-15 only. "
-                        "smoke-research-decision-final: archived integration-only RESEARCH_DECISION 16-stage smoke; "
-                        "blocked by default unless explicitly overridden, and not the production default."
+                        "smoke-research-decision-final: disabled integration-only combined-mode action; "
+                        "production validation must use RESEARCH full + DECISION full with a current-run research packet."
                     ),
                     "default": "contract",
                 },
@@ -566,18 +585,19 @@ def _is_archived_research_decision_real_action(mode: str | None, action: str) ->
 
 
 def _archived_research_decision_response(*, action: str) -> dict[str, Any]:
+    reason = DIRECT_LEGACY_RESEARCH_DECISION_FULL if action == "full" else "RESEARCH_DECISION_ARCHIVED"
     return {
         "status": "blocked",
         "pipeline_status": "PIPELINE_BLOCKED",
         "blocked_stage": "research_decision_archived",
-        "blocked_reason": "RESEARCH_DECISION_ARCHIVED",
+        "blocked_reason": reason,
         "mode": ENGINE_RESEARCH_DECISION,
         "action": action,
         "message": (
-            "RESEARCH_DECISION 16-stage full execution is archived / integration-test only. "
-            "Run RESEARCH full first to produce research_evidence_packet.md, then run DECISION full "
-            "with research_packet_path."
+            "Combined-mode production validation is disabled. Run RESEARCH full first to produce "
+            "a current-run research_evidence_packet.md, then run DECISION full with research_packet_path."
         ),
+        "entrypoint_guard": reason,
         "two_step_recommendation": [
             "RESEARCH full -> research_evidence_packet.md",
             "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
@@ -587,6 +607,49 @@ def _archived_research_decision_response(*, action: str) -> dict[str, Any]:
             "environment": "HERMES_ENABLE_RESEARCH_DECISION=1",
         },
     }
+
+
+def audit_legacy_research_decision_terms(value: Any, *, context: str = "normal") -> list[dict[str, str]]:
+    """Return banned combined-mode terminology leaks outside explicit audit contexts."""
+    if context in LEGACY_RESEARCH_DECISION_AUDIT_CONTEXTS:
+        return []
+    violations: list[dict[str, str]] = []
+
+    def visit(item: Any, path: str) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                key_text = str(key)
+                child_path = f"{path}.{key_text}" if path else key_text
+                if key_text in LEGACY_RESEARCH_DECISION_AUDIT_CONTEXTS:
+                    continue
+                visit(child, child_path)
+            return
+        if isinstance(item, (list, tuple)):
+            for index, child in enumerate(item):
+                visit(child, f"{path}[{index}]")
+            return
+        if not isinstance(item, str):
+            return
+        lowered = item.lower()
+        for term in LEGACY_RESEARCH_DECISION_BANNED_TERMS:
+            if term.lower() in lowered:
+                violations.append({"term": term, "path": path, "context": item[:300]})
+
+    visit(value, "")
+    return violations
+
+
+def apply_legacy_research_decision_term_guard(payload: dict[str, Any], *, context: str = "normal") -> dict[str, Any]:
+    violations = audit_legacy_research_decision_terms(payload, context=context)
+    if not violations:
+        return payload
+    guarded = dict(payload)
+    guarded["status"] = TERMINOLOGY_LEAKAGE
+    guarded["pipeline_status"] = PIPELINE_BLOCKED
+    guarded["blocked_stage"] = "legacy_research_decision_terminology"
+    guarded["blocked_reason"] = TERMINOLOGY_LEAKAGE
+    guarded["legacy_term_audit"] = {"violations": violations}
+    return guarded
 
 
 def _resolve_artifact_dir(base_dir: str | None, mode: str, label: str) -> Path:
@@ -753,4 +816,13 @@ registry.register(
 )
 
 
-__all__ = ["TASK_ENGINE_RUNNER_SCHEMA", "task_engine_runner"]
+__all__ = [
+    "TASK_ENGINE_RUNNER_SCHEMA",
+    "LEGACY_RESEARCH_DECISION_BANNED_TERMS",
+    "LEGACY_RESEARCH_DECISION_ALLOWED_TERMS",
+    "DIRECT_LEGACY_RESEARCH_DECISION_FULL",
+    "TERMINOLOGY_LEAKAGE",
+    "apply_legacy_research_decision_term_guard",
+    "audit_legacy_research_decision_terms",
+    "task_engine_runner",
+]

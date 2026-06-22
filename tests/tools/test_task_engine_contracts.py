@@ -77,7 +77,14 @@ from tools.task_engine_executors import (
 from tools.research_pipeline_runner import research_pipeline_runner
 from tools.registry import registry
 from tools.task_mode_runtime import TaskModeRuntime, TaskModeState
-from tools.task_engine_runner import task_engine_runner
+from tools.task_engine_runner import (
+    DIRECT_LEGACY_RESEARCH_DECISION_FULL,
+    LEGACY_RESEARCH_DECISION_BANNED_TERMS,
+    TERMINOLOGY_LEAKAGE,
+    apply_legacy_research_decision_term_guard,
+    audit_legacy_research_decision_terms,
+    task_engine_runner,
+)
 from toolsets import resolve_toolset
 from work import nightly_task_engine_runner as nightly_runner
 from work import stress_task_engine_adhd as stress_runner
@@ -245,13 +252,54 @@ def test_research_decision_full_is_archived_by_default(tmp_path: Path):
 
     assert result["status"] == "blocked"
     assert result["pipeline_status"] == "PIPELINE_BLOCKED"
-    assert result["blocked_reason"] == "RESEARCH_DECISION_ARCHIVED"
+    assert result["blocked_reason"] == DIRECT_LEGACY_RESEARCH_DECISION_FULL
+    assert result["entrypoint_guard"] == DIRECT_LEGACY_RESEARCH_DECISION_FULL
     assert result["mode"] == ENGINE_RESEARCH_DECISION
     assert result["two_step_recommendation"] == [
         "RESEARCH full -> research_evidence_packet.md",
         "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
     ]
     assert result["allow_override"]["function_arg"] == "allow_archived_research_decision=True"
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert not audit_legacy_research_decision_terms(serialized)
+
+
+def test_research_decision_correct_two_step_wording_has_no_banned_terms():
+    payload = {
+        "status": "PASS",
+        "accepted_as": "S02 two-step E2E validation",
+        "path": "RESEARCH full + DECISION full",
+        "stage_count": 16,
+        "source": "current-run validation",
+    }
+
+    assert not audit_legacy_research_decision_terms(payload)
+
+
+def test_research_decision_stage_count_16_alone_is_allowed():
+    assert not audit_legacy_research_decision_terms({"stage_count": 16, "message": "stage_count: 16"})
+
+
+def test_research_decision_banned_terms_are_blocked_outside_audit_context():
+    payload = {"status": "PASS", "summary": "RESEARCH_DECISION 16-stage smoke completed"}
+
+    violations = audit_legacy_research_decision_terms(payload)
+    guarded = apply_legacy_research_decision_term_guard(payload)
+
+    assert violations[0]["term"] == "RESEARCH_DECISION 16-stage smoke"
+    assert guarded["status"] == TERMINOLOGY_LEAKAGE
+    assert guarded["pipeline_status"] == "PIPELINE_BLOCKED"
+    assert guarded["blocked_reason"] == TERMINOLOGY_LEAKAGE
+
+
+def test_research_decision_banned_terms_allowed_only_in_audit_context():
+    payload = {"legacy_term_audit": {"quoted": list(LEGACY_RESEARCH_DECISION_BANNED_TERMS)}}
+
+    assert not audit_legacy_research_decision_terms(payload)
+    assert not audit_legacy_research_decision_terms(
+        {"summary": "direct RESEARCH_DECISION full"},
+        context="banned_term_check",
+    )
 
 
 def test_research_decision_dry_run_remains_available_when_archived(tmp_path: Path):
@@ -2370,7 +2418,7 @@ def test_l4_artifact_missing_blocks_validation(tmp_path: Path):
             if stage.stage_name == "L1_gemini_search":
                 return {"source_candidates": [{"title": "fake"}]}
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
-            return "Gemini audit body"
+            return _complete_research_evidence_packet_text()
 
         def run_ddgs(self, stage, queries):
             return [{"title": "fake ddgs", "url": "https://example.test/ddgs"}]
@@ -2455,7 +2503,7 @@ def test_l5_accepted_research_decision_still_incomplete(tmp_path: Path):
             if stage.stage_name == "L1_gemini_search":
                 return {"source_candidates": [{"title": "fake"}]}
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
-            return "Gemini audit body"
+            return _complete_research_evidence_packet_text()
 
         def run_ddgs(self, stage, queries):
             return [{"title": "fake ddgs", "url": "https://example.test/ddgs"}]
@@ -3688,7 +3736,7 @@ def test_research_decision_intelligence_uses_gemini_high_and_stops_before_stage8
             if stage.stage_name == "L4_gemini_audit":
                 assert model == GEMINI_PRO_HIGH
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
-                return "Gemini audit body"
+                return _complete_research_evidence_packet_text()
             assert stage.stage_name == "intelligence_layer"
             assert stage.owner == GEMINI_HIGH
             assert stage.model == GEMINI_HIGH
