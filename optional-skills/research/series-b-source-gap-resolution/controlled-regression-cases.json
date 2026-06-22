@@ -1,0 +1,130 @@
+{
+  "schema_version": "series-b-controlled-regression-cases.v1",
+  "status": "controlled_regression_reference_only",
+  "production_default_impact": "none",
+  "official_baseline_impact": "none",
+  "official_baseline_statement": "Official Series B baseline remains frozen at 31/60.",
+  "not_a_production_pass": true,
+  "not_a_full_series_b_improvement_claim": true,
+  "cases": [
+    {
+      "case_id": "nat_eco_039",
+      "target_term": {
+        "exact": "overdeepening",
+        "aliases": [],
+        "context_terms": [
+          "fjord",
+          "sill",
+          "threshold",
+          "glacial erosional basin"
+        ]
+      },
+      "target_gap": {
+        "missing_required_term": "overdeepening",
+        "missing_required_axis": null,
+        "quality_cap": "missing_required_concept"
+      },
+      "source_titles": [
+        "Glaciers and Glaciation"
+      ],
+      "source_axes": [
+        "nature_geography_book"
+      ],
+      "source_sha256_values": [
+        "56ba1f63c4de745de13cc485b12c2c6242d4f8df27a587910c2c4c0ec3b84c8e"
+      ],
+      "provenance_status": "confirmed",
+      "controlled_smoke_status": "PASS",
+      "case_scope_only": true,
+      "production_default_used": false,
+      "full_series_b_used": false,
+      "valid_for_other_cases": false,
+      "official_baseline_impact": "none"
+    },
+    {
+      "case_id": "obj_art_010",
+      "target_term": {
+        "exact": "kento/kentō",
+        "aliases": [
+          "kento",
+          "kentō"
+        ],
+        "context_terms": [
+          "alignment marks",
+          "woodblocks",
+          "printing",
+          "Edo publishing",
+          "ukiyo-e"
+        ]
+      },
+      "target_gap": {
+        "missing_required_term": null,
+        "missing_required_axis": "history_book",
+        "quality_cap": "missing_required_axis"
+      },
+      "source_titles": [
+        "Japanese Woodblock Prints",
+        "Edo Culture: Daily Life and Diversions in Urban Japan, 1600-1868"
+      ],
+      "source_axes": [
+        "art_architecture_book",
+        "history_book"
+      ],
+      "source_sha256_values": [
+        "e6979995caed6f598e8dbac7103dd849a181d0286a2a06803ecb4a54837b5f2d",
+        "821e5a51754de218721a34cc19c4a43a9b62427bdd7bd4f279aae90e736b6534"
+      ],
+      "provenance_status": "confirmed",
+      "controlled_smoke_status": "PASS",
+      "case_scope_only": true,
+      "production_default_used": false,
+      "full_series_b_used": false,
+      "valid_for_other_cases": false,
+      "official_baseline_impact": "none"
+    },
+    {
+      "case_id": "hist_arch_024",
+      "target_term": {
+        "exact": "fauces",
+        "aliases": [],
+        "context_terms": [
+          "Roman domestic architecture",
+          "house entrance passage",
+          "Samnite House",
+          "atrium",
+          "tablinum"
+        ],
+        "rejected_contexts": [
+          "medical fauces",
+          "anatomy fauces",
+          "throat fauces",
+          "mouth fauces",
+          "pharynx fauces",
+          "uvula fauces",
+          "tonsil fauces"
+        ]
+      },
+      "target_gap": {
+        "missing_required_term": "fauces",
+        "missing_required_axis": null,
+        "quality_cap": "missing_required_concept"
+      },
+      "source_titles": [
+        "Herculaneum: Past and Future"
+      ],
+      "source_axes": [
+        "archaeology_history_book"
+      ],
+      "source_sha256_values": [
+        "0161786b71dde021e61804c1b395fd1efb2c6ef3a6edb07c6f352cfbdbe127e4"
+      ],
+      "provenance_status": "confirmed",
+      "controlled_smoke_status": "PASS",
+      "case_scope_only": true,
+      "production_default_used": false,
+      "full_series_b_used": false,
+      "valid_for_other_cases": false,
+      "official_baseline_impact": "none"
+    }
+  ]
+}
