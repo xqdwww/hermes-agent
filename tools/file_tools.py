@@ -689,7 +689,7 @@ def clear_file_ops_cache(task_id: str = None):
             _file_ops_cache.clear()
 
 
-def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
+def read_file_tool(path: str, offset: int = 1, limit: int = 200, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:
         offset, limit = normalize_read_pagination(offset, limit)
@@ -826,7 +826,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # Large-file hint: if the file is big and the caller didn't ask
         # for a narrow window, nudge toward targeted reads.
         if (file_size and file_size > _LARGE_FILE_HINT_BYTES
-                and limit > 200
+                and limit >= 200
                 and result_dict.get("truncated")):
             result_dict.setdefault("_hint", (
                 f"This file is large ({file_size:,} bytes). "
@@ -1380,7 +1380,7 @@ READ_FILE_SCHEMA = {
         "properties": {
             "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
-            "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 500, max: 2000)", "default": 500, "maximum": 2000}
+            "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 200, max: 2000). Explicit larger values such as 500 are accepted when needed.", "default": 200, "maximum": 2000}
         },
         "required": ["path"]
     }
@@ -1477,7 +1477,7 @@ SEARCH_FILES_SCHEMA = {
 
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
+    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", 200), task_id=tid)
 
 
 def _handle_write_file(args, **kw):
