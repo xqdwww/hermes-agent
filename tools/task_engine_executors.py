@@ -5924,17 +5924,30 @@ def _decision_final_controller_packet(
             raw_convergence = text
         if stage_name == "external_calibration":
             raw_external_calibration = text
-    trace = [
-        {
+    passthrough_keys = (
+        "created_in_current_run",
+        "legacy_contaminated",
+        "valid_for_pipeline",
+        "run_id",
+        "output_root",
+        "prompt_sha256",
+        "created_at",
+        "stage_index",
+        "stage_number",
+    )
+    trace = []
+    for record in stages:
+        trace_item = {
             "stage_name": record.get("stage_name"),
             "owner": record.get("owner"),
             "model": record.get("model"),
             "executor_model": record.get("executor_model"),
             "artifact_path": str(Path(str(record.get("artifact_path") or "")).resolve().relative_to(base)),
-            "valid_for_pipeline": record.get("valid_for_pipeline"),
         }
-        for record in stages
-    ]
+        for key in passthrough_keys:
+            if key in record:
+                trace_item[key] = record.get(key)
+        trace.append(trace_item)
     packet = {
         "mode": ENGINE_DECISION,
         "query": query,
@@ -7106,7 +7119,7 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
                 calibration_constraints=str(packet.get("external_calibration_hard_constraints") or ""),
                 research_evidence_context=str(packet.get("research_evidence_packet_context") or ""),
             )
-        return _generic_decision_final_report(query, include_evidence_boundary=include_evidence_boundary)
+        return _generic_decision_final_report(query, packet=packet, include_evidence_boundary=include_evidence_boundary)
     profiles = _normalize_profiles(packet.get("output_quality_profile"))
     if PROFILE_FORESIGHT_MECHANISM in profiles:
         return _research_decision_foresight_final_report(query, packet)
@@ -7531,12 +7544,49 @@ def _decision_final_requires_evidence_boundary(packet: dict[str, Any]) -> bool:
     return PROFILE_EVIDENCE_GROUNDED in profiles
 
 
-def _decision_evidence_boundary_section() -> list[str]:
+def _decision_evidence_boundary_section(
+    *,
+    query: str = "",
+    research_evidence_context: str = "",
+    calibration_constraints: str = "",
+) -> list[str]:
+    compliance_domain = scoring_calibration.classify_compliance_domain(query)
+    if compliance_domain == "legal_compliance":
+        evidence_strength = (
+            "evidence_strength: 当前材料足以支持“需要法律、海洋法和合规边界”的条件性判断；"
+            "对具体争议海域活动是否合法、可执行或可商业包装的结论，仍必须降级为需专业复核的中低确定性判断。"
+        )
+        controversy = (
+            "controversy: 争议集中在主权立场、UNCLOS/海洋法适用、司法或仲裁结果的解释、"
+            "数据跨境与制裁/出口管制/地缘风险边界，不同法域和事实场景会改变结论。"
+        )
+        evidence_gap = (
+            "evidence_gap: 缺少足以替代律师、海事合规和相关主管机构意见的事实适用材料；"
+            "尤其缺少具体坐标、客户用途、数据类型、交易结构和管辖法分析。"
+        )
+    elif compliance_domain == "audit_finance_compliance":
+        evidence_strength = (
+            "evidence_strength: 当前材料可支持对审计、财务和合规流程的条件性判断；"
+            "涉及重大错报、监管披露或责任签署的结论仍只能作为需专业复核的中低确定性判断。"
+        )
+        controversy = "controversy: 争议取决于适用准则、内控环境、数据质量、责任主体和监管解释。"
+        evidence_gap = "evidence_gap: 缺少完整底稿、原始凭证、管理层解释和独立复核，不能替代正式审计判断。"
+    else:
+        evidence_strength = (
+            "evidence_strength: 当前材料可支持有边界的决策结构和条件性推断；"
+            "高风险、长期或外部事实依赖强的判断必须保持中低确定性。"
+        )
+        controversy = "controversy: 争议取决于适用场景、关键前提、替代方案、执行约束和反证信号。"
+        evidence_gap = "evidence_gap: 缺少足够具体的事实适用、反事实比较和长期验证，不能把条件性判断写成确定结论。"
+    if research_evidence_context and "evidence_supported" in research_evidence_context:
+        evidence_strength += " research packet 已提供 evidence tier 线索，但 final controller 只吸收其证据边界，不复写原始 metadata。"
+    if calibration_constraints:
+        controversy += " external_calibration 的降调意见应作为最终结论的硬约束。"
     return [
         "## 证据边界",
-        "evidence_strength: 强证据主要在 ADHD 执行功能、行为支持、学习脚手架和身体训练反馈的基础方向；中等证据在个性化反馈、任务结构和注意调节的可迁移机制；弱证据在未来十年 AI 降低知识获取成本 100 倍后的个体轨迹预测。",
-        "controversy: ADHD 特征是否转化为优势，依赖外部结构、学校评价方式、AI 使用方式和孩子是否保留验证习惯；IQ 与柔术训练是调节因素，不是确定因果保证。",
-        "evidence_gap: 目前缺少直接追踪“AI 知识获取成本极低”环境下单个 ADHD 儿童十年发展的长期证据，未来判断和个体化判断都必须保留观察边界。",
+        evidence_strength,
+        controversy,
+        evidence_gap,
         "",
     ]
 
@@ -7675,7 +7725,13 @@ def _decision_future_inversion_report(
         ]
     )
     if include_evidence_boundary:
-        lines.extend(_decision_evidence_boundary_section())
+        lines.extend(
+            _decision_evidence_boundary_section(
+                query=query,
+                research_evidence_context=research_evidence_context,
+                calibration_constraints=calibration_constraints,
+            )
+        )
     lines.extend(
         [
             "## scenario branches",
@@ -7792,8 +7848,14 @@ def _foresight_mechanism_final_report(query: str) -> str:
     )
 
 
-def _generic_decision_final_report(query: str, *, include_evidence_boundary: bool = False) -> str:
+def _generic_decision_final_report(
+    query: str,
+    *,
+    packet: dict[str, Any] | None = None,
+    include_evidence_boundary: bool = False,
+) -> str:
     prompt_anchor = query[:600].strip() or "本轮 DECISION 输入未提供可显示的问题文本。"
+    packet = packet if isinstance(packet, dict) else {}
     lines = [
             "# 决策任务最终报告",
             "",
@@ -7810,7 +7872,13 @@ def _generic_decision_final_report(query: str, *, include_evidence_boundary: boo
             "",
         ]
     if include_evidence_boundary:
-        lines.extend(_decision_evidence_boundary_section())
+        lines.extend(
+            _decision_evidence_boundary_section(
+                query=query,
+                research_evidence_context=str(packet.get("research_evidence_packet_context") or ""),
+                calibration_constraints=str(packet.get("external_calibration_hard_constraints") or ""),
+            )
+        )
     lines.extend(
         [
             "## 风险边界",

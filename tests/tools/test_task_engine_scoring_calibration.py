@@ -239,6 +239,9 @@ def test_legal_compliance_misbucket_regression_keeps_audit_finance_out_of_legal(
     assert calibration.classify_compliance_domain(
         "未来10年 AI 降低法律检索、合同起草、案例摘要和合规解释成本"
     ) == "legal_compliance"
+    assert calibration.classify_compliance_domain(
+        "南海主权争议和海洋法边界下，跨境海洋数据产品能否包装成普通商业建议？"
+    ) == "legal_compliance"
     assert calibration.classify_compliance_domain("普通安全合规运营流程是否应该自动化？") == "general_compliance"
 
 

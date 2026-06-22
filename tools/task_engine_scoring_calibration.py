@@ -55,6 +55,11 @@ LEGAL_RISK_TERMS = (
     "law firm",
     "contract",
     "case law",
+    "international law",
+    "maritime law",
+    "law of the sea",
+    "sovereignty dispute",
+    "unclos",
     "regulatory",
     "法律",
     "律师",
@@ -63,6 +68,10 @@ LEGAL_RISK_TERMS = (
     "案例",
     "诉讼",
     "监管",
+    "国际法",
+    "海洋法",
+    "主权争议",
+    "争议海域",
 )
 
 AUDIT_FINANCE_TERMS = (

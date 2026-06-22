@@ -3420,6 +3420,52 @@ def test_decision_final_packet_with_research_packet_requires_evidence_boundary_k
     assert "not a literature review" in requirements["evidence_boundary_policy"]
 
 
+def test_decision_final_packet_preserves_current_run_metadata_for_stale_gate(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = _decision_final_prior_stage_records(tmp_path)
+    packet = executors._decision_final_controller_packet(
+        stages,
+        query="请基于当前研究成果包做最终决策。",
+        base_dir=tmp_path,
+    )
+
+    first = packet["stage_trace"][0]
+    assert first["stage_name"] == "intelligence_layer"
+    assert first["created_in_current_run"] is True
+    assert first["legacy_contaminated"] is False
+    assert first["valid_for_pipeline"] is True
+    assert not Path(first["artifact_path"]).is_absolute()
+
+    text = executors._final_controller_report_from_packet(packet)
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_legal_evidence_boundary_uses_current_domain_not_adhd(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    research_packet = tmp_path / "research_evidence_packet.md"
+    research_packet.write_text(
+        "evidence_supported: disputed maritime activity advice requires legal, maritime, and compliance boundaries.",
+        encoding="utf-8",
+    )
+    packet = executors._decision_final_controller_packet(
+        _decision_final_prior_stage_records(tmp_path),
+        query="请评估南海主权争议和海洋法边界下，跨境海洋数据产品能否包装成普通商业建议。",
+        base_dir=tmp_path,
+        research_packet_path=research_packet,
+    )
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 证据边界" in text
+    assert "海洋法" in text
+    assert "合规" in text
+    assert "ADHD" not in text
+    assert "执行功能" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
 def test_final_controller_quality_blocks_evidence_grounded_without_boundary_fields():
     import tools.task_engine_executors as executors
 
@@ -5911,9 +5957,15 @@ def test_external_calibration_uses_bridge_or_gemini_and_stops_before_final_contr
                 "insight_harvester": GEMMA431B_ACTUAL_MODEL_DEFAULT,
             }[stage.stage_name]
             self.last_executor_models[stage.stage_name] = actual
+            if stage.stage_name == "evidence_judge":
+                return "evidence_quality_map\nstrength_by_claim\napplicability_to_user_context\nuncertainty_and_limits"
             if stage.stage_name == "convergence_report":
                 return "divergence_role_summary\nconvergence_decision_framework\nuncertainty_boundaries"
             return "stage body"
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_external_calibration(self, stage, packet):
             assert stage.stage_name == "external_calibration"
@@ -6032,9 +6084,15 @@ def test_final_controller_report_completes_16_stage_pipeline(tmp_path: Path):
                 "insight_harvester": GEMMA431B_ACTUAL_MODEL_DEFAULT,
             }[stage.stage_name]
             self.last_executor_models[stage.stage_name] = actual
+            if stage.stage_name == "evidence_judge":
+                return "evidence_quality_map\nstrength_by_claim\napplicability_to_user_context\nuncertainty_and_limits"
             if stage.stage_name == "convergence_report":
                 return "divergence_role_summary\nconflicts_to_resolve\nconvergence_decision_framework\nuncertainty_boundaries"
             return "stage body"
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_external_calibration(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
@@ -7153,7 +7211,15 @@ def test_final_controller_legacy_artifact_cannot_complete(tmp_path: Path):
                 "insight_harvester": GEMMA431B_ACTUAL_MODEL_DEFAULT,
             }[stage.stage_name]
             self.last_executor_models[stage.stage_name] = actual
+            if stage.stage_name == "evidence_judge":
+                return "evidence_quality_map\nstrength_by_claim\napplicability_to_user_context\nuncertainty_and_limits"
+            if stage.stage_name == "convergence_report":
+                return "divergence_role_summary\nconflicts_to_resolve\nconvergence_decision_framework\nuncertainty_boundaries"
             return "ok"
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_external_calibration(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
@@ -7202,7 +7268,15 @@ def test_final_controller_output_forbidden_tool_chain_blocked(tmp_path: Path):
                 "insight_harvester": GEMMA431B_ACTUAL_MODEL_DEFAULT,
             }[stage.stage_name]
             self.last_executor_models[stage.stage_name] = actual
+            if stage.stage_name == "evidence_judge":
+                return "evidence_quality_map\nstrength_by_claim\napplicability_to_user_context\nuncertainty_and_limits"
+            if stage.stage_name == "convergence_report":
+                return "divergence_role_summary\nconflicts_to_resolve\nconvergence_decision_framework\nuncertainty_boundaries"
             return "ok"
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_external_calibration(self, stage, packet):
             self.last_executor_models[stage.stage_name] = "GPT Bridge"
