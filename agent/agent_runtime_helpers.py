@@ -1690,6 +1690,19 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             pass
         return result
 
+    # ── Write Operation Gate (P3) ────────────────────────────────────────────
+    # Intercept ALL write operations before they reach execution.  Read-only
+    # and allow-listed calls fall through immediately.
+    _is_blocked, _wog_action = is_write_operation(function_name, function_args)
+    if _wog_action == "block_or_human_review":
+        logger.info(
+            "[write_gate] BLOCK_OR_HUMAN_REVIEW %s — awaiting explicit user approval",
+            function_name,
+        )
+        return _emit_human_review_result(function_name, function_args)
+    # else action == 'execute': fall through to normal execution
+    # ── End Write Operation Gate ──────────────────────────────────────────────
+
     tool_start_time = time.monotonic()
 
     def _finish_agent_tool(result: Any, observed_args: Optional[dict] = None) -> Any:
@@ -1816,6 +1829,54 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         turn_id=getattr(agent, "_current_turn_id", "") or "",
         api_request_id=getattr(agent, "_current_api_request_id", "") or "",
     )
+
+
+def reduce_tool_result_for_context(function_name: str, function_args: dict, raw_result: Any) -> Any:
+    """Return the content that should be injected into conversation messages.
+
+    Tool handlers and post-tool hooks still receive the original raw result.
+    This helper only shrinks the observation that becomes the next model's
+    context.  Any reducer failure falls back to the original result.
+    """
+    try:
+        from agent.observation_reducer import reduce_observation
+        from agent.tool_dispatch_helpers import _is_multimodal_tool_result
+
+        if _is_multimodal_tool_result(raw_result) or isinstance(raw_result, list):
+            return raw_result
+
+        if isinstance(raw_result, str):
+            raw_text = raw_result
+        else:
+            try:
+                raw_text = json.dumps(raw_result, ensure_ascii=False)
+            except Exception:
+                raw_text = str(raw_result)
+
+        exit_code = None
+        parsed = None
+        try:
+            parsed = json.loads(raw_text)
+        except Exception:
+            parsed = raw_result if isinstance(raw_result, dict) else None
+        if isinstance(parsed, dict) and isinstance(parsed.get("exit_code"), int):
+            exit_code = parsed.get("exit_code")
+
+        command = None
+        if isinstance(function_args, dict) and isinstance(function_args.get("command"), str):
+            command = function_args.get("command")
+        elif isinstance(parsed, dict) and isinstance(parsed.get("command"), str):
+            command = parsed.get("command")
+
+        evidence_card, _raw_ref = reduce_observation(
+            tool_name=function_name,
+            raw_output=raw_text,
+            exit_code=exit_code,
+            command=command,
+        )
+        return evidence_card
+    except Exception:
+        return raw_result
 
 
 
@@ -2455,6 +2516,131 @@ def force_close_tcp_sockets(client: Any) -> int:
 
 
 
+# ---------------------------------------------------------------------------
+# P3 Write Operation Gate
+# ---------------------------------------------------------------------------
+
+# Patterns for terminal commands that must be blocked for human review.
+_WRITE_GATE_CMD_WRITE_PATTERNS: List[re.Pattern] = [
+    re.compile(r"\bsed\s+-i\b"),                            # sed -i (in-place edit)
+    re.compile(r"(?:^|[;|&])\s*cat\s+.*>(?!>?\s*/dev/null)"),  # cat > file
+    re.compile(r"\btee\s+"),                                # tee (writes to file)
+    re.compile(r"\becho\b.*>(?!>?\s*/dev/null)"),           # echo ... > file
+    re.compile(r"\bpython3?\s+.*--.*write\b"),              # python ... --write
+    re.compile(r"\bperl\s+-[^\s]*i\b"),                    # perl -i (in-place)
+    re.compile(r"\bruby\s+-i\b"),                           # ruby -i (in-place)
+    re.compile(r"\bnode\s+.*--.*write\b"),                  # node ... --write
+    re.compile(r"\bprintf\b.*>(?!>?\s*/dev/null)"),         # printf ... > file
+]
+
+# Patterns for terminal commands requiring human review (no auto-execution).
+_WRITE_GATE_CMD_HUMAN_REVIEW_PATTERNS: List[re.Pattern] = [
+    re.compile(r"\brm\s+-[^\s]*r[^\s]*f\b"),   # rm -rf / rm -fr
+    re.compile(r"\brm\s+-[^\s]*f[^\s]*r\b"),   # rm -fr
+    re.compile(r"(?:^|[;|&\s])rm\s+"),           # any plain rm
+    re.compile(r"\brmdir\s+"),                    # rmdir
+]
+
+# Tool names that must be intercepted before execution.
+_WRITE_GATE_WRITE_TOOLS = frozenset({"write_file", "patch"})
+
+# Tool names that require human review before execution.
+_WRITE_GATE_HUMAN_REVIEW_TOOLS = frozenset({"delete_file"})
+
+# Tool names explicitly allowed to execute without interception.
+_WRITE_GATE_ALLOW_TOOLS = frozenset({
+    "read_file", "search_files", "grep", "ls", "cat",
+    "execute_code",  # allowed with best-effort warning
+    "cp", "mv",      # copy/move — warning only in v1
+})
+
+
+def is_write_operation(tool_name: str, function_args: dict) -> tuple:
+    """Classify a tool call for the write operation gate.
+
+    Returns a ``(is_blocked: bool, action: str)`` tuple where ``action``
+    is one of:
+
+    * ``'execute'``             — allow normal execution.
+    * ``'block_or_human_review'`` — block, emit warning, wait for user.
+
+    Detection rules
+    ---------------
+    2. ``delete_file``                                   → block_or_human_review.
+    3. Terminal ``command`` containing:
+       - ``rm -rf`` / ``rm -fr`` / plain ``rm``         → block_or_human_review.
+       - ``sed -i``, ``cat >``, ``tee``, ``echo >``,
+         python/perl/ruby/node write scripts            → block_or_human_review.
+    4. Everything else                                   → execute.
+    """
+    if not isinstance(function_args, dict):
+        function_args = {}
+
+    # 1. Explicit write tools
+    if tool_name in _WRITE_GATE_WRITE_TOOLS:
+        return (True, "block_or_human_review")
+
+    # 2. Delete tools
+    if tool_name in _WRITE_GATE_HUMAN_REVIEW_TOOLS:
+        return (True, "block_or_human_review")
+
+    # 3. Terminal command pattern detection
+    if tool_name == "terminal":
+        command = str(function_args.get("command") or "")
+        if command:
+            for pattern in _WRITE_GATE_CMD_HUMAN_REVIEW_PATTERNS:
+                if pattern.search(command):
+                    return (True, "block_or_human_review")
+            for pattern in _WRITE_GATE_CMD_WRITE_PATTERNS:
+                if pattern.search(command):
+                    return (True, "block_or_human_review")
+
+    # 4. Allow
+    return (False, "execute")
+
+def _emit_human_review_result(tool_name: str, function_args: dict) -> str:
+    """Emit a structured block result for operations that require human review.
+
+    Used for destructive operations such as ``delete_file`` and
+    ``rm -rf`` terminal commands.  The model receives a clear block
+    message and must wait for explicit user approval before proceeding.
+
+    The response payload intentionally does NOT include auto-execution
+    hints so the model cannot re-attempt the operation without the user
+    seeing and approving it first.
+    """
+    command_hint = ""
+    if tool_name == "terminal":
+        cmd = str(function_args.get("command") or "")
+        command_hint = f" (command: {cmd[:120]!r})" if cmd else ""
+    elif tool_name == "delete_file":
+        path_hint = str(function_args.get("path") or "")
+        command_hint = f" (path: {path_hint!r})" if path_hint else ""
+
+    logger.warning(
+        "[write_gate] BLOCK_OR_HUMAN_REVIEW: %s%s — no auto-execution",
+        tool_name,
+        command_hint,
+    )
+
+    return json.dumps({
+        "error": (
+            f"⚠️  WRITE GATE — Human review required before '{tool_name}' can "
+            f"execute{command_hint}. This operation was NOT executed. "
+            f"Destructive or deletion operations require explicit user approval. "
+            f"Show the user exactly what will be deleted and ask for confirmation "
+            f"before retrying."
+        ),
+        "write_gate": True,
+        "route": "block_or_human_review",
+        "tool": tool_name,
+        "status": "blocked_pending_human_review",
+        "auto_execute_allowed": False,
+        "followthrough_required": True,
+        "next_action": "await_explicit_user_approval",
+    }, ensure_ascii=False)
+
+
 __all__ = [
     "convert_to_trajectory_format",
     "sanitize_tool_call_arguments",
@@ -2470,6 +2656,7 @@ __all__ = [
     "create_openai_client",
     "switch_model",
     "invoke_tool",
+    "reduce_tool_result_for_context",
     "repair_tool_call",
     "sanitize_api_messages",
     "looks_like_codex_intermediate_ack",
@@ -2479,4 +2666,6 @@ __all__ = [
     "apply_pending_steer_to_tool_results",
     "_iter_pool_sockets",
     "force_close_tcp_sockets",
+    "is_write_operation",
+    "_emit_human_review_result",
 ]
