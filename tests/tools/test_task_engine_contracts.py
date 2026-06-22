@@ -5840,18 +5840,38 @@ def test_external_calibration_discovers_chatgpt_app_bridge_wrapper_without_env(m
     assert executors._discover_chatgpt_app_bridge_wrapper() == wrapper
 
 
+def test_gpt_bridge_timeout_and_settle_defaults(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    for key in (
+        "HERMES_GPT_BRIDGE_TIMEOUT_S",
+        "HERMES_GPT_BRIDGE_SETTLE_S",
+        "HERMES_GPT_BRIDGE_SETTLE_SECONDS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(executors, "_hermes_env_value", lambda key: "")
+
+    assert executors._gpt_bridge_timeout_s() == 360
+    assert executors._gpt_bridge_settle_s() == 60
+
+
 def test_external_calibration_wrapper_success_uses_gpt_bridge_without_gemini(monkeypatch, tmp_path: Path):
     import tools.task_engine_executors as executors
 
     secret = "super-secret-token"
     wrapper = tmp_path / "chatgpt_app_bridge_http_cli.py"
     wrapper.write_text(
-        "import json\n"
+        "import json, sys\n"
+        "assert sys.argv[sys.argv.index('--timeout') + 1] == '360'\n"
+        "assert sys.argv[sys.argv.index('--settle') + 1] == '60'\n"
         "print(json.dumps({'success': True, 'response': " + repr(COMPLETE_EXTERNAL_CALIBRATION_MINIMUM_FIELDS) + "}))\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("HERMES_GPT_BRIDGE_CMD", raising=False)
     monkeypatch.delenv("HERMES_GPT_BRIDGE_URL", raising=False)
+    monkeypatch.delenv("HERMES_GPT_BRIDGE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("HERMES_GPT_BRIDGE_SETTLE_S", raising=False)
+    monkeypatch.delenv("HERMES_GPT_BRIDGE_SETTLE_SECONDS", raising=False)
     monkeypatch.setenv("CHATGPT_BRIDGE_TOKEN", secret)
     monkeypatch.setattr(executors, "_hermes_env_value", lambda key: "")
     monkeypatch.setattr(executors, "CHATGPT_APP_BRIDGE_WRAPPER", wrapper)
@@ -5897,7 +5917,7 @@ def test_external_calibration_wrapper_failure_falls_back_to_gemini(monkeypatch, 
     output = executor.run_external_calibration(stage, {"prompt": "calibrate this"})
 
     assert executor.last_executor_models["external_calibration"] == GEMINI_PRO_HIGH
-    assert "GPT_BRIDGE_UNAVAILABLE:GPT_BRIDGE_WRAPPER_FAILED" in output
+    assert "GPT_BRIDGE_UNAVAILABLE:GPT_BRIDGE_BUSY_OR_UNSAFE" in output
     assert "calibration_verdict" in output
 
 

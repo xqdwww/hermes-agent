@@ -65,6 +65,9 @@ LLAMA70B_ACTUAL_MODEL_DEFAULT = "Llama-3.3-70B-Instruct-abliterated-8bit-mlx"
 GEMMA431B_ACTUAL_MODEL_DEFAULT = "gemma-4-31B-it-qat-8bit"
 AGY_PREFLIGHT_REQUIRED_MODELS = (GEMINI_HIGH, GEMINI_PRO_HIGH)
 CHATGPT_APP_BRIDGE_WRAPPER = Path("/Users/Shared/OpenClaw/chatgpt_app_bridge_http_cli.py")
+GPT_BRIDGE_BUSY_OR_UNSAFE = "GPT_BRIDGE_BUSY_OR_UNSAFE"
+GPT_BRIDGE_DEFAULT_TIMEOUT_S = 360
+GPT_BRIDGE_DEFAULT_SETTLE_S = 60
 _GPT_BRIDGE_LAST_EXECUTOR_MODEL = "GPT Bridge"
 AGY_KEYCHAIN_FALSE_NEGATIVE = "AGY_KEYCHAIN_TIMEOUT_FALSE_NEGATIVE"
 AGY_TIMEOUT_RESPONSE = "AGY_TIMEOUT_RESPONSE"
@@ -3208,6 +3211,7 @@ def _run_gpt_bridge_calibration(prompt: str) -> str:
     command_value = os.getenv("HERMES_GPT_BRIDGE_CMD", "").strip() or _hermes_env_value("HERMES_GPT_BRIDGE_CMD")
     url_value = os.getenv("HERMES_GPT_BRIDGE_URL", "").strip() or _hermes_env_value("HERMES_GPT_BRIDGE_URL")
     timeout_s = _gpt_bridge_timeout_s()
+    settle_s = _gpt_bridge_settle_s()
     if command_value:
         _GPT_BRIDGE_LAST_EXECUTOR_MODEL = "GPT Bridge"
         command = shlex.split(command_value)
@@ -3228,7 +3232,10 @@ def _run_gpt_bridge_calibration(prompt: str) -> str:
         return (result.stdout or "").strip()
     if url_value:
         _GPT_BRIDGE_LAST_EXECUTOR_MODEL = "GPT Bridge"
-        body = json.dumps({"prompt": prompt}).encode("utf-8")
+        payload: dict[str, Any] = {"prompt": prompt, "timeout": timeout_s}
+        if settle_s > 0:
+            payload["settle_seconds"] = settle_s
+        body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url_value,
             data=body,
@@ -3236,7 +3243,7 @@ def _run_gpt_bridge_calibration(prompt: str) -> str:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            with urllib.request.urlopen(request, timeout=timeout_s + 10) as response:
                 text = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
@@ -3253,7 +3260,7 @@ def _run_gpt_bridge_calibration(prompt: str) -> str:
     wrapper = _discover_chatgpt_app_bridge_wrapper()
     if wrapper:
         _GPT_BRIDGE_LAST_EXECUTOR_MODEL = "ChatGPT App Bridge"
-        return _run_chatgpt_app_bridge_wrapper(wrapper, prompt, timeout_s=timeout_s)
+        return _run_chatgpt_app_bridge_wrapper(wrapper, prompt, timeout_s=timeout_s, settle_s=settle_s)
     raise RuntimeError("GPT_BRIDGE_NOT_CONFIGURED")
 
 
@@ -3285,8 +3292,10 @@ def _decision_engine_bridge_script() -> Path | None:
     return None
 
 
-def _run_chatgpt_app_bridge_wrapper(wrapper: Path, prompt: str, *, timeout_s: int) -> str:
+def _run_chatgpt_app_bridge_wrapper(wrapper: Path, prompt: str, *, timeout_s: int, settle_s: int) -> str:
     command = [sys.executable, str(wrapper), prompt, "--timeout", str(timeout_s)]
+    if settle_s > 0:
+        command.extend(["--settle", str(settle_s)])
     result = subprocess.run(
         command,
         capture_output=True,
@@ -3296,10 +3305,8 @@ def _run_chatgpt_app_bridge_wrapper(wrapper: Path, prompt: str, *, timeout_s: in
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     if result.returncode != 0:
-        raise RuntimeError(
-            "GPT_BRIDGE_WRAPPER_FAILED:"
-            + _redact_secret_text((stderr or stdout or f"returncode={result.returncode}")[:1000])
-        )
+        detail = _redact_secret_text((stderr or stdout or f"returncode={result.returncode}")[:1000])
+        raise RuntimeError(f"{_gpt_bridge_failure_code(detail)}:{detail}")
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError:
@@ -3310,8 +3317,27 @@ def _run_chatgpt_app_bridge_wrapper(wrapper: Path, prompt: str, *, timeout_s: in
     content = _first_text_value(data, ("response", "text", "content", "output", "message"))
     if ok and content:
         return content
-    error = str(data.get("error") or "GPT Bridge wrapper returned no content")
-    raise RuntimeError("GPT_BRIDGE_WRAPPER_FAILED:" + _redact_secret_text(error))
+    error = _redact_secret_text(str(data.get("error") or "GPT Bridge wrapper returned no content"))
+    raise RuntimeError(f"{_gpt_bridge_failure_code(error)}:{error}")
+
+
+def _gpt_bridge_failure_code(detail: str) -> str:
+    lowered = detail.lower()
+    busy_or_unsafe_tokens = (
+        "busy",
+        "queue",
+        "queued",
+        "timeout",
+        "timed out",
+        "stale",
+        "unsafe",
+        "copy",
+        "prompt remained unsent",
+        "client disconnected",
+    )
+    if any(token in lowered for token in busy_or_unsafe_tokens):
+        return GPT_BRIDGE_BUSY_OR_UNSAFE
+    return "GPT_BRIDGE_WRAPPER_FAILED"
 
 
 def _first_text_value(data: Any, keys: tuple[str, ...]) -> str:
@@ -3327,9 +3353,22 @@ def _first_text_value(data: Any, keys: tuple[str, ...]) -> str:
 def _gpt_bridge_timeout_s() -> int:
     raw = os.getenv("HERMES_GPT_BRIDGE_TIMEOUT_S", "").strip() or _hermes_env_value("HERMES_GPT_BRIDGE_TIMEOUT_S")
     try:
-        return max(10, min(int(raw or "240"), 600))
+        return max(10, min(int(raw or str(GPT_BRIDGE_DEFAULT_TIMEOUT_S)), 600))
     except ValueError:
-        return 240
+        return GPT_BRIDGE_DEFAULT_TIMEOUT_S
+
+
+def _gpt_bridge_settle_s() -> int:
+    raw = (
+        os.getenv("HERMES_GPT_BRIDGE_SETTLE_S", "").strip()
+        or os.getenv("HERMES_GPT_BRIDGE_SETTLE_SECONDS", "").strip()
+        or _hermes_env_value("HERMES_GPT_BRIDGE_SETTLE_S")
+        or _hermes_env_value("HERMES_GPT_BRIDGE_SETTLE_SECONDS")
+    )
+    try:
+        return max(0, min(int(raw or str(GPT_BRIDGE_DEFAULT_SETTLE_S)), 180))
+    except ValueError:
+        return GPT_BRIDGE_DEFAULT_SETTLE_S
 
 
 def _gpt_bridge_header_retry_wait_s() -> float:
