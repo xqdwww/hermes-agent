@@ -2595,6 +2595,67 @@ def test_l2_5_handoff_only_stub_is_invalid(tmp_path: Path):
     assert "L2_5_codex_evidence_organizer/sources.csv" in analysis["missing_or_invalid_artifacts"]
 
 
+def test_l2_5_stub_marker_does_not_match_url_path_substrings():
+    import tools.task_engine_executors as executors
+
+    assert (
+        executors._contains_l2_5_stub_marker(
+            "https://www.gartner.com/en/articles/hype-cycle-for-emerging-technologies"
+        )
+        is False
+    )
+    assert executors._contains_l2_5_stub_marker("n/a") is True
+
+
+def test_l2_5_prefers_explicit_original_question_over_l2_query(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    original_question = "是否值得投资独立硬件 AI 伴侣设备，要求区分趋势信号、噪音和证据缺口？"
+    l1 = tmp_path / "source_candidates.json"
+    l2 = tmp_path / "ddgs_gap_sources.json"
+    l1.write_text(
+        json.dumps(
+            {
+                "source_candidates": [
+                    {
+                        "source": "https://example.test/humane-shutdown",
+                        "evidence_type": "news",
+                        "coverage_axis": "recent_update",
+                        "why_relevant": "Confirms HP acquisition and Humane AI Pin shutdown.",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    l2.write_text(
+        json.dumps(
+            [
+                {
+                    "query": "Confirms HP acquisition and Humane AI Pin shutdown recent_update",
+                    "title": "Humane AI Pin shutdown",
+                    "url": "https://example.test/humane",
+                    "snippet": "HP acquired assets and the device was shut down.",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    outputs = executors.build_l2_5_evidence_organizer_outputs(
+        {
+            "source_candidates.json": str(l1),
+            "ddgs_gap_sources.json": str(l2),
+            "original_question": original_question,
+        }
+    )
+    request = json.loads(outputs["evidence_runner_*.request.json"])
+
+    assert request["user_question_anchor"] == original_question
+
+
 def test_l2_5_real_extraction_is_valid(tmp_path: Path):
     import tools.task_engine_executors as executors
 

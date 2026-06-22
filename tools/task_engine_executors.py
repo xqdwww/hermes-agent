@@ -1011,6 +1011,7 @@ def run_research_l2_5_codex_handoff_smoke(
     *,
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
+    query: str = "",
 ) -> dict[str, Any]:
     """Smoke the L2.5 handoff file protocol after real L1/L2 records exist."""
     executor = executor or LocalTaskEngineExecutor()
@@ -1037,6 +1038,7 @@ def run_research_l2_5_codex_handoff_smoke(
     inputs = {
         "source_candidates.json": l1.get("artifact_path"),
         "ddgs_gap_sources.json": l2.get("artifact_path"),
+        "original_question": query,
     }
     try:
         content = executor.run_codex_handoff(stage, inputs)
@@ -1157,7 +1159,7 @@ def run_research_l1_l3_smoke(
     l1_l2 = run_research_l1_l2_smoke(query, base_dir=base_dir, executor=executor)
     if l1_l2.get("status") != "ok":
         return l1_l2
-    l2_5 = run_research_l2_5_codex_handoff_smoke(l1_l2["run"], base_dir=base_dir, executor=executor)
+    l2_5 = run_research_l2_5_codex_handoff_smoke(l1_l2["run"], base_dir=base_dir, executor=executor, query=query)
     if l2_5.get("status") != "ok":
         return l2_5
     return run_research_l3_synthesis_smoke(l2_5["run"], base_dir=base_dir, executor=executor, query=query)
@@ -4531,7 +4533,9 @@ def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, s
     l2_payload = _load_jsonish_text(ddgs_text)
     l1_items = _list_from_jsonish(l1_payload.get("source_candidates") if isinstance(l1_payload, dict) else l1_payload)
     l2_items = _list_from_jsonish(l2_payload)
-    question = _infer_question_anchor(l2_items, l1_items)
+    question = _compact_single_line(str(inputs.get("original_question") or "").strip(), limit=240)
+    if not question:
+        question = _infer_question_anchor(l2_items, l1_items)
     sample_schema = _l2_5_sample_schema(question)
     topic_terms = _topic_anchor_terms(question, l1_items, l2_items, sample_schema)
     source_rows = _l2_5_source_rows(l1_items, l2_items, topic_terms, question=question, sample_schema=sample_schema)
@@ -4541,7 +4545,7 @@ def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, s
     insufficient = len(source_rows) < 3 or len(evidence_rows) < 3 or len(claims) < 4 or len(gaps) < 3
     request = {
         "stage": "L2_5_codex_evidence_organizer",
-        "input_scope": ["L1 source_candidates.json", "L2 ddgs_gap_sources.json", "original question inferred from L2 query/user_question_anchor"],
+        "input_scope": ["L1 source_candidates.json", "L2 ddgs_gap_sources.json", "original question/user_question_anchor"],
         "forbidden_inputs": ["research_evidence_packet", "intelligence_layer", "supplementary_search", "convergence_report", "external_calibration", "final_decision_report"],
         "inputs": {"source_candidates.json": str(source_path), "ddgs_gap_sources.json": str(ddgs_path)},
         "user_question_anchor": question,
@@ -4558,7 +4562,7 @@ def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, s
         [
             "# L2.5 evidence organizer request",
             "",
-            "input_scope: L1 source_candidates.json + L2 ddgs_gap_sources.json + inferred original question only",
+            "input_scope: L1 source_candidates.json + L2 ddgs_gap_sources.json + original question anchor only",
             "downstream_artifacts_used: false",
             f"user_question_anchor: {question}",
             "topic_anchor_terms: " + ", ".join(topic_terms),
@@ -4990,7 +4994,11 @@ def _gaps_markdown(gaps: list[str], *, insufficient: bool) -> str:
 
 def _contains_l2_5_stub_marker(text: str) -> bool:
     lowered = (text or "").lower()
-    return any(marker in lowered for marker in L2_5_STUB_MARKERS)
+    for marker in L2_5_STUB_MARKERS:
+        pattern = rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])"
+        if re.search(pattern, lowered):
+            return True
+    return False
 
 
 def analyze_l2_5_evidence_organizer(base_dir: str | Path) -> dict[str, Any]:
