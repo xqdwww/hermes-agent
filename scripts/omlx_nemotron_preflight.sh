@@ -9,14 +9,16 @@ EXPECTED_CEILING_GB="${OMLX_MEMORY_GUARD_GB:-120}"
 MODEL="${OMLX_NEMOTRON_MODEL:-NVIDIA-Nemotron-3-Super-120B-A12B-5bit}"
 MODEL_DIR="${OMLX_MODEL_DIR:-/Users/xqdwww/Workspace/AI_Core/mlx_models}"
 MIN_DISK_FREE_GB="${OMLX_MIN_DISK_FREE_GB:-20}"
-PROMPT="${OMLX_PREFLIGHT_PROMPT:-Reply exactly: NEMOTRON_PREFLIGHT_OK}"
-EXPECTED_TEXT="${OMLX_PREFLIGHT_EXPECTED_TEXT:-NEMOTRON_PREFLIGHT_OK}"
+PROMPT="${OMLX_PREFLIGHT_PROMPT:-Reply exactly: HERMES_NEMOTRON_PREFLIGHT_OK}"
+EXPECTED_TEXT="${OMLX_PREFLIGHT_EXPECTED_TEXT:-HERMES_NEMOTRON_PREFLIGHT_OK}"
+MAX_TOKENS="${OMLX_PREFLIGHT_MAX_TOKENS:-128}"
+AUDIT_DIR="${OMLX_PREFLIGHT_AUDIT_DIR:-/private/tmp/hermes_omlx_preflight}"
 
 if [[ ! -x "$HERMES_PYTHON" ]]; then
   HERMES_PYTHON="$(command -v python3 || true)"
 fi
 
-"$HERMES_PYTHON" - "$BASE_URL" "$EXPECTED_CEILING_GB" "$MODEL" "$MODEL_DIR" "$MIN_DISK_FREE_GB" "$PROMPT" "$EXPECTED_TEXT" <<'PY'
+"$HERMES_PYTHON" - "$BASE_URL" "$EXPECTED_CEILING_GB" "$MODEL" "$MODEL_DIR" "$MIN_DISK_FREE_GB" "$PROMPT" "$EXPECTED_TEXT" "$MAX_TOKENS" "$AUDIT_DIR" <<'PY'
 import json
 import os
 import pathlib
@@ -26,7 +28,7 @@ import time
 import urllib.error
 import urllib.request
 
-base_url, expected_ceiling_gb, model, model_dir, min_disk_free_gb, prompt, expected_text = sys.argv[1:8]
+base_url, expected_ceiling_gb, model, model_dir, min_disk_free_gb, prompt, expected_text, max_tokens, audit_dir = sys.argv[1:10]
 expected_ceiling_bytes = float(expected_ceiling_gb) * (1024 ** 3)
 
 def emit(status, blocker="", **extra):
@@ -63,6 +65,19 @@ def request(method, path, body=None, timeout=120, opener=None, headers=None):
     with opener.open(req, timeout=timeout) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     return json.loads(text) if text else {}
+
+def write_audit(name, payload):
+    try:
+        audit_path = pathlib.Path(audit_dir)
+        audit_path.mkdir(parents=True, exist_ok=True)
+        path = audit_path / name
+        if isinstance(payload, (dict, list)):
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        else:
+            path.write_text(str(payload), encoding="utf-8")
+        return str(path)
+    except Exception:
+        return ""
 
 try:
     stat = os.statvfs(model_dir if os.path.exists(model_dir) else "/")
@@ -126,10 +141,14 @@ try:
         raise SystemExit(1)
     chat_body = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 32,
+        "messages": [
+            {"role": "system", "content": "You are a Hermes local model preflight checker. Return the requested sentinel exactly and completely."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": int(max_tokens),
         "temperature": 0,
     }
+    raw_request_path = write_audit("nemotron_preflight_request.json", chat_body)
     chat = request(
         "POST",
         "/v1/chat/completions",
@@ -137,6 +156,7 @@ try:
         timeout=600,
         headers={"Authorization": f"Bearer {api_key}"},
     )
+    raw_response_path = write_audit("nemotron_preflight_response.json", chat)
     content = ""
     try:
         content = chat["choices"][0]["message"]["content"]
@@ -159,6 +179,9 @@ if not response_ok:
         "NEMOTRON_LOAD_FAILED",
         message="Nemotron loaded but did not return expected preflight text",
         response_preview=str(content)[:300],
+        response_length=len(str(content)),
+        raw_request=raw_request_path,
+        raw_response=raw_response_path,
         disk_free_gb=disk_free_gb,
     )
     raise SystemExit(1)
