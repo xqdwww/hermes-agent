@@ -136,3 +136,20 @@ scripts/out/
 # stores the published notes. They are not a build artifact and must never be
 # committed to the repo root. See the hermes-release skill.
 RELEASE_v*.md
+
+# One-off task-engine research outputs and scratch harnesses
+adhd_cds_research_notes.json
+adhd_inattentive_cds_guide.md
+pipeline_run_summary.json
+run_adhd_pipeline.py
+work/agy_models.log
+work/full_run_output.json
+work/full_run_run/
+work/probe_agy_model_alias.py
+work/run_decision_stage1.py
+work/run_full_pipeline.py
+work/run_l1.py
+work/run_l1_only.py
+work/run_user_query.py
+work/stress_task_engine_profile.py
+work/task_engine_content_quality_audit.py
