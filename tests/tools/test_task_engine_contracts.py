@@ -1277,7 +1277,7 @@ def test_l3_omlx_uses_actual_r1_model_and_legacy_admin_path(monkeypatch):
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         return {"choices": [{"message": {"content": "R1 actual output"}}]}
 
@@ -1323,7 +1323,7 @@ def test_convergence_report_omlx_uses_actual_r1_model_and_legacy_admin_path(monk
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         return {"choices": [{"message": {"content": "divergence_role_summary\nconvergence_decision_framework"}}]}
 
@@ -1387,7 +1387,7 @@ def test_structure_mapper_omlx_uses_actual_qwen72b_model_and_legacy_admin_path(m
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         return {"choices": [{"message": {"content": "problem_axes\nactor_map\ndecision_questions"}}]}
 
@@ -1453,7 +1453,7 @@ def test_evidence_judge_omlx_uses_actual_nemotron_and_retries_incomplete_read(mo
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         if len([call for call in calls if call[0] == "chat"]) == 1:
             raise http.client.IncompleteRead(b"partial")
@@ -1515,7 +1515,7 @@ def test_evidence_judge_omlx_retries_empty_content_with_reload(monkeypatch):
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         if len([call for call in calls if call[0] == "chat"]) == 1:
             return {"choices": [{"message": {"content": ""}}]}
@@ -1600,7 +1600,7 @@ def test_evidence_judge_prefill_memory_guard_diagnostic_records_request_context(
             self.loaded.discard(model_id)
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, len(messages), max_tokens))
         raise RuntimeError(
             'OMLX chat HTTP 400: {"error":{"message":"oMLX prefill memory guard rejected this prompt",'
@@ -1675,6 +1675,101 @@ def test_omlx_empty_content_diagnostic_keeps_non_prefill_classification():
     assert diagnostic["empty_content_kind"] == "empty_content_string"
     assert diagnostic["raw_error_code"] == ""
     assert diagnostic["prompt_chars"] == 12
+
+
+def test_omlx_idle_status_is_ready_for_loaded_checks():
+    import tools.task_engine_executors as executors
+
+    class FakeAdmin:
+        def get_models(self):
+            return [{"id": NEMOTRON120B_ACTUAL_MODEL_DEFAULT, "status": "idle"}]
+
+    admin = executors._OmlxAdmin.__new__(executors._OmlxAdmin)
+    admin.get_models = FakeAdmin().get_models
+
+    assert admin.is_model_loaded(NEMOTRON120B_ACTUAL_MODEL_DEFAULT) is True
+    assert executors._loaded_omlx_model_ids(admin) == [NEMOTRON120B_ACTUAL_MODEL_DEFAULT]
+    assert executors._omlx_observed_model_status(admin, NEMOTRON120B_ACTUAL_MODEL_DEFAULT) == "idle"
+
+
+def test_decision_omlx_stage_timeout_writes_idle_inference_not_sent_diagnostic(monkeypatch, tmp_path: Path):
+    import time
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][3]
+    executor = LocalTaskEngineExecutor()
+    executor.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+    executor.last_omlx_diagnostics[stage.stage_name] = {
+        "stage_name": stage.stage_name,
+        "model": stage.model,
+        "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+        "call_site": "test_call_site",
+        "admin_load_requested": True,
+        "admin_load_returned": False,
+        "observed_model_status": "idle",
+        "inference_request_sent": False,
+        "inference_response_received": False,
+    }
+    monkeypatch.setenv("HERMES_DECISION_EVIDENCE_JUDGE_TIMEOUT_S", "1")
+
+    try:
+        executors._run_decision_stage_with_timeout(
+            stage,
+            base_dir=tmp_path / "sample_01" / "decision_run",
+            executor=executor,
+            operation=lambda: time.sleep(2),
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("stage timeout should block")
+
+    diagnostic_path = tmp_path / "sample_01" / "decision_run" / "evidence_judge" / "evidence_judge.diagnostic.json"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+
+    assert "inference_not_sent" in message
+    assert diagnostic["sample_id"] == "sample_01"
+    assert diagnostic["stage_name"] == "evidence_judge"
+    assert diagnostic["model"] == stage.model
+    assert diagnostic["timeout_seconds"] == 1
+    assert diagnostic["error_type"] == "stage_timeout"
+    assert diagnostic["call_site"] == "test_call_site"
+    assert diagnostic["admin_load_requested"] is True
+    assert diagnostic["admin_load_returned"] is False
+    assert diagnostic["observed_model_status"] == "idle"
+    assert diagnostic["inference_request_sent"] is False
+    assert diagnostic["inference_response_received"] is False
+    assert diagnostic["blocked_reason"] == "inference_not_sent"
+    assert diagnostic["blocked_reason"] != "model_load_failed"
+
+
+def test_omlx_response_read_interruption_saves_partial_content(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    class PartialResponse:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, _size):
+            self.calls += 1
+            if self.calls == 1:
+                return b'{"choices":[{"message":{"content":"partial evidence'
+            raise KeyboardInterrupt()
+
+    partial_path = tmp_path / "evidence_judge" / "evidence_judge.partial.md"
+
+    try:
+        executors._read_omlx_response_bytes(PartialResponse(), partial_content_path=partial_path, started=0)
+    except executors._OmlxPartialResponseError as exc:
+        error = exc
+    else:
+        raise AssertionError("partial response read should raise diagnostic error")
+
+    assert error.blocked_reason == "response_read_interrupted"
+    assert error.partial_content_chars > 0
+    assert error.partial_content_path == str(partial_path)
+    assert partial_path.exists()
+    assert "partial evidence" in partial_path.read_text(encoding="utf-8")
 
 
 def test_evidence_judge_empty_content_blocks_and_writes_diagnostic(tmp_path: Path):
@@ -1784,7 +1879,7 @@ def test_premise_auditor_omlx_uses_actual_llama70b_and_retries_incomplete_read(m
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         if len([call for call in calls if call[0] == "chat"]) == 1:
             raise http.client.IncompleteRead(b"partial")
@@ -1852,7 +1947,7 @@ def test_alternative_generator_omlx_uses_actual_gemma431b_model(monkeypatch):
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         return {"choices": [{"message": {"content": "mutually_exclusive_alternatives\nintervention_intensity_paths"}}]}
 
@@ -1917,7 +2012,7 @@ def test_insight_harvester_omlx_uses_same_actual_gemma431b_model(monkeypatch):
             calls.append(("unload_model", model_id))
             return {"success": True}
 
-    def fake_chat(model, messages, *, api_key, timeout, max_tokens):
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
         calls.append(("chat", model, bool(api_key), timeout, max_tokens))
         return {"choices": [{"message": {"content": "cross_model_insights\nconflicts_and_tensions"}}]}
 
@@ -2026,7 +2121,34 @@ def test_l4_rejects_legacy_l3_artifact(tmp_path: Path):
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return {
+                    "source_candidates": [
+                        {
+                            "candidate": "CDC ADHD parent training behavior therapy guidance",
+                            "evidence_type": "Guideline",
+                            "coverage_axis": "authoritative_guideline_or_consensus",
+                            "why_relevant": "ADHD parent training and behavior therapy guidance is relevant to child intervention decisions.",
+                        },
+                        {
+                            "candidate": "AAP ADHD clinical practice guideline school supports",
+                            "evidence_type": "Guideline",
+                            "coverage_axis": "intervention_or_practice",
+                            "why_relevant": "ADHD school supports and clinical guidance inform accommodations and intervention intensity.",
+                        },
+                        {
+                            "candidate": "CLAS ADHD inattentive children parent training organization skills",
+                            "evidence_type": "Intervention Study",
+                            "coverage_axis": "empirical_study_or_RCT",
+                            "why_relevant": "ADHD inattentive children may benefit from parent training and organization skills interventions.",
+                        },
+                        {
+                            "candidate": "ADHD executive function children mind wandering cognitive disengagement",
+                            "evidence_type": "Mechanism Review",
+                            "coverage_axis": "mechanism_or_theory",
+                            "why_relevant": "ADHD executive function and mind wandering mechanisms shape long-term support needs.",
+                        },
+                    ]
+                }
             return "should not run"
 
         def run_ddgs(self, stage, queries):
@@ -2407,6 +2529,345 @@ def test_l5_packet_records_foresight_acceptance_requirements(tmp_path: Path):
     assert "counterexample_or_failure: detected" in requirement_map
 
 
+def test_l2_5_handoff_only_stub_is_invalid(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stage_dir = tmp_path / "L2_5_codex_evidence_organizer"
+    stage_dir.mkdir()
+    payload = json.dumps(
+        {
+            "handoff_protocol": "Hermes-Codex evidence organizer smoke",
+            "inputs": {"source_candidates.json": "x", "ddgs_gap_sources.json": "y"},
+            "outputs": ["sources.csv", "evidence.csv", "claims.md", "gaps.md"],
+        },
+        indent=2,
+    )
+    for name in ("sources.csv", "evidence.csv", "claims.md", "gaps.md"):
+        (stage_dir / name).write_text(payload, encoding="utf-8")
+
+    analysis = executors.analyze_l2_5_evidence_organizer(tmp_path)
+
+    assert analysis["l2_5_valid"] is False
+    assert analysis["l2_5_stub_detected"] is True
+    assert analysis["upstream_critical_defect"] is True
+    assert analysis["issues"] == ["l2_5_extraction_missing"]
+    assert "L2_5_codex_evidence_organizer/sources.csv" in analysis["missing_or_invalid_artifacts"]
+
+
+def test_l2_5_real_extraction_is_valid(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    l1 = tmp_path / "source_candidates.json"
+    l2 = tmp_path / "ddgs_gap_sources.json"
+    l1.write_text(
+        json.dumps(
+            {
+                "source_candidates": [
+                    {
+                        "candidate": "https://debezium.io/documentation/reference/stable/connectors/postgresql.html",
+                        "evidence_type": "Documentation",
+                        "coverage_axis": "authoritative_guideline_or_consensus",
+                        "why_relevant": "Specs for WAL-based PostgreSQL CDC replication and transactional impact during migration.",
+                    },
+                    {
+                        "candidate": "https://iceberg.apache.org/docs/latest/",
+                        "evidence_type": "Standard Specification",
+                        "coverage_axis": "mechanism_or_theory",
+                        "why_relevant": "Defines lakehouse table transactions and schema evolution over object storage.",
+                    },
+                    {
+                        "candidate": "Query: PostgreSQL RLS multi tenant SaaS analytics lakehouse migration",
+                        "evidence_type": "Search Query",
+                        "coverage_axis": "local_or_contextual_source",
+                        "why_relevant": "Targets tenant isolation and row-level security constraints for SaaS analytics migration.",
+                    },
+                    {
+                        "candidate": "Query: streaming feature pipeline object storage SaaS analytics",
+                        "evidence_type": "Search Query",
+                        "coverage_axis": "intervention_or_practice",
+                        "why_relevant": "Targets event-driven streaming feature pipeline tradeoffs for analytical workloads.",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    l2.write_text(
+        json.dumps(
+            [
+                {
+                    "query": "B2B SaaS PostgreSQL cron ETL CDC lakehouse object storage streaming pipeline",
+                    "title": "Lakehouse architecture for SaaS analytics",
+                    "url": "https://example.test/lakehouse",
+                    "snippet": "Lakehouse object storage can isolate analytical workloads while adding governance and operational complexity.",
+                },
+                {
+                    "query": "B2B SaaS PostgreSQL CDC Debezium lakehouse",
+                    "title": "CDC migration risk",
+                    "url": "https://example.test/cdc",
+                    "snippet": "CDC reduces batch ETL delay but requires schema-change handling, replay strategy, and observability.",
+                },
+                {
+                    "query": "multi tenant SaaS RLS lakehouse analytics",
+                    "title": "Tenant isolation in analytics",
+                    "url": "https://example.test/rls",
+                    "snippet": "Multi-tenant SaaS analytics migration must preserve RLS, access controls, and customer-specific data boundaries.",
+                },
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    outputs = executors.build_l2_5_evidence_organizer_outputs(
+        {"source_candidates.json": str(l1), "ddgs_gap_sources.json": str(l2)}
+    )
+    stage_dir = tmp_path / "L2_5_codex_evidence_organizer"
+    stage_dir.mkdir()
+    for name in ("sources.csv", "evidence.csv", "claims.md", "gaps.md"):
+        (stage_dir / name).write_text(outputs[name], encoding="utf-8")
+
+    analysis = executors.analyze_l2_5_evidence_organizer(tmp_path)
+
+    assert analysis["l2_5_valid"] is True
+    assert analysis["l2_5_stub_detected"] is False
+    assert analysis["insufficient_sources"] is False
+    assert analysis["source_rows"] >= 3
+    assert analysis["evidence_rows"] >= 3
+    assert analysis["claim_count"] >= 4
+    assert analysis["gap_count"] >= 3
+
+
+def _write_l2_5_inputs_and_analyze(tmp_path: Path, query: str, l1_items: list[dict], l2_items: list[dict]):
+    import tools.task_engine_executors as executors
+
+    l1 = tmp_path / "source_candidates.json"
+    l2 = tmp_path / "ddgs_gap_sources.json"
+    l1.write_text(json.dumps({"source_candidates": l1_items}, ensure_ascii=False), encoding="utf-8")
+    l2.write_text(json.dumps([{**item, "query": query} for item in l2_items], ensure_ascii=False), encoding="utf-8")
+    outputs = executors.build_l2_5_evidence_organizer_outputs(
+        {"source_candidates.json": str(l1), "ddgs_gap_sources.json": str(l2)}
+    )
+    stage_dir = tmp_path / "L2_5_codex_evidence_organizer"
+    stage_dir.mkdir()
+    for name in ("sources.csv", "evidence.csv", "claims.md", "gaps.md"):
+        (stage_dir / name).write_text(outputs[name], encoding="utf-8")
+    (stage_dir / "evidence_runner_001.request.json").write_text(
+        outputs["evidence_runner_*.request.json"],
+        encoding="utf-8",
+    )
+    return executors.analyze_l2_5_evidence_organizer(tmp_path), stage_dir
+
+
+def test_l2_5_audit_finance_query_is_not_bucketed_as_legal(tmp_path: Path):
+    query = "未来10年 AI 持续降低审计底稿整理、财务异常检测、合规报告生成和管理层讨论分析草稿成本后，初级审计员和企业财务分析师的优势与劣势是否会发生结构性反转？"
+    l1_items = [
+        {
+            "candidate": "audit expertise development paradox AI junior auditor",
+            "evidence_type": "mechanism_or_theory",
+            "coverage_axis": "mechanism_or_theory",
+            "why_relevant": "AI automation reduces audit workpaper preparation and changes junior auditor learning-by-doing.",
+        },
+        {
+            "candidate": "financial analyst AI MD&A anomaly detection workflow",
+            "evidence_type": "empirical study",
+            "coverage_axis": "empirical_study_or_RCT",
+            "why_relevant": "Financial analysts shift from drafting MD&A and anomaly screening to validation and advisory work.",
+        },
+        {
+            "candidate": "China audit AI working paper compliance guidance",
+            "evidence_type": "local regulation / guideline",
+            "coverage_axis": "local_or_contextual_source",
+            "why_relevant": "Audit regulation constrains how AI-generated working papers and compliance reports can be relied on.",
+        },
+        {
+            "candidate": "professional skepticism junior auditor AI review",
+            "evidence_type": "controversy_or_counterevidence",
+            "coverage_axis": "controversy_or_counterevidence",
+            "why_relevant": "Professional skepticism may weaken if junior auditors skip manual evidence inspection experience.",
+        },
+    ]
+    l2_items = [
+        {"title": "AI reshapes auditing workflows", "url": "https://example.test/audit-ai", "snippet": "AI can draft audit workpapers and flag financial anomalies while requiring human review."},
+        {"title": "MD&A drafting and financial analyst AI", "url": "https://example.test/mda-ai", "snippet": "Generative AI supports MD&A drafting and changes analyst review responsibilities."},
+        {"title": "Audit professional skepticism under automation", "url": "https://example.test/skepticism", "snippet": "Automation creates counter-signals around overreliance and loss of junior training."},
+        {"title": "Accounting compliance report automation", "url": "https://example.test/compliance", "snippet": "Compliance reports can be accelerated by AI but require accountability controls."},
+    ]
+
+    analysis, stage_dir = _write_l2_5_inputs_and_analyze(tmp_path, query, l1_items, l2_items)
+    request = json.loads((stage_dir / "evidence_runner_001.request.json").read_text(encoding="utf-8"))
+
+    assert request["sample_schema"] == "foresight_mechanism"
+    assert "审计" in request["topic_anchor_terms"] or "财务" in request["topic_anchor_terms"]
+    assert not {"lawyer", "contract", "case summarization", "legal ops"}.intersection(
+        set(request["topic_anchor_terms"])
+    )
+    assert analysis["l2_5_valid"] is True
+    assert analysis["l2_5_stub_detected"] is False
+    assert analysis["insufficient_sources"] is False
+    assert analysis["source_rows"] >= 3
+    assert analysis["evidence_rows"] >= 3
+    assert analysis["claim_count"] >= 4
+    assert analysis["claim_source_alignment_valid"] is True
+
+
+def test_l2_5_rag_architecture_query_extracts_architecture_claims(tmp_path: Path):
+    query = "一个企业内部知识库产品是否应该从 Elasticsearch + 定时全量 embedding 任务，迁移到事件驱动增量索引 + 向量数据库 + hybrid reranker + 权限感知 RAG 架构？"
+    l1_items = [
+        {"candidate": "Elasticsearch scheduled full embedding indexing limitations", "evidence_type": "architecture note", "coverage_axis": "mechanism_or_theory", "why_relevant": "Scheduled full embedding jobs create stale retrieval and expensive reindexing for internal knowledge bases."},
+        {"candidate": "event driven incremental indexing knowledge base architecture", "evidence_type": "practice report", "coverage_axis": "intervention_or_practice", "why_relevant": "Event-driven incremental indexing can reduce freshness lag and isolate document update failures."},
+        {"candidate": "vector database hybrid reranker RAG permission filtering", "evidence_type": "technical guide", "coverage_axis": "authoritative_guideline_or_consensus", "why_relevant": "Hybrid reranking and permission-aware retrieval can improve relevance while preserving access control boundaries."},
+        {"candidate": "RAG migration complexity observability evaluation", "evidence_type": "controversy_or_counterevidence", "coverage_axis": "controversy_or_counterevidence", "why_relevant": "Migration adds evaluation, chunking, permissions, latency, and operational complexity risks."},
+    ]
+    l2_items = [
+        {"title": "Incremental indexing for RAG", "url": "https://example.test/incremental", "snippet": "Incremental indexing improves freshness but needs event guarantees and replay."},
+        {"title": "Hybrid search and reranking", "url": "https://example.test/rerank", "snippet": "Hybrid search combines lexical and vector recall, then reranks for answer quality."},
+        {"title": "Permission-aware RAG", "url": "https://example.test/permissions", "snippet": "Enterprise RAG must enforce document-level and user-level permissions before generation."},
+        {"title": "Vector database migration risk", "url": "https://example.test/vector-risk", "snippet": "Vector database adoption adds cost, monitoring, and relevance evaluation requirements."},
+    ]
+
+    analysis, stage_dir = _write_l2_5_inputs_and_analyze(tmp_path, query, l1_items, l2_items)
+    request = json.loads((stage_dir / "evidence_runner_001.request.json").read_text(encoding="utf-8"))
+    claims = (stage_dir / "claims.md").read_text(encoding="utf-8")
+
+    assert request["sample_schema"] == "tech_route"
+    assert analysis["l2_5_valid"] is True
+    assert analysis["insufficient_sources"] is False
+    assert analysis["source_rows"] >= 3
+    assert analysis["evidence_rows"] >= 3
+    assert analysis["claim_count"] >= 4
+    assert "current architecture" in claims
+    assert "target architecture" in claims
+    assert analysis["claim_source_alignment_valid"] is True
+
+
+def test_l2_5_math_intervention_query_extracts_intervention_claims(tmp_path: Path):
+    query = "8-10 岁数学计算困难、数感弱但智力正常的儿童，是否值得采用 数轴表征训练 + 明确策略教学 + 间隔检索练习， 而不是主要依赖刷题、数学游戏和泛化兴趣培养？"
+    l1_items = [
+        {"candidate": "number line training math learning difficulties children", "evidence_type": "systematic review", "coverage_axis": "systematic_review_or_meta_analysis", "why_relevant": "Number line representation training targets numerical magnitude and number sense in children with math difficulties."},
+        {"candidate": "explicit strategy instruction arithmetic difficulties ages 8 10", "evidence_type": "intervention study", "coverage_axis": "empirical_study_or_RCT", "why_relevant": "Explicit strategy instruction supports arithmetic accuracy and reduces weak procedural guessing."},
+        {"candidate": "spaced retrieval practice math fact fluency children", "evidence_type": "practice guide", "coverage_axis": "intervention_or_practice", "why_relevant": "Spaced retrieval practice strengthens math fact retention compared with massed worksheets."},
+        {"candidate": "math games interest building transfer limitations", "evidence_type": "counterevidence", "coverage_axis": "controversy_or_counterevidence", "why_relevant": "Math games and interest cultivation may not transfer unless tied to explicit strategy and retrieval practice."},
+    ]
+    l2_items = [
+        {"title": "Number line intervention evidence", "url": "https://example.test/number-line", "snippet": "Number line activities improve magnitude comparison and number sense outcomes."},
+        {"title": "Explicit instruction for math difficulty", "url": "https://example.test/explicit", "snippet": "Explicit teaching benefits students with calculation difficulties when strategies are modeled."},
+        {"title": "Spacing and retrieval in arithmetic", "url": "https://example.test/spacing", "snippet": "Spacing and retrieval improve durable arithmetic fact learning."},
+        {"title": "Math games transfer risk", "url": "https://example.test/games", "snippet": "Games can increase engagement but may show weak transfer without targeted instruction."},
+    ]
+
+    analysis, stage_dir = _write_l2_5_inputs_and_analyze(tmp_path, query, l1_items, l2_items)
+    request = json.loads((stage_dir / "evidence_runner_001.request.json").read_text(encoding="utf-8"))
+    claims = (stage_dir / "claims.md").read_text(encoding="utf-8")
+
+    assert request["sample_schema"] == "high_evidence_intervention"
+    assert analysis["l2_5_valid"] is True
+    assert analysis["l2_5_stub_detected"] is False
+    assert analysis["insufficient_sources"] is False
+    assert analysis["source_rows"] >= 3
+    assert analysis["evidence_rows"] >= 3
+    assert analysis["claim_count"] >= 4
+    assert "population" in claims
+    assert "intervention" in claims
+    assert "outcome/evidence strength" in claims
+    assert analysis["claim_source_alignment_valid"] is True
+
+
+def test_supplementary_adhd_parent_training_is_cross_topic_for_non_adhd_samples():
+    import tools.task_engine_executors as executors
+
+    contaminated_text = """
+    query: ADHD parent training children
+    title: Parent Training in Behavior Management | Attention-Deficit / Hyperactivity Disorder (ADHD) | CDC
+    url: https://www.cdc.gov/adhd/treatment/behavior-therapy.html
+    snippet: parent training for children with ADHD
+    """
+    queries = [
+        "B2B SaaS 分析产品是否应该从 PostgreSQL 单体 + cron ETL 迁移到事件驱动架构 + lakehouse/对象存储 + 流式特征管道？",
+        "未来 10 年 AI 持续降低法律检索、合同起草、案例摘要和合规解释成本后，初级律师和企业法务分析师的优势与劣势是否会发生结构性反转？",
+        "8-10 岁拼读困难儿童是否值得采用系统性音韵意识 + 明确解码训练 + 高频短时练习，而不是主要依赖泛阅读？",
+    ]
+
+    for query in queries:
+        result = executors.detect_supplementary_search_topic_contamination(query, contaminated_text)
+        assert result["supplementary_search_contaminated"] is True
+        assert result["supplementary_contaminated"] is True
+        assert result["supplementary_search_cross_topic_contamination"] is True
+        assert result["issue"] == "supplementary_search_cross_topic_contamination"
+
+
+def test_supplementary_queries_for_non_adhd_topics_do_not_include_parent_training():
+    import tools.task_engine_executors as executors
+
+    samples = [
+        "B2B SaaS 分析产品是否应该从 PostgreSQL 单体 + cron ETL 迁移到事件驱动架构 + lakehouse/对象存储 + 流式特征管道？",
+        "未来 10 年 AI 持续降低法律检索、合同起草、案例摘要和合规解释成本后，初级律师和企业法务分析师的优势与劣势是否会发生结构性反转？",
+        "早期消费硬件基金是否应该提前下注 2030 年前家庭陪伴型具身 AI 机器人形成规模化消费市场？",
+        "8-10 岁拼读困难儿童是否值得采用系统性音韵意识 + 明确解码训练 + 高频短时练习，而不是主要依赖泛阅读？",
+    ]
+    for query in samples:
+        queries = executors._supplementary_search_queries(query)
+        joined = " ".join(queries).lower()
+        assert len(queries) >= 3
+        assert "adhd parent training" not in joined
+        assert "behavioral parent training" not in joined
+        assert all(executors.detect_supplementary_search_topic_contamination(query, item)["supplementary_search_contaminated"] is False for item in queries)
+
+
+def test_l5_packet_preserves_l4_critical_l2_5_extraction_missing(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    records = []
+    for name in ("L1_gemini_search", "L2_ddgs_supplement", "L3_r1_synthesis"):
+        stage_dir = tmp_path / name
+        stage_dir.mkdir()
+        artifact = stage_dir / "artifact.md"
+        artifact.write_text("domain evidence for PostgreSQL lakehouse migration", encoding="utf-8")
+        records.append({"stage_name": name, "artifact_path": str(artifact), "outputs": {}})
+
+    l2_5 = tmp_path / "L2_5_codex_evidence_organizer"
+    l2_5.mkdir()
+    payload = json.dumps(
+        {
+            "handoff_protocol": "Hermes-Codex evidence organizer smoke",
+            "inputs": {"source_candidates.json": "x", "ddgs_gap_sources.json": "y"},
+            "outputs": ["sources.csv", "evidence.csv", "claims.md", "gaps.md"],
+        },
+        indent=2,
+    )
+    outputs = {}
+    for filename in ("sources.csv", "evidence.csv", "claims.md", "gaps.md"):
+        path = l2_5 / filename
+        path.write_text(payload, encoding="utf-8")
+        outputs[filename] = str(path)
+    records.insert(2, {"stage_name": "L2_5_codex_evidence_organizer", "artifact_path": str(l2_5), "outputs": outputs})
+
+    l4 = tmp_path / "L4_gemini_audit"
+    l4.mkdir()
+    audit = l4 / "gemini_audit_report.md"
+    audit.write_text(
+        "DEFECT [Critical] - L2.5 Extraction Missing: sources.csv, evidence.csv, claims.md, gaps.md are stubbed out.",
+        encoding="utf-8",
+    )
+    records.append({"stage_name": "L4_gemini_audit", "artifact_path": str(audit), "outputs": {}})
+
+    packet = executors._research_acceptance_packet_from_artifacts(
+        records,
+        base_dir=tmp_path,
+        query="B2B SaaS PostgreSQL lakehouse migration evidence grounded decision",
+    )
+    rendered = LocalTaskEngineExecutor().run_controller_acceptance(
+        CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][5],
+        packet,
+    )
+
+    assert "l2_5_valid: false" in rendered
+    assert "critical_defects: [l2_5_extraction_missing]" in rendered
+    assert "missing_or_invalid_artifacts: []" not in rendered
+    assert "L2_5_codex_evidence_organizer/sources.csv" in rendered
+    assert "evidence_packet_ready_for_decision: false" in rendered
+
+
 def test_l5_research_packet_quality_blocks_missing_fixed_sections():
     import tools.task_engine_executors as executors
 
@@ -2763,7 +3224,7 @@ def test_output_quality_profile_accepts_future_scenario_alias_with_fixed_heading
     ) == []
 
 
-def test_output_quality_profile_accepts_foresight_structure_inside_user_sections():
+def test_output_quality_profile_blocks_foresight_final_without_judgment_units():
     import tools.task_engine_executors as executors
 
     text = (
@@ -2773,11 +3234,15 @@ def test_output_quality_profile_accepts_foresight_structure_inside_user_sections
         "## danger_flag\n可观察指标 / 反证信号：是否保留推理痕迹。"
     )
 
-    assert executors._quality_profile_errors(
+    errors = executors._quality_profile_errors(
         text,
         [executors.PROFILE_FORESIGHT_MECHANISM],
         stage_name="final_controller_report",
-    ) == []
+    )
+
+    assert "missing_judgment_unit_fields" in errors
+    assert "insufficient_evidence_tier_bindings" in errors
+    assert "insufficient_decision_use_bindings" in errors
 
 
 def test_user_forbids_advice_still_blocks_advice_terms():
@@ -3430,7 +3895,34 @@ def test_supplementary_search_uses_ddgs_and_stops_before_structure_mapper(tmp_pa
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return {
+                    "source_candidates": [
+                        {
+                            "candidate": "CDC ADHD parent training behavior therapy guidance",
+                            "evidence_type": "Guideline",
+                            "coverage_axis": "authoritative_guideline_or_consensus",
+                            "why_relevant": "ADHD parent training and behavior therapy guidance is relevant to child intervention decisions.",
+                        },
+                        {
+                            "candidate": "AAP ADHD clinical practice guideline school supports",
+                            "evidence_type": "Guideline",
+                            "coverage_axis": "intervention_or_practice",
+                            "why_relevant": "ADHD school supports and clinical guidance inform accommodations and intervention intensity.",
+                        },
+                        {
+                            "candidate": "CLAS ADHD inattentive children parent training organization skills",
+                            "evidence_type": "Intervention Study",
+                            "coverage_axis": "empirical_study_or_RCT",
+                            "why_relevant": "ADHD inattentive children may benefit from parent training and organization skills interventions.",
+                        },
+                        {
+                            "candidate": "ADHD executive function children mind wandering cognitive disengagement",
+                            "evidence_type": "Mechanism Review",
+                            "coverage_axis": "mechanism_or_theory",
+                            "why_relevant": "ADHD executive function and mind wandering mechanisms shape long-term support needs.",
+                        },
+                    ]
+                }
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -3439,7 +3931,14 @@ def test_supplementary_search_uses_ddgs_and_stops_before_structure_mapper(tmp_pa
 
         def run_ddgs(self, stage, queries):
             if stage.stage_name == "L2_ddgs_supplement":
-                return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+                return [
+                    {
+                        "query": queries[0],
+                        "title": "ADHD parent training evidence",
+                        "url": "https://example.test/ddgs",
+                        "snippet": "ADHD parent training evidence supports behavior management and school-home coordination.",
+                    }
+                ]
             assert stage.stage_name == "supplementary_search"
             assert stage.owner == "DDGS"
             assert stage.model == "DDGS"
@@ -3556,6 +4055,10 @@ def test_supplementary_search_artifact_missing_blocks_validation(tmp_path: Path)
         def run_ddgs(self, stage, queries):
             return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
 
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
+
         def run_omlx_model(self, stage, model, prompt):
             self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
             return "R1 synthesis body"
@@ -3582,6 +4085,10 @@ def test_structure_mapper_uses_qwen72b_and_stops_before_evidence_judge(tmp_path:
 
         def run_ddgs(self, stage, queries):
             return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
@@ -3645,6 +4152,10 @@ def test_structure_mapper_output_forbidden_final_or_later_stage_terms_blocked(tm
 
         def run_ddgs(self, stage, queries):
             return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
@@ -3742,6 +4253,8 @@ def test_evidence_judge_prefill_block_writes_diagnostic(tmp_path: Path):
                 "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
                 "empty_content_kind": "response_error_object",
                 "error_summary": "prefill_memory_exceeded",
+                "prompt_chars": len(prompt),
+                "prompt_estimated_tokens": max(1, (len(prompt) + 3) // 4),
             }
             raise RuntimeError("prefill_memory_exceeded")
 
@@ -3753,13 +4266,121 @@ def test_evidence_judge_prefill_block_writes_diagnostic(tmp_path: Path):
     )
 
     diagnostic_path = tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json"
+    compact_path = tmp_path / "evidence_judge" / "evidence_judge.compact_retry.diagnostic.json"
     diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    compact = json.loads(compact_path.read_text(encoding="utf-8"))
 
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "evidence_judge"
     assert diagnostic_path.exists()
+    assert compact_path.exists()
     assert diagnostic["error_summary"] == "prefill_memory_exceeded"
+    assert diagnostic.get("compact_mode_used") is not True
+    assert compact["compact_mode_used"] is True
+    assert compact["blocked_reason_original"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
+    assert compact["original_prompt_chars"] > compact["compact_prompt_chars"]
     assert "diagnostic_artifact=" in result["run"]["stages"][-1]["error"]
+    assert "compact_retry_diagnostic_artifact=" in result["run"]["stages"][-1]["error"]
+
+
+def test_evidence_judge_prefill_compact_retry_succeeds_and_writes_diagnostic(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = []
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][:9]:
+        stage_dir = tmp_path / spec.stage_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        outputs = executors.planned_outputs(spec, tmp_path)
+        for output in outputs.values():
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if spec.stage_name == "L5_deepseek_acceptance":
+                body = _complete_research_evidence_packet_text()
+            elif spec.stage_name == "intelligence_layer":
+                body = "claim strength uncertainty applicability evidence gap " * 80
+            elif spec.stage_name == "supplementary_search":
+                body = "evidence support risk uncertainty applicability " * 80
+            elif spec.stage_name == "structure_mapper":
+                body = "problem_axes\nclaim strength and applicability axes\nunknowns_for_later_stages\nuncertainty gaps"
+            else:
+                body = "fresh source"
+            output_path.write_text(body, encoding="utf-8")
+        artifact = executors._primary_output_path(spec, outputs, stage_dir)
+        stages.append({
+            "stage_name": spec.stage_name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact),
+            "outputs": outputs,
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+            "status": "accepted" if spec.stage_name == "L5_deepseek_acceptance" else "real",
+        })
+
+    class PrefillThenCompactExecutor(LocalTaskEngineExecutor):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+
+        def run_omlx_model(self, stage, model, prompt):
+            self.prompts.append(prompt)
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            self.last_omlx_diagnostics[stage.stage_name] = {
+                "stage_name": stage.stage_name,
+                "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+                "prompt_chars": len(prompt),
+                "prompt_estimated_tokens": max(1, (len(prompt) + 3) // 4),
+                "compact_mode_used": "compact_evidence_judge_packet" in prompt,
+                "inference_request_sent": "compact_evidence_judge_packet" in prompt,
+                "inference_response_received": "compact_evidence_judge_packet" in prompt,
+            }
+            if "compact_evidence_judge_packet" not in prompt:
+                self.last_omlx_diagnostics[stage.stage_name]["error_summary"] = "prefill_memory_exceeded"
+                raise RuntimeError("prefill_memory_exceeded")
+            return "\n".join(
+                [
+                    "evidence_quality_map",
+                    "The compact retry directly judges evidence quality.",
+                    "strength_by_claim",
+                    "The stronger claims are task-cost and current evidence claims.",
+                    "applicability_to_user_context",
+                    "Applicability is bounded and context-dependent.",
+                    "uncertainty_and_limits",
+                    "Uncertainty remains for long-horizon claims.",
+                    "evidence_gaps_for_later_stages",
+                    "Direct longitudinal evidence is missing.",
+                ]
+            )
+
+    executor = PrefillThenCompactExecutor()
+    result = executors.run_research_decision_evidence_judge_smoke(
+        {"stages": stages},
+        query="未来10年 AI 结构性反转",
+        base_dir=tmp_path,
+        executor=executor,
+    )
+
+    diagnostic_path = tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json"
+    compact_path = tmp_path / "evidence_judge" / "evidence_judge.compact_retry.diagnostic.json"
+    artifact = tmp_path / "evidence_judge" / "evidence_judge.md"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    compact = json.loads(compact_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "ok"
+    assert artifact.exists()
+    assert artifact.read_text(encoding="utf-8").startswith("evidence_quality_map")
+    assert len(executor.prompts) == 2
+    assert "compact_evidence_judge_packet" not in executor.prompts[0]
+    assert "compact_evidence_judge_packet" in executor.prompts[1]
+    assert "Your first non-empty line must be exactly: evidence_quality_map" in executor.prompts[1]
+    assert "Do not write phrases like" in executor.prompts[1]
+    assert len(executor.prompts[1]) <= 10000
+    assert diagnostic["error_summary"] == "prefill_memory_exceeded"
+    assert compact["compact_mode_used"] is True
+    assert compact["blocked_reason_original"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
+    assert compact["original_prompt_chars"] > compact["compact_prompt_chars"]
 
 
 def test_evidence_judge_uses_nemotron_and_stops_before_premise_auditor(tmp_path: Path):
@@ -3868,6 +4489,69 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
     assert (tmp_path / "evidence_judge" / "evidence_judge.invalid.md").exists()
 
 
+def test_evidence_judge_section_start_mismatch_writes_invalid_artifact_and_diagnostic(tmp_path: Path):
+    class FakeExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model):
+            if stage.stage_name == "L1_gemini_search":
+                return {"source_candidates": [{"title": "fake"}]}
+            if stage.stage_name == "L4_gemini_audit":
+                self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
+                return "Gemini audit body"
+            self.last_executor_models[stage.stage_name] = GEMINI_HIGH
+            return "user_question_map\nresearch_packet_map"
+
+        def run_ddgs(self, stage, queries):
+            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
+
+        def run_omlx_model(self, stage, model, prompt):
+            if stage.stage_name == "L3_r1_synthesis":
+                self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
+                return "R1 synthesis body"
+            if stage.stage_name == "structure_mapper":
+                self.last_executor_models[stage.stage_name] = QWEN72B_ACTUAL_MODEL_DEFAULT
+                return "problem_axes\nactor_map\ndecision_questions\nevidence_slots"
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            self.last_omlx_diagnostics[stage.stage_name] = {
+                "inference_request_sent": True,
+                "inference_response_received": True,
+                "compact_mode_used": False,
+            }
+            return "strength_by_claim\n- claim strength without required first section"
+
+    l1_l9 = run_research_decision_l1_l9_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
+    result = run_research_decision_evidence_judge_smoke(
+        l1_l9["run"],
+        query=ADHD_PROMPT,
+        base_dir=tmp_path,
+        executor=FakeExecutor(),
+    )
+
+    invalid_path = tmp_path / "evidence_judge" / "evidence_judge.invalid.md"
+    diagnostic_path = tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "evidence_judge"
+    assert "artifact_quality_error:section_start_mismatch" in result["run"]["stages"][-1]["error"]
+    assert invalid_path.exists()
+    assert not (tmp_path / "evidence_judge" / "evidence_judge.md").exists()
+    assert diagnostic["artifact_quality_error"] == "section_start_mismatch"
+    assert diagnostic["first_nonempty_line"] == "strength_by_claim"
+    assert diagnostic["normalized_first_line"] == "strength_by_claim"
+    assert diagnostic["final_content_chars"] == len(invalid_path.read_text(encoding="utf-8"))
+    assert diagnostic["invalid_artifact_path"] == str(invalid_path)
+    assert diagnostic["inference_request_sent"] is True
+    assert diagnostic["inference_response_received"] is True
+    assert diagnostic["compact_mode_used"] is False
+    assert diagnostic["prompt_chars"] > 0
+    assert diagnostic["prompt_estimated_tokens"] > 0
+    assert diagnostic["valid_for_pipeline"] is False
+
+
 def test_evidence_judge_allows_handoff_to_later_stage_language():
     import tools.task_engine_executors as executors
 
@@ -3878,6 +4562,135 @@ def test_evidence_judge_allows_handoff_to_later_stage_language():
 """
 
     assert executors._evidence_judge_forbidden_tokens(allowed) == []
+
+
+def test_evidence_judge_artifact_quality_blocks_process_narration_leak():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    polluted = """We need to output sections: evidence_quality_map, strength_by_claim.
+
+We must judge the supplied artifacts and then craft the answer.
+
+evidence_quality_map
+The evidence is moderate.
+"""
+
+    try:
+        executors._assert_artifact_quality(stage, polluted)
+    except RuntimeError as exc:
+        error = str(exc)
+    else:
+        raise AssertionError("evidence_judge process narration must fail closed")
+
+    assert "evidence_judge: artifact_quality_error:process_narration_leak" in error
+
+
+def test_evidence_judge_prompt_derives_claims_when_claim_table_missing(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    records = []
+    stage_names = [
+        "L1_gemini_search",
+        "L2_ddgs_supplement",
+        "L2_5_codex_evidence_organizer",
+        "L3_r1_synthesis",
+        "L4_gemini_audit",
+        "L5_deepseek_acceptance",
+        "intelligence_layer",
+        "supplementary_search",
+        "structure_mapper",
+    ]
+    for name in stage_names:
+        stage_dir = tmp_path / name
+        stage_dir.mkdir()
+        artifact = stage_dir / ("parent_training_supplement.md" if name == "supplementary_search" else f"{name}.md")
+        artifact.write_text(f"{name} domain material without claim table", encoding="utf-8")
+        records.append({"stage_name": name, "artifact_path": str(artifact), "outputs": {}})
+
+    prompt = executors._evidence_judge_prompt_from_artifacts(
+        records,
+        query="B2B SaaS PostgreSQL lakehouse migration?",
+        base_dir=tmp_path,
+    )
+
+    assert "derive 4-6 decision-relevant claims" in prompt
+    assert "strength_by_claim is always required" in prompt
+    assert "Never write \"not applicable\" for evidence_quality_map or strength_by_claim" in prompt
+
+
+def test_evidence_judge_not_applicable_sections_continue_to_fail_closed():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    invalid = "evidence_quality_map and strength_by_claim are not applicable as the current evidence packet lacks granular claim-level assessment."
+
+    try:
+        executors._assert_artifact_quality(stage, invalid)
+    except RuntimeError as exc:
+        error = str(exc)
+    else:
+        raise AssertionError("not-applicable evidence_judge output must fail closed")
+
+    assert "evidence_judge: artifact_quality_error:section_start_mismatch" in error
+
+
+def test_valid_evidence_judge_requires_independent_first_line_and_strength_section():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    valid = """evidence_quality_map
+Evidence is mixed but usable.
+
+strength_by_claim
+- claim: migrate read-heavy analytics away from OLTP
+  strength: medium
+  evidence_basis: CDC and lakehouse materials
+  uncertainty_or_gap: cost and migration risk remain context-specific
+
+applicability_to_user_context
+Applicable to B2B SaaS analytics.
+
+uncertainty_and_limits
+Migration timing remains uncertain.
+
+evidence_gaps_for_later_stages
+Need workload and cost model.
+"""
+    bad_first_line = "evidence_quality_map: summary\nstrength_by_claim\n- claim: x"
+    missing_strength = "evidence_quality_map\nEvidence only."
+
+    executors._assert_artifact_quality(stage, valid)
+    for invalid in (bad_first_line, missing_strength):
+        try:
+            executors._assert_artifact_quality(stage, invalid)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("invalid evidence_judge structure must fail closed")
+
+
+def test_evidence_judge_artifact_quality_allows_clean_ai_will_phrase():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    clean = """evidence_quality_map
+Evidence quality is moderate. AI will continuously reduce routine legal task costs is a claim to be judged, not a self-instruction.
+
+strength_by_claim
+The task-cost reduction claim is stronger than the structural reversal claim.
+
+applicability_to_user_context
+Applicability is moderate for junior lawyers and corporate legal analysts.
+
+uncertainty_and_limits
+The ten-year horizon remains uncertain.
+
+evidence_gaps_for_later_stages
+Longitudinal role-level evidence is missing.
+"""
+
+    executors._assert_artifact_quality(stage, clean)
 
 
 def test_evidence_judge_allows_premise_audit_referral_language():
@@ -4789,6 +5602,38 @@ def test_external_calibration_quality_allows_agreement_with_convergence_when_fie
     assert executors._external_calibration_quality_error(text) == ""
 
 
+def test_external_calibration_quality_ignores_metadata_verdict_false_positive():
+    import tools.task_engine_executors as executors
+
+    text = "\n".join(
+        [
+            "external_calibration",
+            "executor_model: ChatGPT App Bridge",
+            'fallback_reasons: ["external_calibration_missing_verdict"]',
+            'metadata: {"calibration_verdict": "metadata must not satisfy body contract"}',
+            "error_summary: missing_verdict",
+            "",
+            "calibration_scope",
+            "Scope body with supported, plausible, speculative, and contradicted labels. " * 30,
+            "claim_strength_table",
+            "| Claim | Strength | Notes |",
+            "| --- | --- | --- |",
+            "| A | supported | bounded current evidence |",
+            "| B | plausible | conditional mechanism |",
+            "| C | speculative | future-facing uncertainty |",
+            "| D | contradicted | rejected overreach |",
+            "over_inference_checks",
+            "The body checks over-inference without giving a calibration conclusion. " * 30,
+            "contradiction_checks",
+            "The body labels contradictions and keeps unsupported claims downgraded. " * 30,
+            "handoff_notes_for_final_controller",
+            "Use only supported or plausible claims; speculative claims remain conditional. " * 30,
+        ]
+    )
+
+    assert executors._external_calibration_quality_error(text) == "external_calibration_missing_verdict"
+
+
 def test_external_calibration_blocks_when_gpt_and_gemini_unavailable(monkeypatch):
     import tools.task_engine_executors as executors
 
@@ -5438,14 +6283,18 @@ def test_decision_final_packet_quality_blocks_user_forbidden_advice_terms():
         raise AssertionError("user-forbidden advice terms should be blocked")
 
 
-def test_decision_final_packet_quality_accepts_valid_five_section_answer():
+def test_decision_final_packet_quality_blocks_shallow_five_section_answer():
     import tools.task_engine_executors as executors
 
     packet = {"mode": ENGINE_DECISION, "query": _decision_future_query()}
     text = _valid_decision_five_section_report()
 
-    executors._assert_final_controller_packet_quality(packet, text)
-    executors._assert_artifact_quality(CANONICAL_STAGES[ENGINE_DECISION][-1], text)
+    try:
+        executors._assert_final_controller_packet_quality(packet, text)
+    except RuntimeError as exc:
+        assert "missing_judgment_unit_fields" in str(exc)
+    else:
+        raise AssertionError("shallow five-section final should not pass production quality")
 
 
 def test_decision_final_uses_foresight_template_from_profile_without_exact_query_phrases():
@@ -5469,11 +6318,13 @@ def test_decision_final_uses_foresight_template_from_profile_without_exact_query
     text = executors._final_controller_report_from_packet(packet)
 
     assert "## 未来优势变陷阱 Top5" in text
-    assert "## convergence_fixed_section_digest" in text
-    assert "## key_drivers" in text
-    assert "## mechanism_chain" in text
-    assert "## scenario_branches" in text
-    assert "## certainty_levels" in text
+    assert "convergence_fixed_section_digest" not in text
+    assert "## 收敛吸收" in text
+    assert "关键驱动：" in text
+    assert "机制链：" in text
+    assert "情景分叉：" in text
+    assert "确定性：" in text
+    assert "## key_drivers" not in text
     executors._assert_final_controller_packet_quality(packet, text)
 
 
@@ -5508,11 +6359,223 @@ def test_decision_final_packet_absorbs_convergence_fixed_sections(tmp_path: Path
     )
     text = executors._final_controller_report_from_packet(packet)
 
-    assert "convergence_fixed_section_digest" in text
+    assert "convergence_fixed_section_digest" not in text
     assert "AI cost collapse" in text
     assert "input variable -> mediating mechanism -> output variable" in text
     assert "Scenario A keeps verification" in text
     assert "high / medium / low" in text
+    assert "## key_drivers" not in text
+
+
+def test_decision_final_packet_absorbs_external_calibration_hard_constraints(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = _decision_final_prior_stage_records(tmp_path)
+    calibration_path = tmp_path / "external_calibration" / "external_calibration.md"
+    calibration_path.write_text(
+        "\n".join(
+            [
+                "external_calibration",
+                "calibration_verdict",
+                "可进入 final controller，但必须执行降调。",
+                "disagreement_or_risk_points",
+                "PFC 萎缩、多巴胺抗性、严重依赖预测都不得写成事实。",
+                "final_adjustment_recommendation",
+                "把强机制词改为执行练习减少风险；把长期结果降级为 foresight_hypothesis；逐条绑定反证信号。",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    packet = executors._decision_final_controller_packet(
+        stages,
+        query="未来10年 AI 降低知识获取成本后结构性反转 decision",
+        base_dir=tmp_path,
+    )
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "external_calibration_hard_constraints" in packet
+    assert "## 校准执行" in text
+    assert "执行练习减少风险" in text
+    assert "foresight_hypothesis" in text
+    assert "逐条绑定反证信号" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_foresight_fallback_uses_judgment_units_and_evidence_tiers():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "未来10年技术变化下做结构性决策判断。",
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "research_evidence_packet_context": "research_packet_digest: evidence_supported / reasonable_inference / foresight_hypothesis",
+        "excerpts": {},
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 证据分层" in text
+    assert "### evidence_supported" in text
+    assert "### reasonable_inference" in text
+    assert "### foresight_hypothesis" in text
+    assert "触发条件：" in text
+    assert "中间机制：" in text
+    assert "失效条件 / 反证信号：" in text
+    assert "certainty_level：" in text
+    assert "evidence_tier：" in text
+    assert "decision_use：" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_absorbs_research_packet_evidence_tiers():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "未来10年技术变化下做结构性决策判断。",
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "research_evidence_packet_context": "\n".join(
+            [
+                "research_packet_path: /tmp/raw_packet.md",
+                "boundary: do not dump raw packet",
+                "research_packet_digest:",
+                "## evidence_supported",
+                "Supported alpha claim from the packet.",
+                "## reasonable_inference",
+                "Inference beta connects evidence to the decision mechanism.",
+                "## foresight_hypothesis",
+                "Hypothesis gamma is conditional and must be tracked.",
+            ]
+        ),
+        "excerpts": {},
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "Supported alpha claim" in text
+    assert "Inference beta" in text
+    assert "Hypothesis gamma" in text
+    assert "research_packet_path:" not in text
+    assert "boundary: do not dump raw packet" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_research_decision_foresight_final_uses_generic_packet_synthesis_without_domain_leak():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": "未来 10 年 AI 持续降低法律检索、合同起草、案例摘要和合规解释成本后，初级律师和企业法务分析师的优势与劣势是否会发生结构性反转？",
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "excerpts": {
+            "L5_deepseek_acceptance": "research_evidence_packet says ADHD 孩子 柔术 家长训练 should never be copied into this final.",
+            "convergence_report": "key_drivers and mechanism_chain support partial operational reversal.",
+            "external_calibration": "Final calibration sentence: partial reversal is plausible; broad structural reversal is speculative.",
+        },
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "局部/场景性结构反转可能成立，职业整体反转证据不足。" in text
+    assert "### evidence_supported" in text
+    assert "### reasonable_inference" in text
+    assert "### foresight_hypothesis" in text
+    assert "source_consumption_check：research_evidence_packet=yes; convergence_report=yes; external_calibration=yes" in text
+    assert "ADHD" not in text
+    assert "孩子" not in text
+    assert "柔术" not in text
+    assert "家长训练" not in text
+    assert "fallback_reasons:" not in text
+    assert "executor_model:" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_research_decision_foresight_final_keeps_audit_finance_query_out_of_legal_bucket():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": "未来10年 AI 持续降低审计底稿整理、财务异常检测、合规报告生成和管理层讨论分析草稿成本后，初级审计员和企业财务分析师的优势与劣势是否会发生结构性反转？",
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "excerpts": {
+            "L5_deepseek_acceptance": "审计底稿、财务异常检测、合规报告和管理层讨论分析草稿是当前证据边界。",
+            "convergence_report": "机制链支持审计/财务分析局部角色重排。",
+            "external_calibration": "职业整体反转证据不足，应降调为条件性判断。",
+        },
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "审计底稿整理" in text
+    assert "财务异常检测" in text
+    assert "合规报告生成" in text
+    assert "管理层讨论分析草稿" in text
+    assert "初级审计员" in text
+    assert "企业财务分析师" in text
+    for leaked in ("法律检索", "合同起草", "案例摘要", "初级律师", "律师", "法律职业", "诉讼", "谈判"):
+        assert leaked not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_research_decision_non_foresight_final_uses_generic_packet_synthesis_without_domain_leak():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": "未来 3 年，一家中型工业服务公司是否应该进入越南北部电动车电池回收与梯次利用产业链？",
+        "output_quality_profile": [executors.PROFILE_EVIDENCE_GROUNDED],
+        "excerpts": {
+            "L5_deepseek_acceptance": "research_evidence_packet: market and regulatory evidence.",
+            "convergence_report": "convergence_report: entry should be staged and conditional.",
+            "external_calibration": "calibration_verdict: plausible only as pilot entry; not full heavy-asset entry.",
+        },
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "越南北部电动车电池回收" in text
+    assert "### evidence_supported" in text
+    assert "### reasonable_inference" in text
+    assert "### foresight_hypothesis" in text
+    assert "触发条件：" in text
+    assert "中间机制：" in text
+    assert "失效条件或反证信号：" in text
+    assert "certainty_level：" in text
+    assert "evidence_tier：" in text
+    assert "decision_use：" in text
+    assert "ADHD" not in text
+    assert "家长训练" not in text
+    assert "柔术" not in text
+    assert "fallback_reasons:" not in text
+    assert "executor_model:" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_quality_blocks_convergence_digest_heading_leak():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+    bad = _valid_decision_five_section_report() + "\n\n## convergence_fixed_section_digest\n## key_drivers\nraw digest"
+
+    try:
+        executors._assert_artifact_quality(stage, bad)
+    except RuntimeError as exc:
+        assert "artifact_quality_error:raw_intermediate_dump" in str(exc)
+    else:
+        raise AssertionError("convergence_fixed_section_digest should be absorbed, not emitted")
 
 
 def test_decision_final_foresight_template_preserves_user_top5_structure():

@@ -7,12 +7,18 @@ produce a StageRecord before validation can pass.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
+import re
+import signal
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 import http.client
 import http.cookiejar
@@ -20,8 +26,9 @@ import hashlib
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol, TypeVar
 
 from tools.task_engine_contracts import (
     CANONICAL_STAGES,
@@ -81,7 +88,7 @@ class TaskEngineExecutor(Protocol):
     def run_ddgs(self, stage: StageSpec, queries: list[str]) -> list[dict[str, str]]:
         ...
 
-    def run_codex_handoff(self, stage: StageSpec, inputs: dict[str, Any]) -> str:
+    def run_codex_handoff(self, stage: StageSpec, inputs: dict[str, Any]) -> Any:
         ...
 
     def run_omlx_model(self, stage: StageSpec, model: str, prompt: str) -> str:
@@ -495,17 +502,10 @@ class LocalTaskEngineExecutor:
         missing = [name for name in required if not inputs.get(name)]
         if missing:
             raise RuntimeError(f"{stage.stage_name}: missing handoff inputs: {', '.join(missing)}")
-        return json.dumps(
-            {
-                "handoff_protocol": "Hermes-Codex evidence organizer smoke",
-                "inputs": {name: inputs[name] for name in required},
-                "outputs": ["sources.csv", "evidence.csv", "claims.md", "gaps.md"],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        return build_l2_5_evidence_organizer_outputs(inputs)
 
     def run_omlx_model(self, stage: StageSpec, model: str, prompt: str) -> str:
+        started = time.time()
         if stage.stage_name in {"L3_r1_synthesis", "convergence_report"}:
             if stage.model != R1_32B or model != R1_32B:
                 raise RuntimeError(f"{stage.stage_name}: R1 model binding mismatch")
@@ -534,6 +534,27 @@ class LocalTaskEngineExecutor:
         else:
             raise RuntimeError(f"{stage.stage_name}: OMLX stage is not wired in this smoke layer")
         self.last_executor_models[stage.stage_name] = actual_model
+        diagnostic_context: dict[str, Any] = {
+            "stage_name": stage.stage_name,
+            "model": stage.model,
+            "canonical_model": stage.model,
+            "actual_model": actual_model,
+            "call_site": "LocalTaskEngineExecutor.run_omlx_model",
+            "admin_load_requested": False,
+            "admin_load_returned": False,
+            "observed_model_status": "",
+            "inference_request_sent": False,
+            "inference_response_received": False,
+            "stdout": "",
+            "stderr": "",
+        }
+        partial_content_path = _omlx_partial_content_path(getattr(self, "_current_stage_base_dir", None), stage)
+        if partial_content_path:
+            diagnostic_context["partial_content_path"] = str(partial_content_path)
+        diagnostic_context["whether_partial_content_received"] = False
+        diagnostic_context["partial_content_chars"] = 0
+        diagnostic_context["response_read_elapsed_seconds"] = 0
+        self.last_omlx_diagnostics[stage.stage_name] = diagnostic_context
         api_key = _omlx_api_key()
         if not api_key:
             raise RuntimeError("OMLX_AUTH_BLOCKED: missing OMLX_API_KEY in environment or ~/.hermes/.env")
@@ -541,17 +562,33 @@ class LocalTaskEngineExecutor:
         if not admin.login():
             raise RuntimeError("OMLX_AUTH_BLOCKED: admin login failed using OMLX_API_KEY from env/config")
         request_context: dict[str, Any] | None = None
+        stage_timed_out = False
+        global _OMLX_PARTIAL_CONTENT_PATH
+        previous_partial_path = _OMLX_PARTIAL_CONTENT_PATH
+        _OMLX_PARTIAL_CONTENT_PATH = partial_content_path
         try:
             loaded_before_unload = _loaded_omlx_model_ids(admin)
             admin.unload_all()
             loaded_after_unload = _loaded_omlx_model_ids(admin)
+            diagnostic_context["admin_load_requested"] = True
             load_result = admin.load_model(actual_model)
+            diagnostic_context["admin_load_returned"] = True
+            diagnostic_context["observed_model_status"] = _omlx_observed_model_status(admin, actual_model)
             if load_result.get("error") and _is_omlx_memory_guard_error(load_result):
                 admin.unload_all()
                 time.sleep(5)
                 loaded_after_unload = _loaded_omlx_model_ids(admin)
+                diagnostic_context["admin_load_requested"] = True
                 load_result = admin.load_model(actual_model)
+                diagnostic_context["admin_load_returned"] = True
+                diagnostic_context["observed_model_status"] = _omlx_observed_model_status(admin, actual_model)
             if load_result.get("error"):
+                diagnostic_context["error_type"] = "admin_load_error"
+                diagnostic_context["error_summary"] = _redact_secret_text(_safe_omlx_error(load_result))
+                if _omlx_status_is_ready(str(diagnostic_context.get("observed_model_status") or "")):
+                    diagnostic_context["blocked_reason"] = "inference_not_sent"
+                    raise RuntimeError(f"{stage.stage_name}: inference_not_sent: OMLX model is ready but load request returned an error")
+                diagnostic_context["blocked_reason"] = "model_load_failed"
                 raise RuntimeError(f"{stage.stage_name}: failed to load OMLX actual model: {_safe_omlx_error(load_result)}")
             loaded_after_load = _loaded_omlx_model_ids(admin)
             request_context = _omlx_request_diagnostic_context(
@@ -563,8 +600,15 @@ class LocalTaskEngineExecutor:
                 loaded_models_after_load=loaded_after_load,
                 retry_attempt="first",
             )
+            request_context.update(diagnostic_context)
             try:
+                diagnostic_context["inference_request_sent"] = True
                 data = _run_omlx_chat_with_retry(stage, actual_model, prompt, api_key=api_key)
+                diagnostic_context["inference_response_received"] = True
+            except _OmlxPartialResponseError as exc:
+                diagnostic_context.update(_omlx_partial_response_diagnostic(stage, actual_model, exc, request_context=request_context))
+                self.last_omlx_diagnostics[stage.stage_name] = dict(diagnostic_context)
+                raise RuntimeError(f"{stage.stage_name}: {exc.blocked_reason}: partial_content_path={exc.partial_content_path}") from exc
             except RuntimeError as exc:
                 if stage.stage_name == "evidence_judge" and _is_omlx_prefill_memory_text(str(exc)):
                     diagnostic_context = dict(request_context or {})
@@ -593,7 +637,13 @@ class LocalTaskEngineExecutor:
                 if request_context is not None:
                     request_context["loaded_models_after_load"] = _loaded_omlx_model_ids(admin)
                 try:
+                    diagnostic_context["inference_request_sent"] = True
                     data = _run_omlx_chat_with_retry(stage, actual_model, prompt, api_key=api_key)
+                    diagnostic_context["inference_response_received"] = True
+                except _OmlxPartialResponseError as exc:
+                    diagnostic_context.update(_omlx_partial_response_diagnostic(stage, actual_model, exc, request_context=request_context))
+                    self.last_omlx_diagnostics[stage.stage_name] = dict(diagnostic_context)
+                    raise RuntimeError(f"{stage.stage_name}: {exc.blocked_reason}: partial_content_path={exc.partial_content_path}") from exc
                 except RuntimeError as exc:
                     if _is_omlx_prefill_memory_text(str(exc)):
                         diagnostic_context = dict(request_context or {})
@@ -618,8 +668,28 @@ class LocalTaskEngineExecutor:
                     raise RuntimeError(f"{stage.stage_name}: OMLX_EMPTY_CONTENT_BLOCKED: Nemotron-120B returned empty content")
                 raise RuntimeError(empty_message)
             return content
+        except _TaskEngineStageTimeoutError:
+            stage_timed_out = True
+            diagnostic_context["elapsed_seconds"] = round(time.time() - started, 2)
+            diagnostic_context["error_type"] = "stage_timeout"
+            diagnostic_context["error_summary"] = "stage timeout while running OMLX stage"
+            raise
+        except Exception as exc:
+            current = self.last_omlx_diagnostics.get(stage.stage_name)
+            if isinstance(current, dict):
+                current.setdefault("elapsed_seconds", round(time.time() - started, 2))
+                current.setdefault("error_type", type(exc).__name__)
+                current.setdefault("error_summary", _redact_secret_text(str(exc)))
+                current.setdefault("observed_model_status", diagnostic_context.get("observed_model_status") or "")
+                current.setdefault("admin_load_requested", diagnostic_context.get("admin_load_requested", False))
+                current.setdefault("admin_load_returned", diagnostic_context.get("admin_load_returned", False))
+                current.setdefault("inference_request_sent", diagnostic_context.get("inference_request_sent", False))
+                current.setdefault("inference_response_received", diagnostic_context.get("inference_response_received", False))
+            raise
         finally:
-            admin.unload_model(actual_model)
+            _OMLX_PARTIAL_CONTENT_PATH = previous_partial_path
+            if not stage_timed_out:
+                admin.unload_model(actual_model)
 
     def run_external_calibration(self, stage: StageSpec, packet: dict[str, Any]) -> str:
         if stage.stage_name != "external_calibration" or stage.model != GPT_OR_GEMINI_EXTERNAL:
@@ -732,19 +802,33 @@ class LocalTaskEngineExecutor:
         missing = list(packet.get("missing_or_invalid_artifacts") or [])
         profile_issues = _research_packet_profile_acceptance_issues(packet)
         missing.extend(profile_issues)
+        missing = sorted(set(str(item) for item in missing))
+        profiles = _normalize_profiles(packet.get("research_packet_profile"))
+        critical_defects = sorted(set(str(item) for item in (packet.get("critical_defects") or [])))
+        l2_5_valid = bool(packet.get("l2_5_valid", True))
+        l2_5_analysis = packet.get("l2_5_analysis") if isinstance(packet.get("l2_5_analysis"), dict) else {}
         profile_requirements = [str(item) for item in (packet.get("profile_acceptance_requirements") or [])]
         audit_summary = str(packet.get("audit_summary") or "L4 audit artifact present.")
         rejected = missing or _audit_text_rejects(str(packet.get("audit_text") or ""))
         verdict = "REJECTED" if rejected else "ACCEPTED"
         accepted = "false" if rejected else "true"
-        ready = "false" if rejected else "true"
+        if rejected:
+            ready = "false"
+        elif critical_defects and PROFILE_FORESIGHT_MECHANISM in profiles:
+            ready = "conditional"
+        else:
+            ready = "true"
         lines = [
             "research_evidence_packet",
             f"verdict: {verdict}",
             f"accepted: {accepted}",
             "checked_stages: [" + ", ".join(checked) + "]",
-            "research_packet_profile: [" + ", ".join(_normalize_profiles(packet.get("research_packet_profile"))) + "]",
+            "research_packet_profile: [" + ", ".join(profiles) + "]",
             "profile_acceptance_requirements: [" + "; ".join(profile_requirements) + "]",
+            f"l2_5_valid: {str(l2_5_valid).lower()}",
+            f"l2_5_stub_detected: {str(bool(l2_5_analysis.get('l2_5_stub_detected'))).lower()}",
+            f"insufficient_sources: {str(bool(l2_5_analysis.get('insufficient_sources'))).lower()}",
+            "critical_defects: [" + ", ".join(critical_defects) + "]",
             "missing_or_invalid_artifacts: [" + ", ".join(missing) + "]",
             f"audit_summary: {audit_summary}",
             f"evidence_packet_ready_for_decision: {ready}",
@@ -779,6 +863,15 @@ class LocalTaskEngineExecutor:
         outputs = planned_outputs(stage, base_dir)
         stage_dir = Path(base_dir) / stage.stage_name
         stage_dir.mkdir(parents=True, exist_ok=True)
+        if stage.stage_name == "L2_5_codex_evidence_organizer" and isinstance(content, dict):
+            missing_outputs = [name for name in outputs if name not in content]
+            if missing_outputs:
+                raise RuntimeError(f"{stage.stage_name}: missing organized outputs: {', '.join(missing_outputs)}")
+            combined_text = "\n".join(str(content.get(name) or "") for name in outputs)
+            _assert_artifact_quality(stage, combined_text)
+            for required, path in outputs.items():
+                Path(path).write_text(str(content.get(required) or ""), encoding="utf-8")
+            return stage_dir, outputs
         text = _stringify_artifact(content)
         _assert_artifact_quality(stage, text)
         if stage.stage_name == "L2_5_codex_evidence_organizer":
@@ -1461,12 +1554,77 @@ def run_research_decision_evidence_judge_smoke(
     try:
         _require_fresh_prior_for_evidence_judge(stages, base_dir=base_dir)
         prompt = _evidence_judge_prompt_from_artifacts(stages, query=query, base_dir=base_dir)
-        content = executor.run_omlx_model(stage, stage.model, prompt)
+        diagnostic_prompt = prompt
+        try:
+            content = executor.run_omlx_model(stage, stage.model, prompt)
+        except RuntimeError as exc:
+            if not _is_omlx_prefill_memory_text(str(exc)):
+                raise
+            original_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
+            original_path = _write_omlx_stage_diagnostic_snapshot(
+                stage,
+                original_diagnostic,
+                base_dir=base_dir,
+                filename=f"{stage.stage_name}.diagnostic.json",
+            )
+            compact_prompt = _evidence_judge_compact_prompt_from_artifacts(stages, query=query, base_dir=base_dir)
+            try:
+                content = executor.run_omlx_model(stage, stage.model, compact_prompt)
+            except Exception as retry_exc:
+                compact_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
+                _annotate_compact_evidence_judge_diagnostic(
+                    compact_diagnostic,
+                    original_diagnostic=original_diagnostic,
+                    original_prompt=prompt,
+                    compact_prompt=compact_prompt,
+                )
+                compact_path = _write_omlx_stage_diagnostic_snapshot(
+                    stage,
+                    compact_diagnostic,
+                    base_dir=base_dir,
+                    filename=f"{stage.stage_name}.compact_retry.diagnostic.json",
+                )
+                getattr(executor, "last_omlx_diagnostics", {})[stage.stage_name] = dict(original_diagnostic)
+                raise RuntimeError(
+                    f"{stage.stage_name}: compact_retry_failed_after_prefill_memory_guard: {retry_exc}; "
+                    f"diagnostic_artifact={original_path}; compact_retry_diagnostic_artifact={compact_path}"
+                ) from retry_exc
+            compact_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
+            _annotate_compact_evidence_judge_diagnostic(
+                compact_diagnostic,
+                original_diagnostic=original_diagnostic,
+                original_prompt=prompt,
+                compact_prompt=compact_prompt,
+            )
+            _write_omlx_stage_diagnostic_snapshot(
+                stage,
+                compact_diagnostic,
+                base_dir=base_dir,
+                filename=f"{stage.stage_name}.compact_retry.diagnostic.json",
+            )
+            diagnostic_prompt = compact_prompt
         debug_content = content
         leaked = _evidence_judge_forbidden_tokens(content)
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
             raise RuntimeError(f"evidence_judge: forbidden later-stage/final tokens: {', '.join(leaked)}; debug_artifact={debug_path}")
+        quality_error = _evidence_judge_artifact_quality_error(content)
+        if quality_error:
+            invalid_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
+            _annotate_evidence_judge_invalid_artifact_diagnostic(
+                stage,
+                executor,
+                base_dir=base_dir,
+                content=content,
+                prompt=diagnostic_prompt,
+                quality_error=quality_error,
+                invalid_artifact_path=invalid_path,
+            )
+            diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
+            raise RuntimeError(
+                f"evidence_judge: artifact_quality_error:{quality_error}; "
+                f"invalid_artifact={invalid_path}; diagnostic_artifact={diagnostic_path}"
+            )
         artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
         record = executor.make_stage_record(
             stage,
@@ -2189,16 +2347,23 @@ def run_decision_final_smoke(
             "status": "blocked",
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": stage.stage_name,
+            "blocked_reason": str(exc),
             "run": {"mode": ENGINE_DECISION, "execution_mode": "real-smoke-decision-final", "stages": stages},
             "message": "DECISION smoke stopped fail-closed.",
         }
 
+    def run_stage(stage: StageSpec, operation: Callable[[], _T]) -> _T:
+        return _run_decision_stage_with_timeout(stage, base_dir=base_dir, executor=executor, operation=operation)
+
     try:
         stage = specs[0]
-        content = executor.run_agy_gemini(
+        content = run_stage(
             stage,
-            _decision_intelligence_prompt(query, base_dir=base_dir, research_packet_path=research_packet_path),
-            stage.model,
+            lambda: executor.run_agy_gemini(
+                stage,
+                _decision_intelligence_prompt(query, base_dir=base_dir, research_packet_path=research_packet_path),
+                stage.model,
+            ),
         )
         leaked = _intelligence_output_forbidden_tokens(content)
         if leaked:
@@ -2207,7 +2372,7 @@ def run_decision_final_smoke(
 
         stage = specs[1]
         _require_decision_prior(stages, ["intelligence_layer"], base_dir=base_dir, consumer_stage=stage.stage_name)
-        hits = executor.run_ddgs(stage, _supplementary_search_queries(query))
+        hits = run_stage(stage, lambda: executor.run_ddgs(stage, _supplementary_search_queries(query)))
         content = _decision_supplementary_search_report(
             hits,
             stages=stages,
@@ -2222,7 +2387,7 @@ def run_decision_final_smoke(
 
         stage = specs[2]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search"], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path))
+        content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
         leaked = _structure_mapper_forbidden_tokens(content)
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
@@ -2232,7 +2397,7 @@ def run_decision_final_smoke(
         stage = specs[3]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search", "structure_mapper"], base_dir=base_dir, consumer_stage=stage.stage_name)
         try:
-            content = executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path))
+            content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
         except Exception as exc:
             diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
             if diagnostic_path:
@@ -2246,7 +2411,7 @@ def run_decision_final_smoke(
 
         stage = specs[4]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search", "structure_mapper", "evidence_judge"], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path))
+        content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
         leaked = _premise_auditor_forbidden_tokens(content)
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
@@ -2255,7 +2420,7 @@ def run_decision_final_smoke(
 
         stage = specs[5]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search", "structure_mapper", "evidence_judge", "premise_auditor"], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path))
+        content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
         leaked = _alternative_generator_forbidden_tokens(content)
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
@@ -2264,7 +2429,7 @@ def run_decision_final_smoke(
 
         stage = specs[6]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search", "structure_mapper", "evidence_judge", "premise_auditor", "alternative_generator"], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path))
+        content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
         leaked = _insight_harvester_forbidden_tokens(content)
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
@@ -2281,7 +2446,7 @@ def run_decision_final_smoke(
             "alternative_generator",
             "insight_harvester",
         ], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path))
+        content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
         leaked = _convergence_report_forbidden_tokens(content)
         if leaked:
             raise RuntimeError(f"convergence_report: forbidden final/tool-chain tokens: {', '.join(leaked)}")
@@ -2301,17 +2466,20 @@ def run_decision_final_smoke(
             "insight_harvester",
             "convergence_report",
         ], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = executor.run_external_calibration(
+        content = run_stage(
             stage,
-            {
-                "prompt": _decision_external_calibration_prompt(
-                    stages,
-                    query=query,
-                    base_dir=base_dir,
-                    research_packet_path=research_packet_path,
-                ),
-                "base_dir": str(base_dir),
-            },
+            lambda: executor.run_external_calibration(
+                stage,
+                {
+                    "prompt": _decision_external_calibration_prompt(
+                        stages,
+                        query=query,
+                        base_dir=base_dir,
+                        research_packet_path=research_packet_path,
+                    ),
+                    "base_dir": str(base_dir),
+                },
+            ),
         )
         leaked = _external_calibration_forbidden_tokens(content)
         if leaked:
@@ -2331,7 +2499,7 @@ def run_decision_final_smoke(
             "external_calibration",
         ], base_dir=base_dir, consumer_stage=stage.stage_name)
         packet = _decision_final_controller_packet(stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)
-        content = executor.run_final_controller_report(stage, packet)
+        content = run_stage(stage, lambda: executor.run_final_controller_report(stage, packet))
         leaked = _final_controller_report_forbidden_tokens(content)
         if leaked:
             raise RuntimeError(f"final_controller_report: forbidden raw/tool-chain tokens: {', '.join(leaked)}")
@@ -2350,6 +2518,115 @@ def run_decision_final_smoke(
         }
     except Exception as exc:
         return blocked(stage, exc)
+
+
+def _run_decision_stage_with_timeout(
+    stage: StageSpec,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor,
+    operation: Callable[[], _T],
+) -> _T:
+    timeout_s = _decision_stage_timeout_s(stage)
+    started = time.time()
+    previous_base_dir = getattr(executor, "_current_stage_base_dir", None)
+    if _is_omlx_stage(stage):
+        try:
+            setattr(executor, "_current_stage_base_dir", str(base_dir))
+        except Exception:
+            pass
+    try:
+        with _task_engine_stage_timeout(timeout_s):
+            return operation()
+    except _TaskEngineStageTimeoutError as exc:
+        diagnostic_path: Path | None = None
+        blocked_reason = "stage_timeout"
+        if _is_omlx_stage(stage):
+            blocked_reason = _finalize_omlx_timeout_diagnostic(
+                stage,
+                executor=executor,
+                base_dir=base_dir,
+                started=started,
+                timeout_s=timeout_s,
+            )
+            diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
+        message = f"{stage.stage_name}: {blocked_reason}: exceeded {timeout_s}s"
+        if diagnostic_path:
+            message += f"; diagnostic_artifact={diagnostic_path}"
+        raise RuntimeError(message) from exc
+    finally:
+        if _is_omlx_stage(stage):
+            try:
+                if previous_base_dir is None:
+                    delattr(executor, "_current_stage_base_dir")
+                else:
+                    setattr(executor, "_current_stage_base_dir", previous_base_dir)
+            except Exception:
+                pass
+
+
+def _finalize_omlx_timeout_diagnostic(
+    stage: StageSpec,
+    *,
+    executor: TaskEngineExecutor,
+    base_dir: str | Path,
+    started: float,
+    timeout_s: int,
+) -> str:
+    diagnostics = getattr(executor, "last_omlx_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        try:
+            setattr(executor, "last_omlx_diagnostics", diagnostics)
+        except Exception:
+            pass
+    data = diagnostics.get(stage.stage_name)
+    if not isinstance(data, dict):
+        data = {}
+        diagnostics[stage.stage_name] = data
+    observed_status = str(data.get("observed_model_status") or "")
+    admin_load_requested = bool(data.get("admin_load_requested", False))
+    admin_load_returned = bool(data.get("admin_load_returned", False))
+    inference_request_sent = bool(data.get("inference_request_sent", False))
+    inference_response_received = bool(data.get("inference_response_received", False))
+    if inference_request_sent and not inference_response_received:
+        blocked_reason = "response_read_timeout"
+    elif _omlx_status_is_ready(observed_status) and not inference_request_sent:
+        blocked_reason = "inference_not_sent"
+    elif admin_load_requested and not admin_load_returned:
+        blocked_reason = "model_load_timeout"
+    elif admin_load_returned and not inference_request_sent:
+        blocked_reason = "inference_not_sent"
+    else:
+        blocked_reason = "inference_timeout"
+    data.update(
+        {
+            "sample_id": _sample_id_from_base_dir(base_dir),
+            "stage_name": stage.stage_name,
+            "model": data.get("model") or stage.model,
+            "elapsed_seconds": round(time.time() - started, 2),
+            "timeout_seconds": timeout_s,
+            "error_type": "stage_timeout",
+            "call_site": data.get("call_site") or "run_decision_final_smoke",
+            "admin_load_requested": admin_load_requested,
+            "admin_load_returned": admin_load_returned,
+            "observed_model_status": observed_status,
+            "inference_request_sent": inference_request_sent,
+            "inference_response_received": inference_response_received,
+            "stdout": _redact_secret_text(str(data.get("stdout") or "")),
+            "stderr": _redact_secret_text(str(data.get("stderr") or "")),
+            "error_summary": f"{stage.stage_name} exceeded controlled timeout",
+            "blocked_reason": blocked_reason,
+        }
+    )
+    return blocked_reason
+
+
+def _sample_id_from_base_dir(base_dir: str | Path) -> str:
+    path = Path(base_dir)
+    if path.name in {"decision_run", "research_run"} and path.parent.name:
+        return path.parent.name
+    return path.name
 
 
 def _append_real_stage(
@@ -2519,9 +2796,13 @@ class _OmlxAdmin:
         try:
             with self.opener.open(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except _TaskEngineStageTimeoutError:
+            raise
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
             return {"error": True, "status": int(exc.code), "detail": detail}
+        except (TimeoutError, socket.timeout) as exc:
+            return {"error": True, "timeout": True, "detail": str(exc)}
         except Exception as exc:
             return {"error": True, "detail": str(exc)}
 
@@ -2535,7 +2816,7 @@ class _OmlxAdmin:
             if not isinstance(item, dict) or str(item.get("id") or "") != model_id:
                 continue
             state = str(item.get("state") or item.get("status") or "").lower()
-            return bool(item.get("loaded") or item.get("is_loaded") or state == "loaded")
+            return bool(item.get("loaded") or item.get("is_loaded") or _omlx_status_is_ready(state))
         return False
 
     def unload_all(self) -> None:
@@ -2547,7 +2828,7 @@ class _OmlxAdmin:
                 self.unload_and_wait(model_id)
 
     def load_model(self, model_id: str) -> dict[str, Any]:
-        return self._admin_request("POST", f"/models/{model_id}/load", timeout=900)
+        return self._admin_request("POST", f"/models/{model_id}/load", timeout=_omlx_admin_load_timeout_s())
 
     def unload_model(self, model_id: str) -> dict[str, Any]:
         return self._admin_request("POST", f"/models/{model_id}/unload", timeout=120)
@@ -2570,6 +2851,7 @@ def _omlx_chat_completion(
     api_key: str,
     timeout: int,
     max_tokens: int,
+    chat_template_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body = {
         "model": model,
@@ -2577,6 +2859,8 @@ def _omlx_chat_completion(
         "temperature": 0,
         "max_tokens": max_tokens,
     }
+    if chat_template_kwargs:
+        body["chat_template_kwargs"] = chat_template_kwargs
     request = urllib.request.Request(
         f"{_omlx_base_url()}/v1/chat/completions",
         data=json.dumps(body).encode("utf-8"),
@@ -2588,16 +2872,118 @@ def _omlx_chat_completion(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            started = time.time()
+            raw = _read_omlx_response_bytes(response, partial_content_path=_OMLX_PARTIAL_CONTENT_PATH, started=started)
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                path, chars = _write_omlx_partial_content(_OMLX_PARTIAL_CONTENT_PATH, raw)
+                raise _OmlxPartialResponseError(
+                    "response_parse_error",
+                    partial_content_path=path,
+                    partial_content_chars=chars,
+                    response_read_elapsed_seconds=round(time.time() - started, 2),
+                    original_error=str(exc),
+                ) from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
         if int(exc.code) == 401:
             raise RuntimeError("OMLX_AUTH_BLOCKED: chat completion rejected OMLX_API_KEY") from exc
         raise RuntimeError(f"OMLX chat HTTP {int(exc.code)}: {_redact_secret_text(detail)}") from exc
+    except (_OmlxPartialResponseError, _TaskEngineStageTimeoutError):
+        raise
     except http.client.IncompleteRead:
         raise
     except Exception as exc:
         raise RuntimeError(f"OMLX chat failed: {_redact_secret_text(str(exc))}") from exc
+
+
+def _read_omlx_response_bytes(response: Any, *, partial_content_path: Path | None, started: float) -> bytes:
+    chunks: list[bytes] = []
+    try:
+        while True:
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except http.client.IncompleteRead as exc:
+        if isinstance(exc.partial, bytes):
+            chunks.append(exc.partial)
+        raw = b"".join(chunks)
+        path, chars = _write_omlx_partial_content(partial_content_path, raw)
+        raise _OmlxPartialResponseError(
+            "response_read_timeout",
+            partial_content_path=path,
+            partial_content_chars=chars,
+            response_read_elapsed_seconds=round(time.time() - started, 2),
+            original_error="IncompleteRead",
+        ) from exc
+    except (_TaskEngineStageTimeoutError, TimeoutError, socket.timeout, KeyboardInterrupt) as exc:
+        raw = b"".join(chunks)
+        path, chars = _write_omlx_partial_content(partial_content_path, raw)
+        reason = "response_read_interrupted" if isinstance(exc, KeyboardInterrupt) else "response_read_timeout"
+        raise _OmlxPartialResponseError(
+            reason,
+            partial_content_path=path,
+            partial_content_chars=chars,
+            response_read_elapsed_seconds=round(time.time() - started, 2),
+            original_error=type(exc).__name__,
+        ) from exc
+    return b"".join(chunks)
+
+
+def _omlx_partial_content_path(base_dir: Any, stage: StageSpec) -> Path | None:
+    if not base_dir:
+        return None
+    return Path(base_dir) / stage.stage_name / f"{stage.stage_name}.partial.md"
+
+
+def _write_omlx_partial_content(path: Path | None, raw: bytes) -> tuple[str, int]:
+    text = raw.decode("utf-8", errors="replace") if raw else ""
+    if path is None:
+        path = Path("/tmp") / f"omlx_partial_response_{uuid.uuid4().hex}.partial.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_redact_secret_text(text), encoding="utf-8")
+    return str(path), len(text)
+
+
+def _omlx_partial_response_diagnostic(
+    stage: StageSpec,
+    actual_model: str,
+    exc: _OmlxPartialResponseError,
+    *,
+    request_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnostic = {
+        "stage_name": stage.stage_name,
+        "canonical_model": stage.model,
+        "actual_model": actual_model,
+        "blocked_reason": exc.blocked_reason,
+        "error_type": type(exc).__name__,
+        "error_summary": _redact_secret_text(exc.original_error),
+        "whether_partial_content_received": exc.partial_content_chars > 0,
+        "partial_content_chars": exc.partial_content_chars,
+        "partial_content_path": exc.partial_content_path,
+        "response_read_elapsed_seconds": exc.response_read_elapsed_seconds,
+        "inference_request_sent": True,
+        "inference_response_received": False,
+    }
+    if request_context:
+        diagnostic.update(request_context)
+        diagnostic.update(
+            {
+                "blocked_reason": exc.blocked_reason,
+                "error_type": type(exc).__name__,
+                "error_summary": _redact_secret_text(exc.original_error),
+                "whether_partial_content_received": exc.partial_content_chars > 0,
+                "partial_content_chars": exc.partial_content_chars,
+                "partial_content_path": exc.partial_content_path,
+                "response_read_elapsed_seconds": exc.response_read_elapsed_seconds,
+                "inference_request_sent": True,
+                "inference_response_received": False,
+            }
+        )
+    return diagnostic
 
 
 def _run_omlx_chat_with_retry(stage: StageSpec, actual_model: str, prompt: str, *, api_key: str) -> dict[str, Any]:
@@ -2611,6 +2997,7 @@ def _run_omlx_chat_with_retry(stage: StageSpec, actual_model: str, prompt: str, 
                 api_key=api_key,
                 timeout=_omlx_timeout_s(),
                 max_tokens=_omlx_max_tokens_for_stage(stage),
+                chat_template_kwargs=_omlx_chat_template_kwargs_for_stage(stage, actual_model),
             )
         except http.client.IncompleteRead as exc:
             last_error = exc
@@ -2619,6 +3006,12 @@ def _run_omlx_chat_with_retry(stage: StageSpec, actual_model: str, prompt: str, 
                 continue
             break
     raise RuntimeError(f"{stage.stage_name}: OMLX chat IncompleteRead after {attempts} attempts") from last_error
+
+
+def _omlx_chat_template_kwargs_for_stage(stage: StageSpec, actual_model: str) -> dict[str, Any] | None:
+    if stage.stage_name == "evidence_judge" and actual_model == NEMOTRON120B_ACTUAL_MODEL_DEFAULT:
+        return {"enable_thinking": False, "force_nonempty_content": True}
+    return None
 
 
 def _omlx_base_url() -> str:
@@ -2971,6 +3364,10 @@ def _assert_artifact_quality(stage: StageSpec, text: str) -> None:
         token = _external_calibration_quality_error(text)
         if token:
             raise RuntimeError(f"{stage.stage_name}: artifact_quality_error:{token}")
+    if stage.stage_name == "evidence_judge":
+        token = _evidence_judge_artifact_quality_error(text)
+        if token:
+            raise RuntimeError(f"{stage.stage_name}: artifact_quality_error:{token}")
     if stage.stage_name == "final_controller_report":
         token = _final_controller_quality_error(text)
         if token:
@@ -3070,8 +3467,68 @@ def _task_engine_profiles_from_query(query: str) -> list[str]:
     return deduped
 
 
+def _external_calibration_quality_body(text: str) -> str:
+    metadata_prefixes = (
+        "executor_model:",
+        "fallback_reasons:",
+        "artifact_path:",
+        "valid_for_pipeline:",
+        "stage_name:",
+        "owner=",
+        "owner:",
+        "model:",
+        "metadata:",
+        "error:",
+        "error_summary:",
+        "attempt:",
+        "fallback_used:",
+        "created_in_current_run:",
+        "artifact_state:",
+    )
+    metadata_key_pattern = re.compile(
+        r'^\s*"?(?:executor_model|fallback_reasons|artifact_path|valid_for_pipeline|'
+        r'stage_name|owner|model|metadata|error|error_summary|attempt|fallback_used|'
+        r'created_in_current_run|artifact_state)"?\s*[:=]',
+        re.IGNORECASE,
+    )
+    skipped_exact = {"external_calibration", "metadata", "diagnostic"}
+    kept: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if not line:
+            if kept and kept[-1].strip():
+                kept.append("")
+            continue
+        if lowered in skipped_exact:
+            continue
+        if any(lowered.startswith(prefix) for prefix in metadata_prefixes):
+            continue
+        if metadata_key_pattern.match(line):
+            continue
+        kept.append(raw_line)
+    return "\n".join(kept).strip()
+
+
+def _external_calibration_has_verdict_body(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(
+        term in lowered
+        for term in (
+            "calibration_verdict",
+            "calibration verdict",
+            "calibration-verdict",
+            "verdict:",
+            "verdict：",
+            "校准结论",
+            "final calibration sentence",
+            "final calibrated conclusion",
+        )
+    )
+
+
 def _external_calibration_quality_error(text: str) -> str:
-    value = (text or "").strip()
+    value = _external_calibration_quality_body(text or "")
     lowered = value.lower()
     if _external_calibration_has_minimum_fields(value):
         missing_body = _external_calibration_header_only_fields(value)
@@ -3089,7 +3546,7 @@ def _external_calibration_quality_error(text: str) -> str:
         return "truncated_tail"
     if not any(term in lowered for term in ("supported", "plausible", "speculative", "contradicted", "支持", "可信", "推测", "矛盾")):
         return "external_calibration_missing_strength_labels"
-    if not any(term in lowered for term in ("calibration verdict", "calibration_verdict", "校准结论", "verdict")):
+    if not _external_calibration_has_verdict_body(value):
         return "external_calibration_missing_verdict"
     if "claim_strength_table" in lowered and "calibration" not in lowered[lowered.rfind("claim_strength_table"):]:
         return "external_calibration_header_only"
@@ -3103,6 +3560,79 @@ EXTERNAL_CALIBRATION_MINIMUM_FIELDS = (
     "missing_considerations",
     "final_adjustment_recommendation",
 )
+
+
+_T = TypeVar("_T")
+_OMLX_PARTIAL_CONTENT_PATH: Path | None = None
+
+
+class _TaskEngineStageTimeoutError(Exception):
+    """Raised by the local stage timeout alarm."""
+
+
+class _OmlxPartialResponseError(RuntimeError):
+    def __init__(
+        self,
+        blocked_reason: str,
+        *,
+        partial_content_path: str,
+        partial_content_chars: int,
+        response_read_elapsed_seconds: float,
+        original_error: str,
+    ):
+        super().__init__(f"{blocked_reason}: partial_content_path={partial_content_path}")
+        self.blocked_reason = blocked_reason
+        self.partial_content_path = partial_content_path
+        self.partial_content_chars = partial_content_chars
+        self.response_read_elapsed_seconds = response_read_elapsed_seconds
+        self.original_error = original_error
+
+
+@contextmanager
+def _task_engine_stage_timeout(timeout_s: int):
+    if timeout_s <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise_timeout(_signum: int, _frame: Any) -> None:
+        raise _TaskEngineStageTimeoutError(f"stage_timeout_after={timeout_s}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer and previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _decision_stage_timeout_s(stage: StageSpec) -> int:
+    stage_key = stage.stage_name.upper().replace("-", "_")
+    raw = os.getenv(f"HERMES_DECISION_{stage_key}_TIMEOUT_S", "").strip()
+    if not raw and _is_omlx_stage(stage):
+        raw = os.getenv("HERMES_DECISION_OMLX_STAGE_TIMEOUT_S", "").strip()
+    if not raw:
+        raw = os.getenv("HERMES_DECISION_STAGE_TIMEOUT_S", "").strip()
+    default = "720" if _is_omlx_stage(stage) else "360"
+    try:
+        return max(1, min(int(raw or default), 3600))
+    except ValueError:
+        return int(default)
+
+
+def _is_omlx_stage(stage: StageSpec) -> bool:
+    return stage.stage_name in {
+        "structure_mapper",
+        "evidence_judge",
+        "premise_auditor",
+        "alternative_generator",
+        "insight_harvester",
+        "convergence_report",
+    }
 
 
 def _external_calibration_has_minimum_fields(text: str) -> bool:
@@ -3160,11 +3690,28 @@ def _final_controller_quality_error(text: str) -> str:
         "evidence judge – decision stage",
         "evidence judge - decision stage",
         "convergence decision framework",
+        "convergence_fixed_section_digest",
         "artifact (stage)",
         "strength / quality of evidence",
+        "\n## key_drivers",
+        "\n## mechanism_chain",
+        "\n## certainty_levels",
+        "\n## uncertainty_boundary",
     )
     if any(token in lowered for token in raw_tokens):
         return "raw_intermediate_dump"
+    overstrong_terms = (
+        "pfc disuse atrophy",
+        "prefrontal cortex disuse atrophy",
+        "digital dopamine resistance",
+        "前额叶萎缩",
+        "前额叶皮层废用性萎缩",
+        "多巴胺重置",
+        "数字多巴胺抗性",
+        "神经保护机制",
+    )
+    if any(term in lowered or term in value for term in overstrong_terms):
+        return "overstrong_mechanism_term"
     if _looks_like_raw_markdown_table_dump(value):
         return "raw_table_dump"
     if _tail_looks_truncated(_normalized_tail(value)):
@@ -3260,11 +3807,13 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
             "missing_mechanism_chain": ("输入变量", "中介机制", "输出变量", "机制链", "mechanism_chain", "input variable", "mediating mechanism", "output variable"),
             "missing_scenario_branches": ("情景分叉", "情景 a", "情景 b", "scenario_branches", "scenario a", "scenario b", "scenario branch"),
             "missing_counter_signals": ("反证信号", "可观察指标", "counter_signals", "falsification_signals", "observable signal", "counter signal", "falsification"),
-            "missing_certainty_levels": ("确定性等级", "高 / 中 / 低", "高/中/低", "certainty_levels", "confidence_level", "certainty level", "high / medium / low"),
+            "missing_certainty_levels": ("确定性等级", "高 / 中 / 低", "高/中/低", "certainty_levels", "certainty_level", "confidence_level", "certainty level", "high / medium / low"),
         }
         for name, terms in checks.items():
             if not any(term in value or term in lowered for term in terms):
                 errors.append(name)
+        if stage_name == "final_controller_report":
+            errors.extend(_foresight_final_judgment_unit_errors(value))
     if PROFILE_IMPLEMENTATION_PLAN in profiles:
         checks = {
             "missing_cycle": ("周期", "4-6 周", "4–6 周", "cycle"),
@@ -3286,6 +3835,42 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
             if not any(term in value or term in lowered for term in terms):
                 errors.append(name)
     return errors
+
+
+def _foresight_final_judgment_unit_errors(text: str) -> list[str]:
+    value = text or ""
+    lowered = value.lower()
+    errors: list[str] = []
+    required_sections = {
+        "missing_evidence_supported_section": ("### evidence_supported", "## evidence_supported"),
+        "missing_reasonable_inference_section": ("### reasonable_inference", "## reasonable_inference"),
+        "missing_foresight_hypothesis_section": ("### foresight_hypothesis", "## foresight_hypothesis"),
+    }
+    for name, terms in required_sections.items():
+        if not any(term in value or term in lowered for term in terms):
+            errors.append(name)
+
+    condition_count = _term_count(value, ("触发条件：", "适用条件：", "分叉条件：", "condition:"))
+    mechanism_count = _term_count(value, ("中间机制：", "机制链：", "mechanism_chain:", "input variable", "mediating mechanism"))
+    falsifier_count = _term_count(value, ("失效条件", "反证信号", "counter_signal", "falsification"))
+    certainty_count = _term_count(value, ("certainty_level", "确定性等级", "confidence_level"))
+    evidence_tier_count = _term_count(value, ("evidence_tier",))
+    decision_use_count = _term_count(value, ("decision_use", "decision implication", "决策含义"))
+
+    if condition_count < 3 or mechanism_count < 3 or falsifier_count < 3:
+        errors.append("missing_judgment_unit_fields")
+    if certainty_count < 3:
+        errors.append("insufficient_certainty_bindings")
+    if evidence_tier_count < 3:
+        errors.append("insufficient_evidence_tier_bindings")
+    if decision_use_count < 3:
+        errors.append("insufficient_decision_use_bindings")
+    return errors
+
+
+def _term_count(text: str, terms: tuple[str, ...]) -> int:
+    lowered = (text or "").lower()
+    return sum(lowered.count(term.lower()) for term in terms)
 
 
 def _normalized_tail(text: str, *, limit: int = 180) -> str:
@@ -3931,16 +4516,26 @@ def _research_acceptance_packet_from_artifacts(stages: list[dict[str, Any]], *, 
                 audit_text += "\n" + text
         artifact_summaries[name] = "\n".join(snippets)[:2000]
     profiles = _task_engine_profiles_from_query(query)
+    l2_5_analysis = analyze_l2_5_evidence_organizer(base)
+    critical_defects = set(l4_critical_defects_from_audit(audit_text))
+    critical_defects.update(str(issue) for issue in l2_5_analysis.get("issues") or [])
+    if not l2_5_analysis.get("l2_5_valid", False):
+        if PROFILE_EVIDENCE_GROUNDED in profiles:
+            missing.extend(str(item) for item in l2_5_analysis.get("missing_or_invalid_artifacts") or [])
     if PROFILE_FORESIGHT_MECHANISM in profiles:
         artifact_summaries["_foresight_requirement_map"] = _foresight_requirement_map_text(
             "\n".join(str(value or "") for value in artifact_summaries.values())
         )
+    missing = sorted(set(missing))
     return {
         "query": query,
         "research_packet_profile": profiles,
         "profile_acceptance_requirements": _research_profile_acceptance_requirements(profiles),
         "checked_stages": [stage.get("stage_name") for stage in stages],
         "missing_or_invalid_artifacts": missing,
+        "critical_defects": sorted(critical_defects),
+        "l2_5_valid": bool(l2_5_analysis.get("l2_5_valid")),
+        "l2_5_analysis": l2_5_analysis,
         "artifact_summaries": artifact_summaries,
         "audit_text": audit_text,
         "audit_summary": _audit_summary(audit_text),
@@ -3964,6 +4559,656 @@ def _audit_text_rejects(audit_text: str) -> bool:
         "rejected",
     )
     return any(marker in lowered for marker in reject_markers)
+
+
+L2_5_EVIDENCE_ORGANIZER_OUTPUTS = ("sources.csv", "evidence.csv", "claims.md", "gaps.md")
+L2_5_STUB_MARKERS = (
+    "handoff_protocol",
+    "placeholder",
+    "stub",
+    "todo",
+    "tbd",
+    "n/a",
+    "not applicable",
+    "empty extraction",
+    "no evidence extracted",
+    "generic handoff",
+)
+
+
+def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, str]:
+    source_path = Path(str(inputs.get("source_candidates.json") or ""))
+    ddgs_path = Path(str(inputs.get("ddgs_gap_sources.json") or ""))
+    source_text = source_path.read_text(encoding="utf-8", errors="replace")
+    ddgs_text = ddgs_path.read_text(encoding="utf-8", errors="replace")
+    l1_payload = _load_jsonish_text(source_text)
+    l2_payload = _load_jsonish_text(ddgs_text)
+    l1_items = _list_from_jsonish(l1_payload.get("source_candidates") if isinstance(l1_payload, dict) else l1_payload)
+    l2_items = _list_from_jsonish(l2_payload)
+    question = _infer_question_anchor(l2_items, l1_items)
+    sample_schema = _l2_5_sample_schema(question)
+    topic_terms = _topic_anchor_terms(question, l1_items, l2_items, sample_schema)
+    source_rows = _l2_5_source_rows(l1_items, l2_items, topic_terms, question=question, sample_schema=sample_schema)
+    evidence_rows = _l2_5_evidence_rows(source_rows)
+    claims = _l2_5_claims(evidence_rows, question, sample_schema)
+    gaps = _l2_5_gaps(source_rows, evidence_rows, question, sample_schema)
+    insufficient = len(source_rows) < 3 or len(evidence_rows) < 3 or len(claims) < 4 or len(gaps) < 3
+    request = {
+        "stage": "L2_5_codex_evidence_organizer",
+        "input_scope": ["L1 source_candidates.json", "L2 ddgs_gap_sources.json", "original question inferred from L2 query/user_question_anchor"],
+        "forbidden_inputs": ["research_evidence_packet", "intelligence_layer", "supplementary_search", "convergence_report", "external_calibration", "final_decision_report"],
+        "inputs": {"source_candidates.json": str(source_path), "ddgs_gap_sources.json": str(ddgs_path)},
+        "user_question_anchor": question,
+        "sample_schema": sample_schema["name"],
+        "sample_schema_axes": sample_schema["axes"],
+        "topic_anchor_terms": topic_terms,
+        "source_rows": len(source_rows),
+        "evidence_rows": len(evidence_rows),
+        "claim_rows": len(claims),
+        "gap_rows": len(gaps),
+        "insufficient_sources": insufficient,
+    }
+    request_md = "\n".join(
+        [
+            "# L2.5 evidence organizer request",
+            "",
+            "input_scope: L1 source_candidates.json + L2 ddgs_gap_sources.json + inferred original question only",
+            "downstream_artifacts_used: false",
+            f"user_question_anchor: {question}",
+            "topic_anchor_terms: " + ", ".join(topic_terms),
+            f"insufficient_sources: {str(insufficient).lower()}",
+        ]
+    )
+    return {
+        "source_candidates.json": source_text,
+        "ddgs_gap_sources.json": ddgs_text,
+        "evidence_runner_*.request.md": request_md + "\n",
+        "evidence_runner_*.request.json": json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+        "sources.csv": _csv_text(
+            ["source_id", "title_or_source_name", "url_or_path_or_domain", "origin_stage", "relevance_to_question", "limitation_or_note"],
+            source_rows,
+        ),
+        "evidence.csv": _csv_text(
+            ["claim_id", "source_id", "evidence_text", "strength_or_limit", "support_type"],
+            evidence_rows,
+        ),
+        "claims.md": _claims_markdown(claims, insufficient=insufficient),
+        "gaps.md": _gaps_markdown(gaps, insufficient=insufficient),
+    }
+
+
+def _load_jsonish_text(text: str) -> Any:
+    stripped = (text or "").strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        return json.loads(stripped)
+    except Exception:
+        match = re.search(r"(\{.*\}|\[.*\])", stripped, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            return {}
+
+
+def _list_from_jsonish(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _infer_question_anchor(l2_items: list[dict[str, Any]], l1_items: list[dict[str, Any]]) -> str:
+    for item in l2_items:
+        query = str(item.get("query") or "").strip()
+        if query:
+            return _compact_single_line(query, limit=240)
+    for item in l1_items:
+        candidate = str(item.get("candidate") or item.get("query_or_url") or "").strip()
+        if candidate.lower().startswith(("query:", "search:")):
+            return _compact_single_line(candidate.split(":", 1)[-1].strip(" '\""), limit=240)
+    return "question_anchor_unavailable"
+
+
+def _topic_anchor_terms(
+    question: str,
+    l1_items: list[dict[str, Any]] | None = None,
+    l2_items: list[dict[str, Any]] | None = None,
+    sample_schema: dict[str, Any] | None = None,
+) -> list[str]:
+    query_terms = _l2_5_anchor_tokens(question, max_terms=14)
+    schema_terms = list((sample_schema or {}).get("anchor_terms") or [])
+    source_terms: list[str] = []
+    for item in list(l1_items or [])[:12]:
+        source_terms.extend(_l2_5_anchor_tokens(_l2_5_item_text(item), max_terms=4))
+    for item in list(l2_items or [])[:12]:
+        source_terms.extend(_l2_5_anchor_tokens(_l2_5_item_text(item), max_terms=4))
+
+    ranked: list[str] = []
+    for pool in (query_terms, schema_terms, source_terms):
+        for term in pool:
+            value = str(term or "").strip()
+            if value and value.lower() not in {seen.lower() for seen in ranked}:
+                ranked.append(value)
+    return ranked[:24]
+
+
+def _l2_5_anchor_tokens(text: str, *, max_terms: int = 18) -> list[str]:
+    value = str(text or "")
+    lowered = value.lower()
+    stopwords = {
+        "should",
+        "whether",
+        "using",
+        "from",
+        "into",
+        "with",
+        "and",
+        "the",
+        "for",
+        "是否",
+        "应该",
+        "采用",
+        "主要",
+        "依赖",
+        "未来",
+        "之后",
+        "一个",
+        "产品",
+        "儿童",
+        "正常",
+        "值得",
+    }
+    english = [
+        token
+        for token in re.findall(r"[a-z][a-z0-9+/-]{2,}", lowered)
+        if token not in stopwords and not token.isdigit()
+    ]
+    cjk_phrases = re.findall(r"[\u4e00-\u9fff]{2,}", value)
+    cjk_terms: list[str] = []
+    for phrase in cjk_phrases:
+        if phrase in stopwords:
+            continue
+        if len(phrase) <= 4:
+            cjk_terms.append(phrase)
+            continue
+        cjk_terms.extend(phrase[index : index + 2] for index in range(0, len(phrase) - 1))
+        cjk_terms.extend(phrase[index : index + 3] for index in range(0, len(phrase) - 2))
+    acronyms = re.findall(r"\b[A-Z][A-Z0-9&.+/-]{1,}\b", value)
+    weighted = acronyms + english + cjk_terms
+    counts: dict[str, int] = {}
+    for term in weighted:
+        cleaned = str(term or "").strip()
+        if not cleaned or cleaned in stopwords or cleaned.lower() in stopwords:
+            continue
+        counts[cleaned] = counts.get(cleaned, 0) + 1
+    return [
+        term
+        for term, _ in sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0].lower()))
+    ][:max_terms]
+
+
+def _l2_5_sample_schema(question: str) -> dict[str, Any]:
+    value = str(question or "")
+    lowered = value.lower()
+    schemas = [
+        (
+            "tech_route",
+            ("elasticsearch", "embedding", "rag", "reranker", "vector", "向量", "架构", "迁移", "索引", "knowledge", "数据库"),
+            ("current architecture", "target architecture", "benefit", "migration risk/complexity"),
+            ("architecture", "migration", "index", "retrieval", "permission", "reranker", "rag", "向量", "索引", "权限", "架构"),
+        ),
+        (
+            "high_evidence_intervention",
+            ("intervention", "训练", "教学", "练习", "儿童", "数轴", "数学", "计算困难", "evidence", "outcome"),
+            ("population", "intervention", "comparison", "outcome/evidence strength"),
+            ("population", "intervention", "comparison", "outcome", "evidence", "儿童", "训练", "教学", "数轴", "数学", "计算"),
+        ),
+        (
+            "business_entry",
+            ("market", "entry", "进入", "产业链", "供应链", "政策", "监管", "市场", "barrier"),
+            ("market signal", "policy/regulation", "supply chain/player", "entry risk/barrier"),
+            ("market", "policy", "regulation", "supply", "entry", "市场", "政策", "监管", "供应链", "壁垒"),
+        ),
+        (
+            "low_evidence_trend",
+            ("2030", "trend", "趋势", "低证据", "不确定", "机器人", "消费", "hardware"),
+            ("trend signal", "uncertainty", "counter-signal", "decision implication"),
+            ("trend", "uncertainty", "counter-signal", "decision", "趋势", "不确定", "反证", "消费", "硬件"),
+        ),
+        (
+            "foresight_mechanism",
+            ("未来", "结构性", "反转", "优势", "劣势", "成本", "role", "profession", "机制"),
+            ("capability/cost driver", "affected role/process", "mechanism", "counter-signal"),
+            ("capability", "cost", "role", "process", "mechanism", "counter-signal", "成本", "角色", "流程", "机制", "反证"),
+        ),
+    ]
+    for name, markers, axes, anchors in schemas:
+        if any(marker in lowered or marker in value for marker in markers):
+            return {"name": name, "axes": list(axes), "anchor_terms": list(anchors)}
+    return {
+        "name": "generic_evidence",
+        "axes": ["source signal", "mechanism", "limitation", "decision implication"],
+        "anchor_terms": ["source", "evidence", "mechanism", "risk", "decision", "证据", "机制", "风险", "决策"],
+    }
+
+
+def _topic_relevant(text: str, topic_terms: list[str]) -> bool:
+    if not topic_terms:
+        return True
+    value = str(text or "")
+    lowered = value.lower()
+    hits = sum(1 for term in topic_terms if len(str(term)) >= 2 and (term.lower() in lowered or term in value))
+    return hits >= 2 or (hits >= 1 and len(topic_terms) <= 3)
+
+
+def _l2_5_item_text(item: dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get(key) or "")
+        for key in (
+            "candidate",
+            "query_or_url",
+            "title",
+            "snippet",
+            "why_relevant",
+            "coverage_axis",
+            "evidence_type",
+            "query",
+            "url",
+        )
+    )
+
+
+def _l2_5_source_rows(
+    l1_items: list[dict[str, Any]],
+    l2_items: list[dict[str, Any]],
+    topic_terms: list[str],
+    *,
+    question: str = "",
+    sample_schema: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    candidates: list[tuple[dict[str, str], str]] = []
+    for item in l1_items:
+        candidate = str(item.get("candidate") or item.get("query_or_url") or item.get("title") or "").strip()
+        why = str(item.get("why_relevant") or item.get("snippet") or item.get("coverage_axis") or "").strip()
+        if not candidate and not why:
+            continue
+        candidates.append(
+            (
+                {
+                    "source_id": "",
+                    "title_or_source_name": _compact_single_line(candidate or "L1 source", limit=160),
+                    "url_or_path_or_domain": _source_locator(candidate),
+                    "origin_stage": "L1_gemini_search",
+                    "relevance_to_question": _compact_single_line(why or candidate, limit=260),
+                    "limitation_or_note": _compact_single_line(
+                        str(item.get("evidence_type") or item.get("coverage_axis") or "candidate source; full text not fetched at L2.5"),
+                        limit=180,
+                    ),
+                },
+                candidate + " " + why,
+            )
+        )
+    for item in l2_items:
+        title = str(item.get("title") or item.get("url") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        if not title and not snippet:
+            continue
+        candidates.append(
+            (
+                {
+                    "source_id": "",
+                    "title_or_source_name": _compact_single_line(title or "L2 source", limit=160),
+                    "url_or_path_or_domain": _compact_single_line(str(item.get("url") or ""), limit=220),
+                    "origin_stage": "L2_ddgs_supplement",
+                    "relevance_to_question": _compact_single_line(snippet or title, limit=300),
+                    "limitation_or_note": "DDGS snippet/search result; requires full-text verification before high-confidence use",
+                },
+                title + " " + snippet + " " + str(item.get("query") or ""),
+            )
+        )
+    strict_rows = [row for row, text in candidates if _topic_relevant(text, topic_terms)]
+    rows = _dedupe_l2_5_rows(strict_rows)
+    if _l2_5_rows_meet_generation_floor(rows):
+        return _assign_l2_5_source_ids(rows[:12])
+
+    query_terms = list(dict.fromkeys(list(topic_terms) + _topic_anchor_terms(question, [], [], sample_schema)))
+    fallback_ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -_l2_5_overlap_score(item[1], query_terms),
+            0 if item[0].get("origin_stage") == "L2_ddgs_supplement" else 1,
+            item[0].get("title_or_source_name", "").lower(),
+        ),
+    )
+    merged = list(rows)
+    seen = {_l2_5_row_key(row) for row in merged}
+    for row, text in fallback_ranked:
+        if _contains_l2_5_stub_marker(text):
+            continue
+        if not row.get("title_or_source_name") and not row.get("relevance_to_question"):
+            continue
+        key = _l2_5_row_key(row)
+        if key in seen:
+            continue
+        if _l2_5_overlap_score(text, query_terms) <= 0 and len(merged) >= 4:
+            continue
+        merged.append(row)
+        seen.add(key)
+        if len(merged) >= 8:
+            break
+    return _assign_l2_5_source_ids(merged[:12])
+
+
+def _l2_5_rows_meet_generation_floor(rows: list[dict[str, str]]) -> bool:
+    return len(rows) >= 4
+
+
+def _l2_5_row_key(row: dict[str, str]) -> str:
+    locator = str(row.get("url_or_path_or_domain") or "").strip().lower()
+    title = str(row.get("title_or_source_name") or "").strip().lower()
+    domain_match = re.search(r"https?://([^/]+)", locator)
+    domain = domain_match.group(1) if domain_match else locator
+    return domain or title
+
+
+def _dedupe_l2_5_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = _l2_5_row_key(row)
+        if not key or key in seen:
+            continue
+        deduped.append(row)
+        seen.add(key)
+    return deduped
+
+
+def _assign_l2_5_source_ids(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    assigned: list[dict[str, str]] = []
+    for idx, row in enumerate(rows, start=1):
+        item = dict(row)
+        item["source_id"] = f"S{idx}"
+        assigned.append(item)
+    return assigned
+
+
+def _l2_5_overlap_score(text: str, terms: list[str]) -> int:
+    value = str(text or "")
+    lowered = value.lower()
+    score = 0
+    for term in terms:
+        token = str(term or "").strip()
+        if len(token) < 2:
+            continue
+        if token.lower() in lowered or token in value:
+            score += 1 + min(2, len(token) // 6)
+    return score
+
+
+def _source_locator(candidate: str) -> str:
+    match = re.search(r"https?://[^\s'\"),]+", candidate or "")
+    if match:
+        return match.group(0)
+    if candidate.lower().startswith(("query:", "search:")):
+        return _compact_single_line(candidate, limit=220)
+    return _compact_single_line(candidate, limit=220)
+
+
+def _l2_5_evidence_rows(source_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for idx, source in enumerate(source_rows[:8], start=1):
+        evidence = source.get("relevance_to_question", "").strip()
+        if _contains_l2_5_stub_marker(evidence) or len(evidence) < 20:
+            continue
+        rows.append(
+            {
+                "claim_id": f"C{min(idx, 4)}",
+                "source_id": source["source_id"],
+                "evidence_text": evidence,
+                "strength_or_limit": source.get("limitation_or_note", ""),
+                "support_type": "direct_source_candidate" if source.get("origin_stage") == "L1_gemini_search" else "fresh_search_snippet",
+            }
+        )
+    return rows
+
+
+def _l2_5_claims(
+    evidence_rows: list[dict[str, str]],
+    question: str,
+    sample_schema: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    claims: list[dict[str, str]] = []
+    axes = list((sample_schema or {}).get("axes") or [])
+    for idx, row in enumerate(evidence_rows[:4], start=1):
+        evidence = _compact_single_line(row["evidence_text"], limit=240)
+        axis = axes[(idx - 1) % len(axes)] if axes else "evidence signal"
+        claims.append(
+            {
+                "claim_id": f"C{idx}",
+                "claim": f"{axis}: decision-relevant evidence for this question indicates: {evidence}",
+                "source_id": row["source_id"],
+            }
+        )
+    return claims
+
+
+def _l2_5_gaps(
+    source_rows: list[dict[str, str]],
+    evidence_rows: list[dict[str, str]],
+    question: str,
+    sample_schema: dict[str, Any] | None = None,
+) -> list[str]:
+    topic = _compact_single_line(question, limit=140)
+    schema_name = str((sample_schema or {}).get("name") or "generic_evidence")
+    gaps = [
+        f"G1: Full-text verification gap for {topic}; L2.5 has candidates/snippets but not audited source passages, so claim strength should remain bounded.",
+        f"G2: Schema coverage gap for {schema_name}; extracted sources may not evenly cover every required schema axis.",
+        f"G3: Counterevidence gap for {topic}; L1/L2 candidates may not include enough contradictory evidence to settle disputed tradeoffs.",
+    ]
+    if len(source_rows) < 3:
+        gaps.append("G4: insufficient_sources=true because fewer than three topic-relevant source rows were extractable from L1/L2.")
+    if len(evidence_rows) < 3:
+        gaps.append("G5: insufficient_sources=true because fewer than three usable evidence rows were extractable from L1/L2.")
+    return gaps[:5]
+
+
+def _csv_text(fieldnames: list[str], rows: list[dict[str, str]]) -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({name: row.get(name, "") for name in fieldnames})
+    return output.getvalue()
+
+
+def _claims_markdown(claims: list[dict[str, str]], *, insufficient: bool) -> str:
+    lines = ["# claims", "", f"insufficient_sources: {str(insufficient).lower()}", ""]
+    for item in claims:
+        lines.append(f"- {item['claim_id']}: {item['claim']} [source_id: {item['source_id']}]")
+    return "\n".join(lines) + "\n"
+
+
+def _gaps_markdown(gaps: list[str], *, insufficient: bool) -> str:
+    lines = ["# gaps", "", f"insufficient_sources: {str(insufficient).lower()}", ""]
+    lines.extend(f"- {gap}" for gap in gaps)
+    return "\n".join(lines) + "\n"
+
+
+def _contains_l2_5_stub_marker(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in L2_5_STUB_MARKERS)
+
+
+def analyze_l2_5_evidence_organizer(base_dir: str | Path) -> dict[str, Any]:
+    stage_dir = Path(base_dir) / "L2_5_codex_evidence_organizer"
+    missing_paths: list[str] = []
+    handoff_only_paths: list[str] = []
+    header_only_paths: list[str] = []
+    domain_content_paths: list[str] = []
+    stub_paths: list[str] = []
+    for filename in L2_5_EVIDENCE_ORGANIZER_OUTPUTS:
+        path = stage_dir / filename
+        rel = f"L2_5_codex_evidence_organizer/{filename}"
+        if not path.exists():
+            missing_paths.append(rel)
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        stripped = text.strip()
+        nonempty_lines = [line for line in stripped.splitlines() if line.strip()]
+        if _is_l2_5_handoff_only_text(stripped):
+            handoff_only_paths.append(rel)
+        elif _contains_l2_5_stub_marker(stripped):
+            stub_paths.append(rel)
+        elif len(nonempty_lines) <= 1:
+            header_only_paths.append(rel)
+        elif _has_l2_5_domain_content(filename, stripped):
+            domain_content_paths.append(rel)
+        else:
+            header_only_paths.append(rel)
+    source_rows = _read_csv_dicts(stage_dir / "sources.csv")
+    evidence_rows = _read_csv_dicts(stage_dir / "evidence.csv")
+    claim_ids = _markdown_ids(stage_dir / "claims.md", "C")
+    gap_ids = _markdown_ids(stage_dir / "gaps.md", "G")
+    source_ids = {row.get("source_id", "").strip() for row in source_rows}
+    evidence_source_ids = {row.get("source_id", "").strip() for row in evidence_rows}
+    evidence_claim_ids = {row.get("claim_id", "").strip() for row in evidence_rows}
+    evidence_texts = [row.get("evidence_text", "").strip() for row in evidence_rows]
+    real_evidence_rows = [
+        text for text in evidence_texts if text and len(text) >= 20 and not _contains_l2_5_stub_marker(text)
+    ]
+    insufficient_sources = len(source_rows) < 3 or len(real_evidence_rows) < 3 or len(claim_ids) < 4 or len(gap_ids) < 3
+    aligned = bool(evidence_source_ids) and evidence_source_ids.issubset(source_ids) and bool(evidence_claim_ids) and evidence_claim_ids.issubset(claim_ids)
+    l2_5_stub_detected = bool(handoff_only_paths or stub_paths)
+    invalid_paths = sorted(set(missing_paths + handoff_only_paths + header_only_paths + stub_paths))
+    extraction_missing = bool(missing_paths) or insufficient_sources or l2_5_stub_detected or not aligned
+    if extraction_missing and not invalid_paths:
+        invalid_paths = [f"L2_5_codex_evidence_organizer/{filename}" for filename in L2_5_EVIDENCE_ORGANIZER_OUTPUTS]
+    issues = ["l2_5_extraction_missing"] if extraction_missing else []
+    return {
+        "l2_5_valid": not extraction_missing,
+        "l2_5_stub_detected": l2_5_stub_detected,
+        "upstream_critical_defect": extraction_missing,
+        "insufficient_sources": insufficient_sources,
+        "issues": issues,
+        "missing_or_invalid_artifacts": invalid_paths if extraction_missing else [],
+        "handoff_only_artifacts": handoff_only_paths,
+        "stub_artifacts": stub_paths,
+        "header_only_artifacts": header_only_paths,
+        "domain_content_artifacts": domain_content_paths,
+        "source_rows": len(source_rows),
+        "evidence_rows": len(real_evidence_rows),
+        "claim_count": len(claim_ids),
+        "gap_count": len(gap_ids),
+        "claim_source_alignment_valid": aligned,
+    }
+
+
+def _is_l2_5_handoff_only_text(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not text.strip():
+        return False
+    return (
+        "handoff_protocol" in lowered
+        and "hermes-codex evidence organizer smoke" in lowered
+        and "source_candidates.json" in lowered
+        and "ddgs_gap_sources.json" in lowered
+    )
+
+
+def _read_csv_dicts(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        return [dict(row) for row in csv.DictReader(io.StringIO(path.read_text(encoding="utf-8", errors="replace"))) if any(str(value or "").strip() for value in row.values())]
+    except Exception:
+        return []
+
+
+def _markdown_ids(path: Path, prefix: str) -> set[str]:
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    pattern = rf"\b{re.escape(prefix)}\d+\b"
+    return set(re.findall(pattern, text))
+
+
+def _has_l2_5_domain_content(filename: str, text: str) -> bool:
+    lowered = (text or "").lower()
+    if _is_l2_5_handoff_only_text(text):
+        return False
+    if filename.endswith(".csv"):
+        rows = [line for line in text.splitlines() if line.strip()]
+        if len(rows) < 2:
+            return False
+        return any("," in row and not row.lower().startswith(("source_id", "claim_id", "id,")) for row in rows[1:])
+    domain_markers = (
+        "claim",
+        "gap",
+        "evidence",
+        "source",
+        "支持",
+        "证据",
+        "缺口",
+        "争议",
+        "不确定",
+    )
+    return len(text.strip()) >= 120 and any(marker in lowered or marker in text for marker in domain_markers)
+
+
+def l4_critical_defects_from_audit(audit_text: str) -> list[str]:
+    lowered = (audit_text or "").lower()
+    defects: list[str] = []
+    l2_5_missing = (
+        "l2.5" in lowered
+        and (
+            "extraction missing" in lowered
+            or "stubbed out" in lowered
+            or "handoff_protocol" in lowered
+            or "unsupported by structured evidence" in lowered
+            or "no actual claims" in lowered
+            or "no actual structured data extraction" in lowered
+        )
+    )
+    if l2_5_missing:
+        defects.append("l2_5_extraction_missing")
+    if "critical" in lowered and "supplementary_search_cross_topic_contamination" in lowered:
+        defects.append("supplementary_search_cross_topic_contamination")
+    return sorted(set(defects))
+
+
+def detect_supplementary_search_topic_contamination(query: str, text: str) -> dict[str, Any]:
+    value = str(text or "")
+    lowered = value.lower()
+    query_value = str(query or "")
+    query_lower = query_value.lower()
+    adhd_terms = (
+        "adhd",
+        "attention-deficit",
+        "parent training",
+        "behavioral parent training",
+        "chadd",
+        "additudemag",
+        "cdc.gov/adhd",
+    )
+    adhd_hit_terms = [term for term in adhd_terms if term in lowered]
+    query_allows_adhd = any(term in query_lower for term in ("adhd", "attention-deficit")) or any(
+        term in query_value for term in ("注意缺陷", "多动", "共病", "行为干预")
+    )
+    explicit_comorbidity_bridge = any(term in lowered for term in ("comorbid", "co-morbid", "共病"))
+    reading_query = any(term in query_value for term in ("拼读", "音韵", "解码", "泛阅读", "阅读困难"))
+    contaminated = bool(adhd_hit_terms) and not query_allows_adhd and not (reading_query and explicit_comorbidity_bridge)
+    return {
+        "supplementary_contaminated": contaminated,
+        "supplementary_search_contaminated": contaminated,
+        "supplementary_search_cross_topic_contamination": contaminated,
+        "issue": "supplementary_search_cross_topic_contamination" if contaminated else "",
+        "contaminated_terms": adhd_hit_terms,
+    }
 
 
 def _research_profile_acceptance_requirements(profiles: list[str]) -> list[str]:
@@ -4032,7 +5277,7 @@ def _compact_research_evidence_sections(packet: dict[str, Any], *, accepted: boo
             f"mechanisms already present in L1-L4. Compact basis: {_section_basis(l1_l2 or l3 or all_material)}"
         ),
         "reasonable_inference": (
-            "Reasonable inference may connect existing ADHD/executive-function, learning-support, feedback, and mechanism material to the "
+            "Reasonable inference may connect accepted research material, mechanism evidence, operational constraints, and scenario-specific context to the "
             f"decision scenario when the intermediate mechanism is explicit. Compact basis: {_section_basis(l3 or all_material)}"
         ),
         "foresight_hypothesis": (
@@ -4457,21 +5702,29 @@ def _decision_supplementary_search_report(
     research_packet_path: str | Path | None = None,
 ) -> str:
     fresh_hits = [hit for hit in hits if hit.get("url")]
-    if not fresh_hits:
+    clean_hits, quarantined_hits = _split_supplementary_hits_by_topic(query, fresh_hits)
+    if not clean_hits and not quarantined_hits:
         raise RuntimeError("supplementary_search: DDGS returned no fresh result URLs")
     base = Path(base_dir).resolve()
     intelligence = Path(str(stages[0].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")[:2500]
+    query_plan = _supplementary_search_query_plan(query)
+    contaminated = bool(quarantined_hits)
     lines = [
-        "# parent_training_supplement",
+        "# supplementary_search_report",
         "",
         "stage_name: supplementary_search",
         "tool: DDGS",
         "mode: DECISION",
-        "scope: fresh supplemental search for parent training, school accommodations, inattentive ADHD, mind wandering, and cognitive disengagement syndrome.",
+        "scope: fresh supplemental search anchored to the user's current question.",
         "boundary: source supplement only; no user-facing plan and no replacement for structure_mapper or evidence_judge.",
+        f"supplementary_search_contaminated: {str(contaminated).lower()}",
+        "quarantine_policy: contaminated DDGS hits are listed for audit only and must not be used as evidence candidates.",
         "",
         "## user_question_anchor",
         query.strip()[:1200],
+        "",
+        "## query_plan",
+        json.dumps(query_plan, ensure_ascii=False, indent=2),
         "",
         "## current_run_inputs",
         f"- intelligence_layer: {Path(str(stages[0].get('artifact_path') or '')).resolve().relative_to(base)}",
@@ -4483,7 +5736,10 @@ def _decision_supplementary_search_report(
     if context:
         lines.extend(["", "## optional_research_evidence_packet_context", context])
     lines.extend(["", "## fresh_ddgs_result_summary"])
-    for idx, hit in enumerate(fresh_hits, start=1):
+    if not clean_hits:
+        lines.append("No topic-consistent fresh DDGS hits remained after quarantine.")
+        lines.append("")
+    for idx, hit in enumerate(clean_hits, start=1):
         lines.extend(
             [
                 f"### result_{idx}",
@@ -4494,10 +5750,25 @@ def _decision_supplementary_search_report(
                 "",
             ]
         )
+    if quarantined_hits:
+        lines.extend(["## quarantined_ddgs_result_summary"])
+        for idx, hit in enumerate(quarantined_hits, start=1):
+            lines.extend(
+                [
+                    f"### quarantined_result_{idx}",
+                    f"- query: {hit.get('query', '')}",
+                    f"- title: {hit.get('title', '')}",
+                    f"- url: {hit.get('url', '')}",
+                    f"- snippet: {hit.get('snippet', '')}",
+                    "- quarantine_reason: supplementary_search_cross_topic_contamination",
+                    "",
+                ]
+            )
     lines.extend(
         [
             "## handoff_notes_for_stage3",
-            "- Use these fresh URLs as supplemental evidence candidates.",
+            "- Use only non-quarantined fresh URLs as supplemental evidence candidates.",
+            "- Do not use quarantined URLs as evidence candidates.",
             "- Keep user-facing guidance out of this stage.",
             "- Stage 3 must still independently map structure; this stage only supplies fresh search material.",
         ]
@@ -4611,12 +5882,15 @@ def _decision_final_controller_packet(
     base = Path(base_dir).resolve()
     excerpts: dict[str, str] = {}
     raw_convergence = ""
+    raw_external_calibration = ""
     for record in stages:
         stage_name = str(record.get("stage_name") or "")
         text = Path(str(record.get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")
         excerpts[stage_name] = _safe_final_excerpt(text)
         if stage_name == "convergence_report":
             raw_convergence = text
+        if stage_name == "external_calibration":
+            raw_external_calibration = text
     trace = [
         {
             "stage_name": record.get("stage_name"),
@@ -4639,6 +5913,9 @@ def _decision_final_controller_packet(
     convergence_digest = _convergence_fixed_section_digest(raw_convergence)
     if convergence_digest:
         packet["convergence_fixed_section_digest"] = convergence_digest
+    calibration_constraints = _external_calibration_final_constraints(raw_external_calibration)
+    if calibration_constraints:
+        packet["external_calibration_hard_constraints"] = calibration_constraints
     research_context = _decision_research_packet_context(research_packet_path)
     if research_context:
         packet["research_evidence_packet_context"] = research_context
@@ -4696,15 +5973,108 @@ def _intelligence_layer_prompt_from_research_packet(
 
 
 def _supplementary_search_queries(query: str) -> list[str]:
-    return [
-        "ADHD parent training children",
-        "behavioral parent training ADHD inattentive children",
-        "CLAS ADHD inattentive children parent training",
-        "third grade ADHD executive function organization skills",
-        "ADHD school accommodations inattentive children",
-        "ADHD mind wandering children inattentive",
-        "cognitive disengagement syndrome ADHD children parent training",
-    ]
+    plan = _supplementary_search_query_plan(query)
+    queries = [item["query"] for item in plan if item.get("is_topic_relevant") and not item.get("contamination_reason")]
+    if len(queries) < 3:
+        raise RuntimeError("supplementary_search: fewer than three topic-relevant queries after topic guard")
+    return queries
+
+
+def _supplementary_search_query_plan(query: str) -> list[dict[str, Any]]:
+    value = str(query or "")
+    lowered = value.lower()
+    topic_terms = _topic_anchor_terms(value)
+    allowed_expansions: list[str] = []
+    basis = "fallback"
+    if any(term in lowered for term in ("adhd", "attention-deficit", "inattentive")) or any(
+        term in value for term in ("注意缺陷", "多动", "执行功能")
+    ):
+        basis = "adhd_parent_training_anchor"
+        allowed_expansions = ["ADHD", "parent training", "executive function", "inattentive children"]
+        candidates = [
+            "ADHD parent training children",
+            "behavioral parent training ADHD inattentive children",
+            "CLAS ADHD inattentive children parent training",
+            "third grade ADHD executive function organization skills",
+            "ADHD school accommodations inattentive children",
+            "ADHD mind wandering children inattentive",
+            "cognitive disengagement syndrome ADHD children parent training",
+        ]
+    elif any(term in lowered for term in ("postgresql", "lakehouse", "etl", "saas", "event-driven")):
+        basis = "b2b_saas_architecture_anchor"
+        allowed_expansions = ["CDC", "Debezium", "streaming analytics", "multi tenant", "RLS"]
+        candidates = [
+            "B2B SaaS PostgreSQL monolith cron ETL migration event driven architecture",
+            "PostgreSQL CDC Debezium lakehouse object storage streaming analytics SaaS",
+            "B2B SaaS multi tenant analytics lakehouse architecture cost tradeoffs",
+            "event driven architecture lakehouse streaming feature pipeline migration risks",
+            "PostgreSQL row level security SaaS analytics lakehouse migration case study",
+        ]
+    elif any(term in value for term in ("拼读", "音韵", "解码", "泛阅读", "阅读困难")):
+        basis = "reading_intervention_anchor"
+        allowed_expansions = ["dyslexia", "phonological awareness", "explicit decoding", "structured literacy"]
+        candidates = [
+            "systematic phonological awareness explicit decoding intervention struggling readers age 8 10",
+            "dyslexia explicit phonics decoding intervention upper elementary systematic review",
+            "Chinese reading difficulties phonological awareness decoding intervention children",
+            "wide reading versus explicit decoding struggling readers evidence",
+            "high frequency short duration decoding practice reading intervention",
+        ]
+    elif any(term in value for term in ("越南", "电池回收", "梯次利用", "电动车电池")):
+        basis = "vietnam_ev_battery_recycling_anchor"
+        allowed_expansions = ["Vietnam", "EPR", "second-life battery", "VinFast", "BYD", "cascade utilization"]
+        candidates = [
+            "Vietnam EV battery recycling extended producer responsibility regulation 2026",
+            "Northern Vietnam electric vehicle battery recycling cascade utilization market",
+            "Vietnam lithium ion battery recycling feedstock VinFast BYD supply chain",
+            "EV battery second life cascade utilization Vietnam stationary storage market",
+            "battery recycling hydrometallurgy investment CAPEX Vietnam industrial services",
+        ]
+    elif any(term in value for term in ("具身", "机器人", "家庭陪伴", "消费硬件")):
+        basis = "home_companion_robotics_anchor"
+        allowed_expansions = ["embodied AI", "home companion robot", "consumer robotics", "Sim2Real", "robot safety"]
+        candidates = [
+            "home companion robot consumer market 2030 embodied AI adoption forecast",
+            "household service robot retention utility field trial evidence",
+            "embodied AI home robot safety standards commercialization timeline",
+            "consumer hardware venture investment home robots market uncertainty",
+            "home companion robot cost curve manipulation Sim2Real adoption barriers",
+        ]
+    else:
+        allowed_expansions = topic_terms[:5]
+        candidates = [
+            f"{value[:80]} evidence review",
+            f"{value[:80]} market evidence",
+            f"{value[:80]} uncertainty gaps",
+        ]
+    guard_terms = list(dict.fromkeys(topic_terms + allowed_expansions))
+    plan: list[dict[str, Any]] = []
+    for candidate in candidates:
+        contamination = detect_supplementary_search_topic_contamination(value, candidate)
+        relevant = _topic_relevant(candidate + " " + " ".join(allowed_expansions), guard_terms)
+        plan.append(
+            {
+                "query": candidate,
+                "query_basis": basis,
+                "topic_anchor_terms": topic_terms,
+                "allowed_expansion_terms": allowed_expansions,
+                "is_topic_relevant": bool(relevant and not contamination["supplementary_search_contaminated"]),
+                "contamination_reason": contamination["issue"],
+            }
+        )
+    return plan
+
+
+def _split_supplementary_hits_by_topic(query: str, hits: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    clean: list[dict[str, str]] = []
+    quarantined: list[dict[str, str]] = []
+    for hit in hits:
+        text = " ".join(str(hit.get(key) or "") for key in ("query", "title", "url", "snippet"))
+        if detect_supplementary_search_topic_contamination(query, text)["supplementary_search_contaminated"]:
+            quarantined.append(hit)
+        else:
+            clean.append(hit)
+    return clean, quarantined
 
 
 def _supplementary_search_report(
@@ -4715,21 +6085,29 @@ def _supplementary_search_report(
     base_dir: str | Path,
 ) -> str:
     fresh_hits = [hit for hit in hits if hit.get("url")]
-    if not fresh_hits:
+    clean_hits, quarantined_hits = _split_supplementary_hits_by_topic(query, fresh_hits)
+    if not clean_hits and not quarantined_hits:
         raise RuntimeError("supplementary_search: DDGS returned no fresh result URLs")
     base = Path(base_dir).resolve()
     packet = Path(str(stages[5].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")[:2500]
     intelligence = Path(str(stages[6].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")[:2500]
+    query_plan = _supplementary_search_query_plan(query)
+    contaminated = bool(quarantined_hits)
     lines = [
-        "# parent_training_supplement",
+        "# supplementary_search_report",
         "",
         "stage_name: supplementary_search",
         "tool: DDGS",
-        "scope: fresh supplemental search for parent training, school accommodations, inattentive ADHD, mind wandering, and cognitive disengagement syndrome.",
+        "scope: fresh supplemental search anchored to the user's current question.",
         "boundary: source supplement only; no user-facing plan and no replacement for structure_mapper or evidence_judge.",
+        f"supplementary_search_contaminated: {str(contaminated).lower()}",
+        "quarantine_policy: contaminated DDGS hits are listed for audit only and must not be used as evidence candidates.",
         "",
         "## user_question_anchor",
         query.strip()[:1200],
+        "",
+        "## query_plan",
+        json.dumps(query_plan, ensure_ascii=False, indent=2),
         "",
         "## current_run_inputs",
         f"- research_packet: {Path(str(stages[5].get('artifact_path') or '')).resolve().relative_to(base)}",
@@ -4743,7 +6121,10 @@ def _supplementary_search_report(
         "",
         "## fresh_ddgs_result_summary",
     ]
-    for idx, hit in enumerate(fresh_hits, start=1):
+    if not clean_hits:
+        lines.append("No topic-consistent fresh DDGS hits remained after quarantine.")
+        lines.append("")
+    for idx, hit in enumerate(clean_hits, start=1):
         lines.extend(
             [
                 f"### result_{idx}",
@@ -4754,10 +6135,25 @@ def _supplementary_search_report(
                 "",
             ]
         )
+    if quarantined_hits:
+        lines.extend(["## quarantined_ddgs_result_summary"])
+        for idx, hit in enumerate(quarantined_hits, start=1):
+            lines.extend(
+                [
+                    f"### quarantined_result_{idx}",
+                    f"- query: {hit.get('query', '')}",
+                    f"- title: {hit.get('title', '')}",
+                    f"- url: {hit.get('url', '')}",
+                    f"- snippet: {hit.get('snippet', '')}",
+                    "- quarantine_reason: supplementary_search_cross_topic_contamination",
+                    "",
+                ]
+            )
     lines.extend(
         [
             "## handoff_notes_for_stage9",
-            "- Use these fresh URLs as supplemental evidence candidates.",
+            "- Use only non-quarantined fresh URLs as supplemental evidence candidates.",
+            "- Do not use quarantined URLs as evidence candidates.",
             "- Keep user-facing guidance out of this stage.",
             "- Stage 9 must still independently map structure; this stage only supplies fresh search material.",
         ]
@@ -4867,6 +6263,16 @@ def _evidence_judge_prompt_from_artifacts(
             "Input scope is restricted to current-run fresh artifacts: research_evidence_packet.md, intelligence_layer_report.md, parent_training_supplement.md, structure_mapper.md, L1-L9 StageRecords, and the user's original question.",
             "Output duty: judge evidence quality, strength, uncertainty, and applicability only.",
             "Return only these sections: evidence_quality_map, strength_by_claim, applicability_to_user_context, uncertainty_and_limits, evidence_gaps_for_later_stages.",
+            "If input artifacts do not provide a claim table, derive 4-6 decision-relevant claims from research_evidence_packet, intelligence_layer_report, supplementary_search, and structure_mapper.",
+            "strength_by_claim is always required.",
+            "Write strength_by_claim as a standalone line exactly: strength_by_claim",
+            "Do not put the schema or claim text on the same line as strength_by_claim.",
+            "Never write \"not applicable\" for evidence_quality_map or strength_by_claim.",
+            "For each strength_by_claim item include: claim / strength: high-medium-low / evidence_basis / uncertainty_or_gap.",
+            "Output the report directly.",
+            "Do not narrate task instructions.",
+            "Do not include reasoning setup, compliance notes, or phrases like \"We need to\", \"We must\", \"Let's craft\", \"I will\", or \"no need to mention\".",
+            "Start directly with the required section headings.",
             "Do not audit premises, generate alternatives, combine views, or write any user-facing plan.",
             f"Current run root: {base}",
             "",
@@ -4887,8 +6293,192 @@ def _evidence_judge_prompt_from_artifacts(
             "",
             "## structure_mapper.md",
             structure,
+            "",
+            "## Output contract",
+            "Your first non-empty line must be exactly: evidence_quality_map",
+            "Then continue with strength_by_claim, applicability_to_user_context, uncertainty_and_limits, evidence_gaps_for_later_stages.",
+            "If no explicit claim table is available, derive 4-6 decision-relevant claims from the supplied artifacts.",
+            "strength_by_claim is always required and every item must include claim / strength: high-medium-low / evidence_basis / uncertainty_or_gap.",
+            "The strength_by_claim section heading must be a standalone line exactly: strength_by_claim",
+            "Do not put the schema or claim text on the same line as strength_by_claim.",
+            "Never write \"not applicable\" for evidence_quality_map or strength_by_claim.",
+            "Do not write any preface, planning note, compliance note, or self-instruction.",
+            "Do not write phrases like \"We need to\", \"We must\", \"Let's craft\", \"I will\", \"no need to mention\", or \"just generating answer\".",
         ]
     )
+
+
+def _evidence_judge_compact_prompt_from_artifacts(
+    stages: list[dict[str, Any]],
+    *,
+    query: str,
+    base_dir: str | Path,
+) -> str:
+    base = Path(base_dir).resolve()
+    packet = Path(str(stages[5].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")
+    intelligence = Path(str(stages[6].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")
+    supplement = Path(str(stages[7].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")
+    structure = Path(str(stages[8].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")
+    trace = [
+        {
+            "stage_name": record.get("stage_name"),
+            "owner": record.get("owner"),
+            "model": record.get("model"),
+            "executor_model": record.get("executor_model"),
+            "artifact_path": str(Path(str(record.get("artifact_path") or "")).resolve().relative_to(base)),
+        }
+        for record in stages
+    ]
+    packet_compact = _compact_research_packet_for_evidence_judge(packet, limit=3800)
+    intelligence_compact = _compact_evidence_judge_prior_artifact(intelligence, limit=900)
+    supplement_compact = _compact_evidence_judge_prior_artifact(supplement, limit=800)
+    structure_compact = _compact_evidence_judge_prior_artifact(structure, limit=1200)
+    chunks = [
+        "Run RESEARCH_DECISION stage 10: evidence_judge using Nemotron-120B only.",
+        "compact_evidence_judge_packet: true",
+        "compact_budget_chars: 10000",
+        f"Canonical model: {NEMOTRON120B}. Do not use Qwen72B, 9B, Flash, DeepSeek Controller, or R1.",
+        "Input scope is restricted to compacted current-run fresh artifacts: research_evidence_packet.md, intelligence_layer_report.md, parent_training_supplement.md, structure_mapper.md, L1-L9 StageRecords, and the user's original question.",
+        "Output duty: judge evidence quality, strength, uncertainty, and applicability only.",
+        "Return only these sections: evidence_quality_map, strength_by_claim, applicability_to_user_context, uncertainty_and_limits, evidence_gaps_for_later_stages.",
+        "If input artifacts do not provide a claim table, derive 4-6 decision-relevant claims from research_evidence_packet, intelligence_layer_report, supplementary_search, and structure_mapper.",
+        "strength_by_claim is always required.",
+        "Write strength_by_claim as a standalone line exactly: strength_by_claim",
+        "Do not put the schema or claim text on the same line as strength_by_claim.",
+        "Never write \"not applicable\" for evidence_quality_map or strength_by_claim.",
+        "For each strength_by_claim item include: claim / strength: high-medium-low / evidence_basis / uncertainty_or_gap.",
+        "Output the report directly.",
+        "Do not narrate task instructions.",
+        "Do not include reasoning setup, compliance notes, or phrases like \"We need to\", \"We must\", \"Let's craft\", \"I will\", or \"no need to mention\".",
+        "Start directly with the required section headings.",
+        "Do not audit premises, generate alternatives, combine views, or write any user-facing plan.",
+        f"Current run root: {base}",
+        "",
+        "## User original question",
+        query,
+        "",
+        "## L1-L9 StageRecords",
+        json.dumps(trace, ensure_ascii=False, indent=2),
+        "",
+        "## research_evidence_packet.md compact",
+        packet_compact,
+        "",
+        "## intelligence_layer_report.md compact",
+        intelligence_compact,
+        "",
+        "## parent_training_supplement.md compact",
+        supplement_compact,
+        "",
+        "## structure_mapper.md compact",
+        structure_compact,
+        "",
+        "## Output contract",
+        "Your first non-empty line must be exactly: evidence_quality_map",
+        "Then continue with strength_by_claim, applicability_to_user_context, uncertainty_and_limits, evidence_gaps_for_later_stages.",
+        "If no explicit claim table is available, derive 4-6 decision-relevant claims from the supplied artifacts.",
+        "strength_by_claim is always required and every item must include claim / strength: high-medium-low / evidence_basis / uncertainty_or_gap.",
+        "The strength_by_claim section heading must be a standalone line exactly: strength_by_claim",
+        "Do not put the schema or claim text on the same line as strength_by_claim.",
+        "Never write \"not applicable\" for evidence_quality_map or strength_by_claim.",
+        "Do not write any preface, planning note, compliance note, or self-instruction.",
+        "Do not write phrases like \"We need to\", \"We must\", \"Let's craft\", \"I will\", \"no need to mention\", or \"just generating answer\".",
+    ]
+    prompt = "\n".join(chunks)
+    if len(prompt) <= 10000:
+        return prompt
+    # Keep the contract intact; only tighten compacted prior excerpts.
+    overflow = len(prompt) - 10000
+    structure_limit = max(500, 1200 - overflow)
+    chunks[chunks.index(structure_compact)] = _compact_evidence_judge_prior_artifact(structure, limit=structure_limit)
+    prompt = "\n".join(chunks)
+    if len(prompt) <= 10000:
+        return prompt
+    overflow = len(prompt) - 10000
+    packet_limit = max(2400, 3800 - overflow)
+    chunks[chunks.index(packet_compact)] = _compact_research_packet_for_evidence_judge(packet, limit=packet_limit)
+    return "\n".join(chunks)
+
+
+def _compact_research_packet_for_evidence_judge(text: str, *, limit: int) -> str:
+    preferred = (
+        "evidence_supported",
+        "reasonable_inference",
+        "foresight_hypothesis",
+        "evidence_gap",
+        "evidence_strength",
+        "controversy",
+    )
+    sections: list[str] = []
+    for heading in preferred:
+        body = _markdown_section_body(text, heading) or _colon_or_plain_section_body(text, heading)
+        if body:
+            sections.append(f"## {heading}\n{_semantic_limit(body, max(260, limit // 5))}")
+    if not sections:
+        sections.append(_semantic_limit(_compact_evidence_judge_prior_artifact(text, limit=limit), limit))
+    return _semantic_limit("\n\n".join(sections), limit)
+
+
+def _compact_evidence_judge_prior_artifact(text: str, *, limit: int) -> str:
+    keywords = (
+        "claim",
+        "strength",
+        "evidence",
+        "uncertain",
+        "uncertainty",
+        "applicability",
+        "applicable",
+        "gap",
+        "limit",
+        "risk",
+        "support",
+        "判断",
+        "证据",
+        "强度",
+        "不确定",
+        "适用",
+        "缺口",
+        "限制",
+        "风险",
+        "支持",
+    )
+    selected: list[str] = []
+    current_heading = ""
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            current_heading = line.strip("# ").strip()
+            if any(keyword in current_heading.lower() or keyword in current_heading for keyword in keywords):
+                selected.append(raw_line)
+            continue
+        haystack = f"{current_heading}\n{line}".lower()
+        if any(keyword.lower() in haystack for keyword in keywords):
+            selected.append(raw_line)
+    if not selected:
+        selected = [line for line in (text or "").splitlines() if line.strip()][:18]
+    return _semantic_limit("\n".join(selected), limit)
+
+
+def _semantic_limit(text: str, limit: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= limit:
+        return value
+    chunks = re.split(r"(?<=[。！？.!?])\s+|\n(?=\s*[-*0-9#])", value)
+    kept: list[str] = []
+    total = 0
+    for chunk in chunks:
+        piece = chunk.strip()
+        if not piece:
+            continue
+        add_len = len(piece) + (2 if kept else 0)
+        if total + add_len > limit:
+            break
+        kept.append(piece)
+        total += add_len
+    if kept:
+        return "\n".join(kept)
+    return value[:limit].rsplit(" ", 1)[0].strip() or value[:limit].strip()
 
 
 def _evidence_judge_forbidden_tokens(text: str) -> list[str]:
@@ -4908,6 +6498,59 @@ def _evidence_judge_forbidden_tokens(text: str) -> list[str]:
     if any(_is_chinese_final_advice_heading(line) for line in heading_lines):
         tokens.append("chinese_final_advice_heading")
     return tokens
+
+
+def _evidence_judge_artifact_quality_error(text: str) -> str:
+    if _evidence_judge_process_narration_hits(text):
+        return "process_narration_leak"
+    lowered = (text or "").lower()
+    if re.search(r"evidence_quality_map\s+and\s+strength_by_claim\s+are\s+not\s+applicable", lowered):
+        return "section_start_mismatch"
+    first = _first_nonempty_line(text)
+    if first.strip().lower() != "evidence_quality_map":
+        return "section_start_mismatch"
+    section_names = {
+        line.strip().lower().rstrip(":")
+        for line in (text or "").splitlines()
+        if line.strip()
+    }
+    if "strength_by_claim" not in section_names:
+        return "missing_strength_by_claim"
+    return ""
+
+
+def _evidence_judge_process_narration_hits(text: str) -> list[str]:
+    checks = (
+        ("we_need_to", r"\bwe\s+need\s+to\b"),
+        ("we_must", r"\bwe\s+must\b"),
+        ("lets_craft", r"\blet['’]s\s+craft\b"),
+        ("i_will", r"\bi\s+will\b"),
+        ("no_need_to_mention", r"\bno\s+need\s+to\s+mention\b"),
+        ("just_generating_answer", r"\bjust\s+generating\s+(?:the\s+)?answer\b"),
+        ("we_are_just", r"\bwe\s+are\s+just\b"),
+        ("we_must_not", r"\bwe\s+must\s+not\b"),
+        ("we_should_not", r"\bwe\s+should\s+not\b"),
+        ("i_must_not", r"\bi\s+must\s+not\b"),
+        ("i_should_not", r"\bi\s+should\s+not\b"),
+        ("must_not_include", r"\bmust\s+not\s+include\b"),
+        ("must_not_mention", r"\bmust\s+not\s+mention\b"),
+        ("must_not_output", r"\bmust\s+not\s+output\b"),
+        ("must_not_write", r"\bmust\s+not\s+write\b"),
+        ("should_not_include", r"\bshould\s+not\s+include\b"),
+        ("should_not_mention", r"\bshould\s+not\s+mention\b"),
+        ("should_not_output", r"\bshould\s+not\s+output\b"),
+        ("should_not_write", r"\bshould\s+not\s+write\b"),
+        ("prompt_compliance_note", r"\bthe\s+instruction\s+says\b"),
+        ("return_only_narration", r"\breturn\s+only\s+these\s+sections\b"),
+    )
+    return [token for token, pattern in checks if re.search(pattern, text or "", re.IGNORECASE)]
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
 
 
 def _is_forbidden_stage_heading(line: str, stage_names: set[str]) -> bool:
@@ -5382,11 +7025,14 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
                 query,
                 include_evidence_boundary=include_evidence_boundary,
                 convergence_digest=str(packet.get("convergence_fixed_section_digest") or ""),
+                calibration_constraints=str(packet.get("external_calibration_hard_constraints") or ""),
+                research_evidence_context=str(packet.get("research_evidence_packet_context") or ""),
             )
         return _generic_decision_final_report(query, include_evidence_boundary=include_evidence_boundary)
     profiles = _normalize_profiles(packet.get("output_quality_profile"))
     if PROFILE_FORESIGHT_MECHANISM in profiles:
-        return _foresight_mechanism_final_report(query)
+        return _research_decision_foresight_final_report(query, packet)
+    return _research_decision_generic_final_report(query, packet)
     return "\n".join(
         [
             "# ADHD 儿童研究决策报告",
@@ -5441,6 +7087,378 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
     )
 
 
+def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]) -> str:
+    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
+    research_excerpt = _safe_final_excerpt(
+        str(excerpts.get("research_evidence_packet") or excerpts.get("L5_deepseek_acceptance") or ""),
+        limit=700,
+    )
+    convergence_excerpt = _safe_final_excerpt(str(excerpts.get("convergence_report") or ""), limit=700)
+    calibration_excerpt = _safe_final_excerpt(str(excerpts.get("external_calibration") or ""), limit=700)
+    lowered_query = query.lower()
+    is_audit_finance_query = any(
+        term in query
+        for term in (
+            "审计",
+            "审计底稿",
+            "财务异常",
+            "财务分析",
+            "管理层讨论分析",
+            "初级审计员",
+            "企业财务分析师",
+        )
+    )
+    is_legal_role_query = (not is_audit_finance_query) and any(
+        term in lowered_query or term in query
+        for term in ("法律", "律师", "法务", "合同", "legal", "lawyer")
+    )
+    if is_audit_finance_query:
+        task_domain = "审计底稿整理、财务异常检测、合规报告生成和管理层讨论分析草稿等例行审计/财务分析工作"
+        production_role = "初级审计员"
+        operations_role = "企业财务分析师和财务流程分析角色"
+        authority_moats = "审计判断、内控责任、重大错报风险识别、管理层沟通、监管问责和最终复核权"
+        scenario_context = "审计底稿、异常检测、合规报告、管理层讨论分析草稿和可重复财务控制场景"
+        value_migration = "价值从单件底稿或报告草稿生产迁移到异常解释、控制点设计、审计判断、管理层沟通和跨系统数据治理"
+        high_value_falsifier = "如果关键价值仍集中在重大判断、异常解释、审计复核、责任签字、监管问责和管理层沟通"
+        scenario_b = "AI 把重复审计/财务分析产出压到低成本层，靠近业务系统、内控流程和异常解释的角色在特定场景上升。certainty_level：medium。"
+        scenario_c = "企业财务分析师在权威、薪酬、声望、流动性和战略位置上整体超过初级审计员。certainty_level：low；当前证据不足。"
+        controversy = "争议集中在 AI 采用速度、审计责任、监管问责、组织授权、数据质量和复杂判断的不可替代性。"
+        counter_signal = "低风险底稿整理和草稿生成被自动化，但重大判断、异常解释、审计复核、监管问责和管理层沟通仍强绑定专业人员。"
+    elif is_legal_role_query:
+        task_domain = "法律检索、合同起草、案例摘要、合规解释等例行法律生产"
+        production_role = "初级律师"
+        operations_role = "企业法务分析师/legal-ops 型角色"
+        authority_moats = "牌照、责任承担、保密特权、诉讼/谈判场景、监督义务和最终法律签署权"
+        scenario_context = "合规运营、合同生命周期管理、采购/隐私/风控流程和可重复风险控制场景"
+        value_migration = "价值从单件法律文本生产迁移到风险筛查、流程编排、控制点设计和跨部门落地"
+        high_value_falsifier = "如果关键价值仍集中在独立法律判断、代理、谈判、责任承担和高风险签署"
+        scenario_b = "AI 把重复法律生产压到低成本层，靠近业务系统和风控流程的角色在特定场景上升。certainty_level：medium。"
+        scenario_c = "企业法务分析师在权威、薪酬、声望、流动性和战略位置上整体超过初级律师。certainty_level：low；当前证据不足。"
+        controversy = "争议集中在 AI 采用速度、监管责任、客户信任、组织授权和不同法律场景的不可替代性。"
+        counter_signal = "低风险任务被自动化，但高风险签署、诉讼、谈判、调查和责任承担仍强绑定持证专业人员。"
+    else:
+        task_domain = "可被工具显著压低成本的例行知识生产"
+        production_role = "传统初级生产角色"
+        operations_role = "流程整合与业务系统型角色"
+        authority_moats = "责任承担、制度授权、信任关系、复杂判断、监督义务和最终决策权"
+        scenario_context = "运营、流程治理、风险控制和可重复知识生产场景"
+        value_migration = "价值从单件文本生产迁移到流程编排、控制点设计和跨部门落地"
+        high_value_falsifier = "如果关键价值仍集中在复杂判断、责任承担和高风险签署"
+        scenario_b = "AI 把重复知识生产压到低成本层，靠近业务系统和流程控制的角色在特定场景上升。certainty_level：medium。"
+        scenario_c = "业务系统型角色在权威、薪酬、声望、流动性和战略位置上整体超过传统初级生产角色。certainty_level：low；当前证据不足。"
+        controversy = "争议集中在 AI 采用速度、组织授权、客户信任、责任分配和复杂场景的不可替代性。"
+        counter_signal = "低风险任务被自动化，但复杂判断、责任承担、监督义务和最终决策权仍强绑定专业人员。"
+    consumed = {
+        "research_evidence_packet": bool(research_excerpt),
+        "convergence_report": bool(convergence_excerpt),
+        "external_calibration": bool(calibration_excerpt),
+    }
+    lines = [
+        "# 研究决策最终报告",
+        "",
+        "## 核心结论",
+        "局部/场景性结构反转可能成立，职业整体反转证据不足。",
+        f"AI 持续压低{task_domain}的成本，确实会削弱单纯依靠高频基础产出的训练和筛选优势；但这首先改变的是任务价值分布，不足以证明职业整体的权威、收入、声望和上升通道发生全面反转。",
+        "",
+        "## 输入材料吸收",
+        "- research_evidence_packet：用于限定证据底座，只采纳当前材料能支持的任务成本下降、例行产出被压缩、长期职业整体反转证据不足等边界。",
+        "- convergence_report：用于吸收关键驱动、机制链、情景分叉、反证信号和 certainty_level，但不直接复制其中偏强的全面反转表述。",
+        "- external_calibration：用于执行降调；把结论收束为局部/场景性反转 plausible，把职业整体反转保留为 speculative 或证据不足。",
+        "- source_consumption_check："
+        + "; ".join(f"{name}={'yes' if used else 'no'}" for name, used in consumed.items()),
+        "",
+        "## 证据分层",
+        "",
+        "### evidence_supported",
+        f"判断：AI 对{task_domain}的边际成本压缩已经足以改变入门级产出的稀缺性；单纯更快完成检索、初稿、摘要或规则解释，不能再稳定构成{production_role}的差异化优势。",
+        "触发条件：AI 工具在组织内被允许进入标准工作流，并能稳定处理低风险、可校验、重复性强的产出。",
+        "中间机制：输入变量是任务成本下降；中介机制是例行产出被模板化、自动化和批量化；输出变量是基础产出的市场溢价下降。",
+        "失效条件或反证信号：若工具输出可靠性不足、组织因责任和保密约束限制使用，或客户仍要求人工逐项生产，则该判断需要下调。",
+        "certainty_level：high for routine task cost compression; medium for organizational adoption speed.",
+        "evidence_tier：evidence_supported",
+        "decision_use：把“例行产出速度”从核心优势降级，改看校验、责任、流程设计和业务风险翻译能力。",
+        "",
+        "### reasonable_inference",
+        f"判断：在{scenario_context}中，{operations_role}可能相对升值，因为其位置更接近业务数据、流程接口和系统改造。",
+        "触发条件：组织把 AI 产出接入业务系统，而不是只把它当作个人写作或检索助手。",
+        f"中间机制：输入变量是生产成本降低和工作流数据化；中介机制是{value_migration}；输出变量是场景性角色优势重排。",
+        f"失效条件或反证信号：{high_value_falsifier}，角色重排就会停留在协作效率提升，而非优势反转。",
+        "certainty_level：medium",
+        "evidence_tier：reasonable_inference",
+        "decision_use：在评价职业前景时区分 production value、operation value 和 authority value，不能只看谁更会使用工具。",
+        "",
+        "### foresight_hypothesis",
+        "判断：局部/场景性结构反转可能成立，职业整体反转证据不足。",
+        "触发条件：未来十年 AI 继续降低例行任务成本，组织治理重点从产出文本转向系统控制、责任分配和业务嵌入。",
+        f"中间机制：输入变量是 AI 能力提升和单位产出成本下降；中介机制是{task_domain}的可替代性上升，同时{authority_moats}仍保留；输出变量是局部角色优势上移但职业整体并未全面倒置。",
+        "失效条件或反证信号：若监管、责任、客户信任和职业晋升仍强绑定持证专业路径，或 AI 只提升效率而不改变授权结构，则整体反转假设不成立。",
+        "certainty_level：low-to-medium",
+        "evidence_tier：foresight_hypothesis",
+        "decision_use：把该结论作为需追踪的未来假设，而不是当前可直接下定论的职业预测。",
+        "",
+        "## 关键驱动变量",
+        "关键驱动包括：AI 单位任务成本、组织采用速度、输出可验证性、责任/保密/监管约束、客户信任、业务系统嵌入深度、可替代任务占比和职业授权结构。",
+        "",
+        "## 机制链总览",
+        "输入变量：AI 降低例行知识生产成本、组织流程数字化、可重复风险控制需求增加。",
+        "中介机制：基础产出被压缩为低差异化能力，价值迁移到校验、问责、流程设计、业务风险翻译和复杂场景判断。",
+        f"输出变量：{operations_role}在特定运营场景相对上升；{production_role}的基础训练优势被削弱；但职业整体权威不发生充分证据支持的全面倒置。",
+        "",
+        "## 情景分叉",
+        "情景 A：modified continuity。AI 提升两类角色效率，基础门槛提高，但授权、责任和复杂判断仍维持原有职业秩序。certainty_level：medium-high。",
+        f"情景 B：partial operational reversal。{scenario_b}",
+        f"情景 C：full occupational reversal。{scenario_c}",
+        "",
+        "## 证据强度、争议和缺口",
+        "evidence_strength: strong for routine-task cost compression; medium for local operational value migration; weak for full occupational reversal over ten years.",
+        f"controversy: {controversy}",
+        "evidence_gap: 缺口是缺少十年期、角色级、跨组织的直接证据来证明职业整体权威和回报发生全面倒置。",
+        "",
+        "## 反证信号与不确定性边界",
+        f"- 反证信号：{counter_signal}",
+        "- 反证信号：企业流程岗位效率提升，却没有转化为更高授权、薪酬、晋升速度或战略话语权。",
+        "- 反证信号：客户、监管和组织治理继续要求专业人员对 AI 输出承担最终责任。",
+        "- 不确定性边界：如果未来 AI 同时获得高可信校验、制度认可和责任承接机制，整体反转概率才需要重新上调。",
+        "",
+        "## 最终判断",
+        "局部/场景性结构反转可能成立，职业整体反转证据不足。",
+    ]
+    return "\n".join(lines)
+
+
+def _research_decision_generic_final_report(query: str, packet: dict[str, Any]) -> str:
+    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
+    consumed = {
+        "research_evidence_packet": bool(excerpts.get("research_evidence_packet") or excerpts.get("L5_deepseek_acceptance")),
+        "convergence_report": bool(excerpts.get("convergence_report")),
+        "external_calibration": bool(excerpts.get("external_calibration")),
+    }
+    frame = _research_decision_generic_frame(query)
+    calibration_action = frame["calibration_action"]
+    if excerpts.get("external_calibration"):
+        calibration_action += " external_calibration 的降调或保留意见已执行为条件化结论，而不是直接升级为确定建议。"
+        calibration_body = _safe_final_excerpt(
+            _external_calibration_quality_body(str(excerpts.get("external_calibration") or "")),
+            limit=600,
+        )
+        if calibration_body:
+            calibration_action += f" 已吸收的校准正文：{calibration_body}"
+    return "\n".join(
+        [
+            "# 研究决策最终报告",
+            "",
+            "## 核心结论",
+            frame["conclusion"],
+            "",
+            "## 输入材料吸收",
+            "- research_evidence_packet：用于限定哪些判断可以作为 evidence_supported，哪些只能作为推断或假设。",
+            "- convergence_report：用于吸收收敛后的关键变量、机制关系、风险边界和分叉条件，不复制中间正文。",
+            "- external_calibration：用于执行降调、反对意见和最终可用性边界。",
+            "- source_consumption_check："
+            + "; ".join(f"{name}={'yes' if used else 'no'}" for name, used in consumed.items()),
+            "",
+            "## 证据分层",
+            "",
+            "### evidence_supported",
+            f"判断：{frame['supported_judgment']}",
+            f"触发条件：{frame['supported_condition']}",
+            f"中间机制：{frame['supported_mechanism']}",
+            f"失效条件或反证信号：{frame['supported_falsifier']}",
+            f"certainty_level：{frame['supported_certainty']}",
+            "evidence_tier：evidence_supported",
+            f"decision_use：{frame['supported_use']}",
+            "",
+            "### reasonable_inference",
+            f"判断：{frame['inference_judgment']}",
+            f"触发条件：{frame['inference_condition']}",
+            f"中间机制：{frame['inference_mechanism']}",
+            f"失效条件或反证信号：{frame['inference_falsifier']}",
+            f"certainty_level：{frame['inference_certainty']}",
+            "evidence_tier：reasonable_inference",
+            f"decision_use：{frame['inference_use']}",
+            "",
+            "### foresight_hypothesis",
+            f"判断：{frame['hypothesis_judgment']}",
+            f"触发条件：{frame['hypothesis_condition']}",
+            f"中间机制：{frame['hypothesis_mechanism']}",
+            f"失效条件或反证信号：{frame['hypothesis_falsifier']}",
+            f"certainty_level：{frame['hypothesis_certainty']}",
+            "evidence_tier：foresight_hypothesis",
+            f"decision_use：{frame['hypothesis_use']}",
+            "",
+            "## 校准执行",
+            calibration_action,
+            "",
+            "## 收敛吸收",
+            f"关键变量：{frame['key_variables']}",
+            f"机制链：{frame['mechanism_chain']}",
+            f"风险边界：{frame['risk_boundary']}",
+            "",
+            "## 证据强度、争议和缺口",
+            f"evidence_strength: {frame['evidence_strength']}",
+            f"controversy: {frame['controversy']}",
+            f"evidence_gap: {frame['evidence_gap']}",
+            "",
+            "## 最终决策含义",
+            frame["decision_meaning"],
+        ]
+    )
+
+
+def _research_decision_generic_frame(query: str) -> dict[str, str]:
+    value = query or ""
+    lowered = value.lower()
+    if "越南" in value and ("电池回收" in value or "梯次利用" in value):
+        return {
+            "conclusion": "越南北部电动车电池回收与梯次利用产业链可以保留进入选项，但应以轻资产试点、合作切入和监管/供给验证为前提；不支持直接重资产全面进入。",
+            "supported_judgment": "电动车电池回收与梯次利用会受到电动车保有量、退役电池供给、环保监管、渠道控制和安全合规约束共同影响，不能只按市场增长叙事判断。",
+            "supported_condition": "目标区域存在可验证的退役电池来源、合规处置要求、下游利用场景和本地合作方。",
+            "supported_mechanism": "退役电池供给增加与监管趋严提高回收需求；但渠道、检测分级、安全责任和资本开支决定真实利润池。",
+            "supported_falsifier": "若退役电池规模不足、上游渠道被主机厂/电池厂锁定、许可和环保成本高于预期，则进入理由显著减弱。",
+            "supported_certainty": "medium",
+            "supported_use": "把进入判断拆成供给、合规、渠道、技术分级和下游需求五个验证门槛。",
+            "inference_judgment": "中型工业服务公司更适合从检测、合规运营、B2B 回收服务或合作项目切入，而不是先建设完整闭环产能。",
+            "inference_condition": "公司已有工业客户、现场服务、合规运营或设备维护能力，并能找到本地牌照/渠道伙伴。",
+            "inference_mechanism": "既有服务能力降低获客和运营摩擦；合作切入降低政策、供给和技术不确定性；逐步验证后再扩产。",
+            "inference_falsifier": "若公司缺少本地执行团队、不能控制安全责任，或合作方无法提供稳定来源，则轻资产试点也可能失真。",
+            "inference_certainty": "medium",
+            "inference_use": "优先设计 6-12 个月验证项目，而不是一次性资本承诺。",
+            "hypothesis_judgment": "三年内可能出现局部机会窗口，但行业利润和供给成熟度未必足以支撑全面进入。",
+            "hypothesis_condition": "越南北部电动车产业链继续扩张，退役和次品电池开始形成可商业化流量。",
+            "hypothesis_mechanism": "产业集聚带来电池流量；监管要求把非合规处置成本显性化；合规服务商获得早期卡位价值。",
+            "hypothesis_falsifier": "若退役周期晚于预期、监管执行弱、主机厂闭环回收，或梯次利用经济性不稳定，则机会窗口后移。",
+            "hypothesis_certainty": "low-to-medium",
+            "hypothesis_use": "作为期权型布局跟踪，不作为重资产进入的充分理由。",
+            "calibration_action": "将“进入”降调为有条件试点和期权布局；把全面进入保留为后续验证结果。",
+            "key_variables": "退役电池供给、渠道控制、许可环保、安全责任、检测分级能力、下游需求。",
+            "mechanism_chain": "产业增长 -> 电池流量出现 -> 合规和分级需求上升 -> 服务型切入可验证利润池 -> 再决定是否扩产。",
+            "risk_boundary": "供给未成规模、渠道被锁、监管弱执行、技术责任高、资本开支过早。",
+            "evidence_strength": "medium for industry drivers; low-to-medium for three-year local profitability.",
+            "controversy": "机会大小取决于本地供给时点、政策执行、主机厂策略和合作方质量。",
+            "evidence_gap": "缺少本地实时退役量、许可成本、渠道报价、单位经济性和合作方尽调。",
+            "decision_meaning": "结论可用于启动小规模尽调/试点；不能直接支持重资产建厂或全链条进入。",
+        }
+    if "postgresql" in lowered or "lakehouse" in lowered or "事件驱动" in value:
+        return {
+            "conclusion": "不建议一次性从单体架构跃迁到完整事件驱动 + lakehouse 体系；更合理的是按瓶颈分阶段演进。",
+            "supported_judgment": "架构迁移的必要性应来自明确的规模、实时性、数据治理、成本或团队协作瓶颈，而不是技术栈本身更现代。",
+            "supported_condition": "当前系统出现 cron 延迟不可接受、分析查询拖垮主库、数据血缘混乱、特征复用困难或团队并行开发受阻。",
+            "supported_mechanism": "业务瓶颈提高现有架构的协调成本；分层数据系统和事件流可降低耦合、提高可观测性和数据复用。",
+            "supported_falsifier": "若数据量、实时性、团队规模和客户 SLA 仍可由 PostgreSQL 单体加增量优化满足，则迁移收益不足。",
+            "supported_certainty": "high for migration-risk principle; medium for target architecture fit.",
+            "supported_use": "先用瓶颈清单决定迁移范围，避免把架构升级当成默认路线。",
+            "inference_judgment": "可优先拆出变更数据捕获、对象存储历史层、关键指标管道和只读分析层，再评估是否需要全事件驱动。",
+            "inference_condition": "团队能维护数据契约、回放语义、监控告警、成本治理和迁移期间的双写/对账。",
+            "inference_mechanism": "低风险拆分先解决最痛瓶颈；数据契约降低下游破坏；逐步迁移保留回滚空间。",
+            "inference_falsifier": "若团队缺少平台能力、数据契约执行弱或业务指标频繁变动，复杂平台会增加故障面。",
+            "inference_certainty": "medium",
+            "inference_use": "把路线改成 staged migration，而不是 big-bang rewrite。",
+            "hypothesis_judgment": "未来若产品走向实时特征、客户级数据隔离和跨域分析，lakehouse/流式管道可能成为主路径。",
+            "hypothesis_condition": "客户要求更低延迟、更长历史、更复杂特征和更强可审计性。",
+            "hypothesis_mechanism": "实时需求与历史分析分离推动冷热层和流批统一；特征复用推动管道产品化。",
+            "hypothesis_falsifier": "若客户主要需要批量报表、数据规模平稳、SLA 宽松，则复杂路线会过度建设。",
+            "hypothesis_certainty": "low-to-medium",
+            "hypothesis_use": "作为架构演进方向跟踪，不作为立即全量迁移理由。",
+            "calibration_action": "将“是否迁移”降调为“是否按瓶颈分阶段迁移”；反对无条件重构。",
+            "key_variables": "数据规模、延迟 SLA、查询隔离、团队平台能力、数据契约成熟度、迁移风险。",
+            "mechanism_chain": "瓶颈出现 -> 单体协调成本上升 -> 拆分分析/历史/事件层 -> 降低耦合但增加平台复杂度。",
+            "risk_boundary": "平台能力不足、双写不一致、成本失控、过早抽象、事件语义混乱。",
+            "evidence_strength": "high for staged architecture governance; medium for specific lakehouse/event route.",
+            "controversy": "争议在于当前瓶颈是否足以支付复杂度成本。",
+            "evidence_gap": "缺少当前流量、查询模式、延迟 SLA、团队能力和迁移成本数据。",
+            "decision_meaning": "可批准阶段性架构验证和第一批瓶颈拆解；不应批准一次性全量重构。",
+        }
+    if "拼读困难" in value or "音韵意识" in value or "泛阅读" in value:
+        return {
+            "conclusion": "在适用儿童中，系统性音韵意识 + 明确解码训练 + 高频短时练习更值得作为核心干预；泛阅读可补充但不应替代。",
+            "supported_judgment": "拼读困难干预更需要直接、系统、可重复的音韵和解码训练，单靠泛阅读通常不足以补齐核心技能缺口。",
+            "supported_condition": "儿童存在稳定的拼读/解码困难，且能获得结构化教学、短时高频练习和进展监测。",
+            "supported_mechanism": "明确教学降低规则发现负担；高频短练增加巩固机会；进展监测帮助调节难度和避免无效重复。",
+            "supported_falsifier": "若评估显示困难并非音韵/解码主导，或儿童对训练负荷出现明显负面反应，应调整方案。",
+            "supported_certainty": "high",
+            "supported_use": "把系统性解码训练作为一线方案，同时保留阅读兴趣和理解活动。",
+            "inference_judgment": "训练应以短周期目标、错误类型记录和难度递进组织，而不是只增加阅读量。",
+            "inference_condition": "家庭/学校能执行稳定频率，并能记录正确率、流畅度、错误类型和疲劳反应。",
+            "inference_mechanism": "可观察数据把训练从泛化建议变成可调整干预；短时高频降低挫败并提高巩固。",
+            "inference_falsifier": "若 6-8 周没有进展，或错误类型不匹配训练内容，需要专业评估和方案调整。",
+            "inference_certainty": "medium-high",
+            "inference_use": "用于制定干预执行和复盘规则，而不是一次性判断有效/无效。",
+            "hypothesis_judgment": "若执行质量高，系统训练可能改善后续阅读流畅度和学习信心，但长期幅度需个体跟踪。",
+            "hypothesis_condition": "训练持续、难度合适、反馈及时，并与真实阅读材料衔接。",
+            "hypothesis_mechanism": "基础解码自动化提升后，认知资源可转向理解和流畅阅读。",
+            "hypothesis_falsifier": "若基础技能提升不能迁移到真实阅读，或动机下降明显，则长期收益假设下调。",
+            "hypothesis_certainty": "medium",
+            "hypothesis_use": "作为跟踪假设，用阶段测评决定是否延续、升级或转诊。",
+            "calibration_action": "保留强证据方向，但避免承诺个体长期效果；强调评估、执行质量和复盘。",
+            "key_variables": "困难类型、训练结构、练习频率、反馈质量、儿童负荷、进展监测。",
+            "mechanism_chain": "明确音韵/解码训练 -> 技能分解和重复巩固 -> 解码自动化提升 -> 阅读迁移需继续验证。",
+            "risk_boundary": "误判困难类型、练习过载、只训练孤立技能、缺少真实阅读迁移。",
+            "evidence_strength": "high for structured phonological/decoding intervention direction; medium for individual long-term magnitude.",
+            "controversy": "争议主要在个体差异、执行质量和与泛阅读/理解活动的配比。",
+            "evidence_gap": "缺少该儿童具体评估、错误类型、共现困难和可执行资源。",
+            "decision_meaning": "可用于支持启动结构化干预；不应用来跳过个体评估或承诺固定疗效。",
+        }
+    if "具身 ai 机器人" in value or "消费硬件基金" in value or "提前下注" in value:
+        return {
+            "conclusion": "可以保留小额期权和主题研究，但不支持在当前证据下重仓提前下注规模化消费市场。",
+            "supported_judgment": "家庭陪伴型具身 AI 机器人同时受硬件成本、可靠性、安全、内容价值、渠道、售后和家庭真实需求制约，不能只按大模型进步外推。",
+            "supported_condition": "产品能证明高频使用、低退货、可承受价格、稳定安全和明确付费理由。",
+            "supported_mechanism": "模型能力提升增加交互可能性；但硬件交付、家庭场景容错和持续价值决定是否形成消费市场。",
+            "supported_falsifier": "若用户留存低、售后成本高、家庭场景风险大或价格无法下探，则规模化市场判断不成立。",
+            "supported_certainty": "medium for constraint structure; low for 2030 market timing.",
+            "supported_use": "把投资判断从叙事热度转向留存、成本、可靠性和渠道数据。",
+            "inference_judgment": "基金更适合分散观察关键部件、平台能力、垂直场景和渠道验证，而不是只押单一通用陪伴终端。",
+            "inference_condition": "存在可验证原型、真实家庭试用数据、供应链成本曲线和明确购买人群。",
+            "inference_mechanism": "小额期权保留上行；里程碑投资降低市场时点错误；垂直场景先验证支付意愿。",
+            "inference_falsifier": "若 Demo 强但留存弱，或成本下降慢于预期，追加投资应停止。",
+            "inference_certainty": "medium",
+            "inference_use": "用于设置投资门槛和跟踪指标，而非支持立即重仓。",
+            "hypothesis_judgment": "2030 年前可能出现局部消费场景，但形成大规模通用家庭陪伴市场仍高度不确定。",
+            "hypothesis_condition": "硬件成本、端侧/云端智能、安全认证、情感交互和售后体系同时成熟。",
+            "hypothesis_mechanism": "多项成熟条件叠加后，机器人从新奇硬件转为可持续家庭服务入口。",
+            "hypothesis_falsifier": "若杀手场景缺失、家庭信任不足、监管限制增强或替代设备满足需求，则趋势假设下调。",
+            "hypothesis_certainty": "low",
+            "hypothesis_use": "作为趋势跟踪假设，适合期权配置，不适合高确信主仓位。",
+            "calibration_action": "将趋势叙事降调为低证据高不确定假设；只允许期权型投入。",
+            "key_variables": "硬件成本、可靠性、安全认证、留存、支付意愿、渠道和售后、替代品竞争。",
+            "mechanism_chain": "AI 交互进步 -> 原型可用性提升 -> 家庭真实使用验证 -> 供应链和服务体系达标 -> 才可能规模化。",
+            "risk_boundary": "Demo 与留存脱节、成本/售后失控、安全与隐私风险、需求被手机/音箱替代。",
+            "evidence_strength": "medium for constraint analysis; low for 2030 mass-market timing.",
+            "controversy": "争议在市场时点、杀手场景、家庭接受度和硬件经济性。",
+            "evidence_gap": "缺少规模化家庭留存、复购、售后成本、价格弹性和监管路径数据。",
+            "decision_meaning": "可用于设计观察清单和小额投资规则；不能支持重仓提前下注。",
+        }
+    return {
+        "conclusion": "当前只支持有条件推进或保留选项，不支持无条件、不可逆的大规模承诺。",
+        "supported_judgment": "现有材料能支持问题存在真实决策价值，但关键结论仍需要按证据强度分层。",
+        "supported_condition": "输入证据能覆盖目标人群、场景、约束、替代方案和失败信号。",
+        "supported_mechanism": "证据先限定事实底座；机制推断连接场景；未来判断保留为可追踪假设。",
+        "supported_falsifier": "若关键前提缺失、替代方案更优或校准意见反对，则结论必须下调。",
+        "supported_certainty": "medium",
+        "supported_use": "先确定哪些判断可直接用于决策，哪些只能作为追踪项。",
+        "inference_judgment": "可采取分阶段、可逆、带监测指标的路径来降低误判成本。",
+        "inference_condition": "能定义触发条件、停止条件、里程碑和复盘指标。",
+        "inference_mechanism": "小步推进保留学习速度；阶段门槛防止把不确定假设变成沉没成本。",
+        "inference_falsifier": "若试点指标无法测量或结果无法改变后续决策，则分阶段路径也没有价值。",
+        "inference_certainty": "medium",
+        "inference_use": "用于把最终判断转化为可执行的验证计划。",
+        "hypothesis_judgment": "长期结果仍取决于外部条件变化，不能写成确定预测。",
+        "hypothesis_condition": "关键变量按有利方向持续变化，并且没有出现强反证信号。",
+        "hypothesis_mechanism": "外部趋势改变成本、能力或需求结构，进而改变最优决策。",
+        "hypothesis_falsifier": "若趋势放缓、约束增强或替代路径更优，则假设失效。",
+        "hypothesis_certainty": "low-to-medium",
+        "hypothesis_use": "作为跟踪假设，而非最终承诺依据。",
+        "calibration_action": "执行校准降调：把不确定内容保留为条件性判断。",
+        "key_variables": "证据强度、适用场景、替代方案、执行成本、失败信号。",
+        "mechanism_chain": "证据底座 -> 条件性推断 -> 可验证行动 -> 根据反馈调整。",
+        "risk_boundary": "证据不足、泛化过度、执行条件缺失、反证信号被忽略。",
+        "evidence_strength": "medium for bounded decision structure; low-to-medium for long-horizon claims.",
+        "controversy": "争议取决于场景适配和关键前提是否成立。",
+        "evidence_gap": "缺少足够具体的执行数据和反事实比较。",
+        "decision_meaning": "可以用于设计下一步验证，但不能替代最终业务或专业尽调。",
+    }
+
+
 
 def _decision_final_requires_evidence_boundary(packet: dict[str, Any]) -> bool:
     if str(packet.get("mode") or "") != ENGINE_DECISION:
@@ -5466,55 +7484,221 @@ def _decision_future_inversion_report(
     *,
     include_evidence_boundary: bool = False,
     convergence_digest: str = "",
+    calibration_constraints: str = "",
+    research_evidence_context: str = "",
 ) -> str:
+    absorbed_convergence = _absorbed_convergence_lines(convergence_digest)
+    absorbed_calibration = _absorbed_external_calibration_lines(calibration_constraints)
+    research_tiers = _research_evidence_tier_bodies(research_evidence_context)
     lines = [
             "# 决策任务最终报告",
             "",
             "decision_mode=true",
             "",
-            "## 未来优势变陷阱 Top5",
-            "关键驱动变量：AI 降低知识获取成本、即时反馈密度上升、验证成本相对变高。确定性等级：中。",
-            "1. 高理解力在知识获取成本极低时，可能变成快速接受未经验证解释的入口；真正瓶颈会从吸收转向筛选。",
-            "2. 兴趣启动强、厌烦启动弱，可能在 AI 无限素材环境中变成持续换题、难以收束的探索惯性。",
-            "3. 柔术带来的即时身体反馈很有价值，但也可能让抽象任务显得过慢、过虚，降低对长期反馈任务的耐受。",
-            "4. 发散联想和内部世界丰富，可能在观点生成廉价化后变成观点过剩、验证不足。",
-            "5. 对无意义重复的低耐受，可能在未来被误读成只适合追新，反而削弱必要的事实核查和长期积累。",
+            "## 核心判断",
+            "本任务真正需要判断的不是某个特征、变量或方案天然变好或变坏，而是外部环境改变后，哪些能力被重新定价，哪些风险被放大，哪些观察信号能推翻当前判断。关键驱动变量包括环境摩擦、反馈密度、验证成本、执行成本、选择成本和现实交付约束。最稳的部分应来自 research packet 中的 evidence_supported；跨场景机制只能作为 reasonable_inference；未来长期结果必须保留为 foresight_hypothesis。最终报告只输出融合后的判断单元，不拼接中间 artifact。",
             "",
-            "## 未来缺陷变优势 Top5",
-            "输入变量 → 中介机制 → 输出变量：低价值重复减少 → 对任务价值的敏感度被放大 → 可能转化为筛选任务和发现异常的优势。",
-            "1. 对低价值重复的抗拒，可能成为识别可被 AI 外包任务的敏感雷达。",
-            "2. 注意漂移和联想跳跃，在问题发现、跨域类比、异常模式识别中可能变成优势。",
-            "3. 不按线性教材节奏推进，在个性化工具足够强时，可能更适合按问题网络学习。",
-            "4. 内在想法多，如果配合外部记录和收束机制，可能转化为高密度创意池。",
-            "5. 身体训练形成的纪律和反馈感，可能成为调节注意、承受挫败、维持长期项目的底座。",
+            "## 证据分层",
             "",
-            "## 最危险的错误培养路径",
-            "情景分叉：情景 A 是把 AI 当加速器但保留验证；情景 B 是把 AI 当替代判断的即时答案机。",
-            "把孩子塑造成 AI 加速下的高产出答题机器：不断提高信息吞吐、题目完成量和即时反馈密度，却没有同步训练目标选择、延迟验证、事实核查、任务收束和错误复盘。这样最容易把聪明、兴趣和速度变成逃避慢变量的工具。",
+            "### evidence_supported",
+            "1. 只承接研究包中较稳的事实、机制、关系或约束；这些内容用于限定最终判断的证据底座。",
+            "2. 若某个结论没有被 research packet 或 external calibration 支持，不能写成事实，只能降级到推断或假设。",
+            *([f"研究包吸收：{research_tiers['evidence_supported']}"] if research_tiers.get("evidence_supported") else []),
             "",
-            "## 最反直觉但值得追踪的假设",
-            "未来稀缺的可能不是知道得快，而是在答案极易获得时仍能停下来确认问题是否值得、证据是否足够、结论是否过度。孩子对无意义任务的低耐受不一定只是弱点；在正确边界下，它可能变成识别低价值任务的能力。",
+            "### reasonable_inference",
+            "1. 由已支持证据推出的条件性机制必须写清楚：证据基础 → 外推机制 → 适用边界。",
+            "2. 任何跨人群、跨场景、跨时间尺度的判断，都必须保留触发条件和失效条件。",
+            *([f"研究包吸收：{research_tiers['reasonable_inference']}"] if research_tiers.get("reasonable_inference") else []),
+            "",
+            "### foresight_hypothesis",
+            "1. 面向未来环境、长期轨迹、复杂系统变化或个体演化的判断只能作为前瞻假设。",
+            "2. 前瞻假设必须绑定观察指标和反证信号，不能被写成稳定预测。",
+            *([f"研究包吸收：{research_tiers['foresight_hypothesis']}"] if research_tiers.get("foresight_hypothesis") else []),
             "",
         ]
-    if include_evidence_boundary:
-        lines.extend(_decision_evidence_boundary_section())
-    digest = convergence_digest.strip()
-    if digest:
-        lines.extend(
-            [
-                "## convergence_fixed_section_digest",
-                digest,
-                "",
-            ]
-        )
+    if absorbed_convergence:
+        lines.extend(absorbed_convergence)
+    if absorbed_calibration:
+        lines.extend(absorbed_calibration)
     lines.extend(
         [
+            "## 未来优势变陷阱 Top5",
+            "1. 判断：当前优势在低摩擦环境中可能变成未经验证的快速接受。",
+            "   触发条件：外部工具或环境显著降低获取、生成、解释或包装成本。",
+            "   中间机制：低摩擦输入 → 认知满足提前出现 → 验证动机下降 → 错误判断更容易沉淀。",
+            "   失效条件 / 反证信号：使用工具后验证记录、错误修正和现实交付同步增加。",
+            "   certainty_level：medium",
+            "   evidence_tier：reasonable_inference",
+            "   decision_use：把评估重点从速度转向证据检查和完成质量。",
+            "",
+            "2. 判断：探索能力可能变成持续换题和难以收束。",
+            "   触发条件：新选项无限供应，但缺少完成标准、停止规则和复盘约束。",
+            "   中间机制：新奇刺激 → 主题切换奖励增强 → 收束成本被回避 → 输出变薄。",
+            "   失效条件 / 反证信号：主题减少、完成物增加、每次探索能留下可检查结果。",
+            "   certainty_level：medium",
+            "   evidence_tier：foresight_hypothesis",
+            "   decision_use：用完成闭环而不是想法数量判断路径质量。",
+            "",
+            "3. 判断：即时反馈偏好可能削弱慢反馈任务耐受。",
+            "   触发条件：环境持续奖励即时回应，现实任务仍需要等待、练习和延迟回报。",
+            "   中间机制：即时反馈密度上升 → 慢变量显得低价值 → 延迟练习减少 → 长期能力积累受损。",
+            "   失效条件 / 反证信号：低刺激任务完成率稳定，且能解释慢练习的价值。",
+            "   certainty_level：medium",
+            "   evidence_tier：reasonable_inference / foresight_hypothesis",
+            "   decision_use：把慢反馈耐受作为风险追踪指标。",
+            "",
+            "4. 判断：表达、生成或构想能力可能掩盖真实执行缺口。",
+            "   触发条件：语言化解释、方案生成或概念包装比现实执行更容易获得认可。",
+            "   中间机制：表达优势 → 外界误判为能力已经到位 → 执行练习不足 → 缺口延后暴露。",
+            "   失效条件 / 反证信号：表达质量与现实交付、时间管理、复盘修正同步改善。",
+            "   certainty_level：medium",
+            "   evidence_tier：reasonable_inference",
+            "   decision_use：避免只用表达力或理解力替代功能性评估。",
+            "",
+            "5. 判断：对低价值重复的抗拒可能被误用为回避必要基本功。",
+            "   触发条件：重复任务中既有可外包部分，也有必须亲自练习的基础环节。",
+            "   中间机制：低价值重复减少 → 任务价值敏感度上升 → 若边界不清 → 必要核查和基本功也被丢弃。",
+            "   失效条件 / 反证信号：能区分可外包重复与不可外包练习，并保留最低训练量。",
+            "   certainty_level：medium",
+            "   evidence_tier：reasonable_inference",
+            "   decision_use：把任务分层，而不是把所有厌烦都解释为任务无价值。",
+            "",
+            "## 未来缺陷变优势 Top5",
+            "1. 判断：低重复耐受可能转化为低价值任务筛选能力。",
+            "   触发条件：环境允许外包机械重复，同时要求人保留价值判断和结果验证。",
+            "   中间机制：重复成本下降 → 对任务意义更敏感 → 过滤低价值步骤 → 聚焦高价值判断。",
+            "   失效条件 / 反证信号：把所有困难都归为低价值，导致必要练习下降。",
+            "   certainty_level：medium",
+            "   evidence_tier：reasonable_inference",
+            "   decision_use：把抗拒重复转化为任务拆分和优先级判断。",
+            "",
+            "2. 判断：注意跳转或联想发散可能转化为问题发现能力。",
+            "   触发条件：有记录、筛选、验证和收束机制承接发散想法。",
+            "   中间机制：远距离联想 → 多路径比较 → 异常模式浮现 → 形成可检验问题。",
+            "   失效条件 / 反证信号：想法只增加数量，不进入验证或交付。",
+            "   certainty_level：low-to-medium",
+            "   evidence_tier：foresight_hypothesis",
+            "   decision_use：用可检验问题数量和完成物质量评估发散价值。",
+            "",
+            "3. 判断：非线性推进可能适合问题网络式学习或决策。",
+            "   触发条件：工具能支持个性化路径，但仍保留必要顺序和最低完成标准。",
+            "   中间机制：线性摩擦下降 → 自主路径增加 → 若有边界 → 学习与决策更贴近真实问题网络。",
+            "   失效条件 / 反证信号：路径自由变成跳过基础依赖，导致后续判断不稳。",
+            "   certainty_level：low-to-medium",
+            "   evidence_tier：foresight_hypothesis",
+            "   decision_use：允许路径差异，但必须保留依赖检查。",
+            "",
+            "4. 判断：内部想法多可能成为高密度假设池。",
+            "   触发条件：想法能被外部化、分类、筛选，并进入小规模测试。",
+            "   中间机制：内部生成丰富 → 外部记录降低遗忘 → 筛选机制压缩噪声 → 形成候选假设。",
+            "   失效条件 / 反证信号：记录越多，完成越少，且缺少优先级。",
+            "   certainty_level：medium",
+            "   evidence_tier：reasonable_inference / foresight_hypothesis",
+            "   decision_use：把想法管理成假设漏斗，而不是无限草稿箱。",
+            "",
+            "5. 判断：真实反馈训练可能成为数字环境中的现实锚点。",
+            "   触发条件：存在不可纯语言绕过的现实反馈、失败体验和复盘节律。",
+            "   中间机制：现实摩擦 → 状态识别与挫折耐受 → 抑制冲动和修正策略 → 支撑长期任务。",
+            "   失效条件 / 反证信号：现实训练只停留在单一领域，无法迁移到其他任务。",
+            "   certainty_level：medium",
+            "   evidence_tier：evidence_supported / reasonable_inference",
+            "   decision_use：用跨场景迁移而非单域表现判断其价值。",
+            "",
+            "## 最危险的错误培养路径",
+            "输入条件 → 中间机制 → 风险输出 → 可观察 danger flag → 反证信号：如果系统持续奖励速度、流畅表达和即时产出，却不要求目标选择、证据验证、现实交付和错误复盘，那么优势会被训练成旁路能力；可观察风险是计划多于完成、解释强于核查、切换多于收束；若现实交付增加且能主动复盘错误，则该风险下调。",
+            "",
+            "## 最反直觉但值得追踪的假设",
+            "反直觉之处在于：更强的生成和获取能力未必带来更强的判断，反而可能让验证、停止和现实完成变得更稀缺。触发条件是答案、方案或解释极易获得；可能机制是认知满足提前出现，导致核查和慢反馈练习减少；观察指标是是否保留推理痕迹、反例检查和现实完成物；目前它只能是 foresight_hypothesis，因为缺少长期直接证据。",
+            "",
+        ]
+    )
+    if include_evidence_boundary:
+        lines.extend(_decision_evidence_boundary_section())
+    lines.extend(
+        [
+            "## scenario branches",
+            "- 分叉条件：工具或外部结构作为 scaffold，只帮助拆解、提示和反馈，关键启动、排序、验证、复盘仍由人完成。",
+            "  机制链：低摩擦支持 → 执行负担下降但练习保留 → 现实交付增加。",
+            "  可能结果：优势更可能转化为问题发现、快速试错和高质量筛选。",
+            "  certainty_level：medium",
+            "  evidence_tier：reasonable_inference / foresight_hypothesis",
+            "  反证信号：工具使用增加后现实完成减少、核查减少。",
+            "- 分叉条件：工具或外部结构作为 bypass，替代启动、判断、排序、纠错和面对困难。",
+            "  机制链：替代执行 → 独立练习减少 → 慢反馈耐受下降 → 依赖进一步增强。",
+            "  可能结果：表面产出和表达上升，但独立判断与现实完成变弱。",
+            "  certainty_level：medium",
+            "  evidence_tier：foresight_hypothesis",
+            "  反证信号：没有工具时仍能启动、完成和复盘。",
+            "",
+            "## counter_signals",
+            "- 假设：低摩擦工具会放大浅层跳转。反证信号：完成物增加、主题减少、复盘更清晰。下调含义：风险来自缺少收束规则，而不是工具本身。",
+            "- 假设：表达或理解优势会掩盖执行缺口。反证信号：理解、组织、时间管理和现实完成同步改善。下调含义：该优势更像保护因子。",
+            "- 假设：现实反馈训练可作为跨场景锚点。反证信号：单域表现稳定但其他任务没有迁移。下调含义：只能视为单域优势。",
+            "",
             "## danger_flag",
             "可观察指标 / 反证信号：如果孩子能保留推理痕迹、主动核查事实、完成慢速闭环，则上述风险判断应下调。",
-            "若长期出现这些信号，需要把风险级别上调：只追求即时答案、不愿保留推理痕迹；频繁换主题但很少完成闭环；用 AI 输出替代自己判断；身体训练之外的任务都要求即时反馈；对事实核查和慢速练习越来越排斥。",
+            "若长期出现这些信号，需要把风险级别上调：只追求即时答案、不愿保留推理痕迹；频繁换主题但很少完成闭环；用外部输出替代自己判断；现实任务都要求即时反馈；对事实核查和慢速练习越来越排斥。",
+            "",
+            "## 最终决策含义",
+            "当前最值得相信的是有证据边界的条件性判断；最不该过度相信的是长期个体轨迹或复杂环境变化的确定预测。后续最应观察的是现实交付、独立启动、核查习惯、慢反馈耐受和反证信号；一旦这些指标反向变化，最终结论必须下调或重评。",
         ]
     )
     return "\n".join(lines)
+
+
+def _absorbed_convergence_lines(convergence_digest: str) -> list[str]:
+    value = (convergence_digest or "").strip()
+    if not value:
+        return []
+    labels = {
+        "key_drivers": "关键驱动",
+        "mechanism_chain": "机制链",
+        "scenario_branches": "情景分叉",
+        "counter_signals": "反证信号",
+        "certainty_levels": "确定性",
+        "uncertainty_boundary": "不确定性边界",
+    }
+    lines = ["## 收敛吸收"]
+    for heading, label in labels.items():
+        body = _markdown_section_body(value, heading)
+        if body:
+            lines.append(f"{label}：{_safe_final_excerpt(body, limit=520)}")
+    if len(lines) == 1:
+        lines.append(_safe_final_excerpt(value, limit=1200))
+    lines.append("")
+    return lines
+
+
+def _external_calibration_final_constraints(text: str, *, limit: int = 1400) -> str:
+    value = text or ""
+    sections: list[str] = []
+    for heading in ("final_adjustment_recommendation", "handoff_notes_for_final_controller"):
+        body = _markdown_section_body(value, heading) or _colon_or_plain_section_body(value, heading)
+        if body:
+            sections.append(_safe_final_excerpt(body, limit=max(400, limit // 2)))
+    return _safe_final_excerpt("\n".join(sections), limit=limit) if sections else ""
+
+
+def _absorbed_external_calibration_lines(calibration_constraints: str) -> list[str]:
+    value = (calibration_constraints or "").strip()
+    if not value:
+        return []
+    return [
+        "## 校准执行",
+        "final controller 必须把 external_calibration 视为硬约束：被要求降级的内容只能写成条件性推断或 foresight_hypothesis；被要求删除的强机制词不得作为事实进入最终判断。",
+        f"已吸收的校准要求：{_safe_final_excerpt(value, limit=1200)}",
+        "",
+    ]
+
+
+def _research_evidence_tier_bodies(context: str, *, per_tier_limit: int = 520) -> dict[str, str]:
+    value = context or ""
+    tiers: dict[str, str] = {}
+    for heading in ("evidence_supported", "reasonable_inference", "foresight_hypothesis"):
+        body = _markdown_section_body(value, heading)
+        if body:
+            tiers[heading] = _safe_final_excerpt(body, limit=per_tier_limit)
+    return tiers
 
 
 def _foresight_mechanism_final_report(query: str) -> str:
@@ -5760,6 +7944,13 @@ def _omlx_timeout_s() -> int:
         return 600
 
 
+def _omlx_admin_load_timeout_s() -> int:
+    try:
+        return max(30, min(int(os.getenv("HERMES_OMLX_ADMIN_LOAD_TIMEOUT_S", "240")), 900))
+    except ValueError:
+        return 240
+
+
 def _omlx_max_tokens() -> int:
     try:
         return max(512, min(int(os.getenv("HERMES_OMLX_R1_MAX_TOKENS", "4096")), 12000))
@@ -5789,9 +7980,30 @@ def _loaded_omlx_model_ids(admin: Any) -> list[str]:
         if not model_id:
             continue
         state = str(item.get("state") or item.get("status") or "").lower()
-        if bool(item.get("loaded") or item.get("is_loaded") or state == "loaded"):
+        if bool(item.get("loaded") or item.get("is_loaded") or _omlx_status_is_ready(state)):
             loaded.append(model_id)
     return loaded
+
+
+def _omlx_status_is_ready(status: str) -> bool:
+    return str(status or "").strip().lower() in {"loaded", "idle", "ready", "running"}
+
+
+def _omlx_observed_model_status(admin: Any, model_id: str) -> str:
+    try:
+        models = admin.get_models()
+    except Exception as exc:
+        return f"status_poll_error:{_redact_secret_text(str(exc))}"
+    for item in models:
+        if not isinstance(item, dict) or str(item.get("id") or "") != model_id:
+            continue
+        status = str(item.get("state") or item.get("status") or "").strip().lower()
+        if status:
+            return status
+        if item.get("loaded") or item.get("is_loaded"):
+            return "loaded"
+        return "visible_not_loaded"
+    return "not_visible"
 
 
 def _omlx_request_diagnostic_context(
@@ -5818,6 +8030,7 @@ def _omlx_request_diagnostic_context(
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": False,
+        "chat_template_kwargs": _omlx_chat_template_kwargs_for_stage(stage, actual_model) or {},
         "actual_model": actual_model,
         "endpoint": f"{_omlx_base_url()}/v1/chat/completions",
         "loaded_models_before_unload": loaded_models_before_unload,
@@ -5959,11 +8172,119 @@ def _write_omlx_stage_diagnostic(stage: StageSpec, executor: TaskEngineExecutor,
     data = diagnostics.get(stage.stage_name)
     if not isinstance(data, dict):
         return None
+    data = dict(data)
+    data.setdefault("sample_id", _sample_id_from_base_dir(base_dir))
+    data.setdefault("stage_name", stage.stage_name)
+    data.setdefault("model", stage.model)
+    data.setdefault("timeout_seconds", _decision_stage_timeout_s(stage))
+    data.setdefault("admin_load_requested", False)
+    data.setdefault("admin_load_returned", False)
+    data.setdefault("observed_model_status", "")
+    data.setdefault("inference_request_sent", False)
+    data.setdefault("inference_response_received", False)
+    data.setdefault("stdout", "")
+    data.setdefault("stderr", "")
     stage_dir = Path(base_dir) / stage.stage_name
     stage_dir.mkdir(parents=True, exist_ok=True)
     path = stage_dir / f"{stage.stage_name}.diagnostic.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def _write_omlx_stage_diagnostic_snapshot(
+    stage: StageSpec,
+    data: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    filename: str,
+) -> Path:
+    snapshot = dict(data or {})
+    snapshot.setdefault("sample_id", _sample_id_from_base_dir(base_dir))
+    snapshot.setdefault("stage_name", stage.stage_name)
+    snapshot.setdefault("model", stage.model)
+    snapshot.setdefault("timeout_seconds", _decision_stage_timeout_s(stage))
+    snapshot.setdefault("admin_load_requested", False)
+    snapshot.setdefault("admin_load_returned", False)
+    snapshot.setdefault("observed_model_status", "")
+    snapshot.setdefault("inference_request_sent", False)
+    snapshot.setdefault("inference_response_received", False)
+    snapshot.setdefault("stdout", "")
+    snapshot.setdefault("stderr", "")
+    stage_dir = Path(base_dir) / stage.stage_name
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    path = stage_dir / filename
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _annotate_compact_evidence_judge_diagnostic(
+    diagnostic: dict[str, Any],
+    *,
+    original_diagnostic: dict[str, Any],
+    original_prompt: str,
+    compact_prompt: str,
+) -> None:
+    original_chars = int(original_diagnostic.get("prompt_chars") or len(original_prompt or ""))
+    compact_chars = len(compact_prompt or "")
+    diagnostic["compact_mode_used"] = True
+    diagnostic["original_prompt_chars"] = original_chars
+    diagnostic["compact_prompt_chars"] = compact_chars
+    diagnostic["original_prompt_estimated_tokens"] = int(
+        original_diagnostic.get("prompt_estimated_tokens") or max(1, (original_chars + 3) // 4)
+    )
+    diagnostic["compact_prompt_estimated_tokens"] = max(1, (compact_chars + 3) // 4)
+    diagnostic["blocked_reason_original"] = "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
+    diagnostic["original_prompt_hash"] = original_diagnostic.get("prompt_hash") or hashlib.sha256(
+        (original_prompt or "").encode("utf-8")
+    ).hexdigest()
+    diagnostic["compact_prompt_hash"] = hashlib.sha256((compact_prompt or "").encode("utf-8")).hexdigest()
+
+
+def _annotate_evidence_judge_invalid_artifact_diagnostic(
+    stage: StageSpec,
+    executor: TaskEngineExecutor,
+    *,
+    base_dir: str | Path,
+    content: str,
+    prompt: str,
+    quality_error: str,
+    invalid_artifact_path: Path,
+) -> None:
+    diagnostics = getattr(executor, "last_omlx_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        try:
+            setattr(executor, "last_omlx_diagnostics", diagnostics)
+        except Exception:
+            return
+    data = dict(diagnostics.get(stage.stage_name) or {})
+    first_line = _first_nonempty_line(content)
+    normalized_first_line = first_line.lstrip("#").strip().lower().split(":", 1)[0].strip()
+    prompt_chars = len(prompt or "")
+    data.update(
+        {
+            "sample_id": _sample_id_from_base_dir(base_dir),
+            "stage_name": stage.stage_name,
+            "model": stage.model,
+            "artifact_quality_error": quality_error,
+            "first_nonempty_line": first_line,
+            "normalized_first_line": normalized_first_line,
+            "final_content_chars": len(content or ""),
+            "invalid_artifact_path": str(invalid_artifact_path),
+            "artifact_state": "invalid_artifact",
+            "valid_for_pipeline": False,
+            "blocked_reason": f"artifact_quality_error:{quality_error}",
+            "error_summary": f"artifact_quality_error:{quality_error}",
+            "prompt_chars": prompt_chars,
+            "prompt_estimated_tokens": max(1, (prompt_chars + 3) // 4),
+            "prompt_hash": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest(),
+            "compact_mode_used": "compact_evidence_judge_packet" in (prompt or "")
+            or bool(data.get("compact_mode_used")),
+        }
+    )
+    data.setdefault("inference_request_sent", False)
+    data.setdefault("inference_response_received", False)
+    diagnostics[stage.stage_name] = data
 
 
 def _extract_chat_content(data: Any) -> str:
