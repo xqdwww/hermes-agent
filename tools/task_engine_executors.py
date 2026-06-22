@@ -7048,20 +7048,34 @@ def _final_controller_packet_from_artifacts(
         path = Path(str(by_name[name].get("artifact_path") or "")).resolve()
         text = path.read_text(encoding="utf-8", errors="replace")
         excerpts[name] = _safe_final_excerpt(text)
-    trace = [
-        {
+    passthrough_keys = (
+        "created_in_current_run",
+        "legacy_contaminated",
+        "valid_for_pipeline",
+        "run_id",
+        "output_root",
+        "prompt_sha256",
+        "created_at",
+        "stage_index",
+        "stage_number",
+    )
+    trace = []
+    for record in stages:
+        trace_item = {
             "stage_name": record.get("stage_name"),
             "owner": record.get("owner"),
             "model": record.get("model"),
             "executor_model": record.get("executor_model"),
             "artifact_path": str(Path(str(record.get("artifact_path") or "")).resolve().relative_to(base)),
-            "valid_for_pipeline": record.get("valid_for_pipeline"),
         }
-        for record in stages
-    ]
+        for key in passthrough_keys:
+            if key in record:
+                trace_item[key] = record.get(key)
+        trace.append(trace_item)
     return {
         "mode": ENGINE_RESEARCH_DECISION,
         "query": query,
+        "base_dir": str(base),
         "output_quality_profile": _task_engine_profiles_from_query(query),
         "stage_trace": trace,
         "excerpts": excerpts,

@@ -41,6 +41,7 @@ from tools.task_engine_executors import (
     resolve_nemotron120b_omlx_model_alias,
     resolve_qwen72b_omlx_model_alias,
     resolve_r1_omlx_model_alias,
+    _final_controller_packet_from_artifacts,
     run_decision_final_smoke,
     run_agy_preflight,
     run_omlx_preflight,
@@ -7415,3 +7416,43 @@ def _make_run(tmp_path: Path, mode: str) -> dict:
             }
         )
     return {"stages": stages}
+
+
+def test_final_controller_packet_from_artifacts_preserves_current_run_metadata(tmp_path: Path):
+    run = _make_run(tmp_path, ENGINE_RESEARCH_DECISION)
+    stages = run["stages"][:-1]
+    for index, stage in enumerate(stages, start=1):
+        stage["run_id"] = "S01_20260622T071900Z_bf888737"
+        stage["output_root"] = str(tmp_path)
+        stage["prompt_sha256"] = "abc123"
+        stage["created_at"] = "2026-06-22T07:19:00Z"
+        stage["stage_index"] = index
+
+    packet = _final_controller_packet_from_artifacts(stages, query=ADHD_PROMPT, base_dir=tmp_path)
+
+    assert packet["base_dir"] == str(tmp_path.resolve())
+    first = packet["stage_trace"][0]
+    assert first["stage_name"] == "L1_gemini_search"
+    assert first["created_in_current_run"] is True
+    assert first["legacy_contaminated"] is False
+    assert first["valid_for_pipeline"] is True
+    assert first["run_id"] == "S01_20260622T071900Z_bf888737"
+    assert first["output_root"] == str(tmp_path)
+    assert first["prompt_sha256"] == "abc123"
+    assert first["created_at"] == "2026-06-22T07:19:00Z"
+    assert first["stage_index"] == 1
+    assert not Path(first["artifact_path"]).is_absolute()
+
+
+def test_final_controller_packet_from_artifacts_does_not_fabricate_metadata(tmp_path: Path):
+    run = _make_run(tmp_path, ENGINE_RESEARCH_DECISION)
+    stages = run["stages"][:-1]
+    del stages[0]["created_in_current_run"]
+    del stages[0]["legacy_contaminated"]
+
+    packet = _final_controller_packet_from_artifacts(stages, query=ADHD_PROMPT, base_dir=tmp_path)
+
+    first = packet["stage_trace"][0]
+    assert "created_in_current_run" not in first
+    assert "legacy_contaminated" not in first
+    assert first["valid_for_pipeline"] is True

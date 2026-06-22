@@ -4,7 +4,7 @@ from pathlib import Path
 
 from tools import task_engine_scoring_calibration as calibration
 from tools import task_engine_executors as executors
-from tools.task_engine_contracts import ENGINE_RESEARCH_DECISION
+from tools.task_engine_contracts import CANONICAL_STAGES, ENGINE_RESEARCH_DECISION
 
 
 VALID_FINAL_REPORT = "\n".join(
@@ -61,6 +61,30 @@ def _packet(query: str) -> dict:
             "external_calibration": "calibration verdict",
         },
     }
+
+
+def _packet_with_current_run_trace(tmp_path: Path) -> dict:
+    base_dir = tmp_path / "current_run"
+    base_dir.mkdir()
+    trace = []
+    for index, spec in enumerate(CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][:-1], start=1):
+        artifact = base_dir / spec.stage_name / "artifact.md"
+        artifact.parent.mkdir()
+        artifact.write_text("ok", encoding="utf-8")
+        trace.append(
+            {
+                "stage_name": spec.stage_name,
+                "artifact_path": str(artifact.relative_to(base_dir)),
+                "created_in_current_run": True,
+                "legacy_contaminated": False,
+                "valid_for_pipeline": True,
+                "stage_index": index,
+            }
+        )
+    packet = _packet("普通研究决策任务")
+    packet["base_dir"] = str(base_dir)
+    packet["stage_trace"] = trace
+    return packet
 
 
 def test_old_5_baseline_compatibility_uses_sample_independent_rules():
@@ -154,6 +178,58 @@ def test_stale_decision_negative_blocks_non_current_stage(tmp_path: Path):
 
     assert result.blocked
     assert result.reason == "stale_decision_not_current_run"
+
+
+def test_final_controller_current_run_stage_trace_passes(tmp_path: Path):
+    packet = _packet_with_current_run_trace(tmp_path)
+
+    result = calibration.assess_final_controller_packet(packet, VALID_FINAL_REPORT)
+
+    assert result.passed
+
+
+def test_final_controller_missing_current_run_metadata_still_blocks(tmp_path: Path):
+    packet = _packet_with_current_run_trace(tmp_path)
+    del packet["stage_trace"][0]["created_in_current_run"]
+
+    result = calibration.assess_final_controller_packet(packet, VALID_FINAL_REPORT)
+
+    assert result.blocked
+    assert result.reason == "stale_decision_not_current_run"
+    assert result.details == ("L1_gemini_search",)
+
+
+def test_final_controller_false_current_run_metadata_still_blocks(tmp_path: Path):
+    packet = _packet_with_current_run_trace(tmp_path)
+    packet["stage_trace"][0]["created_in_current_run"] = False
+
+    result = calibration.assess_final_controller_packet(packet, VALID_FINAL_REPORT)
+
+    assert result.blocked
+    assert result.reason == "stale_decision_not_current_run"
+
+
+def test_final_controller_legacy_contaminated_metadata_still_blocks(tmp_path: Path):
+    packet = _packet_with_current_run_trace(tmp_path)
+    packet["stage_trace"][0]["legacy_contaminated"] = True
+
+    result = calibration.assess_final_controller_packet(packet, VALID_FINAL_REPORT)
+
+    assert result.blocked
+    assert result.reason == "stale_decision_legacy_contaminated"
+
+
+def test_final_controller_artifact_outside_current_run_still_blocks(tmp_path: Path):
+    packet = _packet_with_current_run_trace(tmp_path)
+    outside = tmp_path / "other_run" / "artifact.md"
+    outside.parent.mkdir()
+    outside.write_text("old", encoding="utf-8")
+    packet["stage_trace"][0]["artifact_path"] = str(outside)
+
+    result = calibration.assess_final_controller_packet(packet, VALID_FINAL_REPORT)
+
+    assert result.blocked
+    assert result.reason == "stale_decision_path_outside_current_run"
 
 
 def test_legal_compliance_misbucket_regression_keeps_audit_finance_out_of_legal():
