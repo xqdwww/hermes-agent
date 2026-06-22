@@ -956,7 +956,7 @@ def run_research_l1_l2_smoke(
                     stage.model,
                 )
             elif stage.stage_name == "L2_ddgs_supplement":
-                content = executor.run_ddgs(stage, _ddgs_queries(query))
+                content = executor.run_ddgs(stage, _ddgs_queries_from_l1_candidates(query, stages, base_dir=base_dir))
             else:
                 raise RuntimeError(f"Unexpected smoke stage: {stage.stage_name}")
             artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
@@ -2408,6 +2408,29 @@ def run_decision_final_smoke(
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
             raise RuntimeError(f"evidence_judge: forbidden later-stage/final tokens: {', '.join(leaked)}; debug_artifact={debug_path}")
+        quality_error = _evidence_judge_artifact_quality_error(content)
+        if quality_error:
+            invalid_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
+            _annotate_evidence_judge_invalid_artifact_diagnostic(
+                stage,
+                executor,
+                base_dir=base_dir,
+                content=content,
+                prompt=_decision_stage_prompt(
+                    stage,
+                    stages,
+                    query=query,
+                    base_dir=base_dir,
+                    research_packet_path=research_packet_path,
+                ),
+                quality_error=quality_error,
+                invalid_artifact_path=invalid_path,
+            )
+            diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
+            raise RuntimeError(
+                f"evidence_judge: artifact_quality_error:{quality_error}; "
+                f"invalid_artifact={invalid_path}; diagnostic_artifact={diagnostic_path}"
+            )
         _append_real_stage(stages, stage, content, base_dir=base_dir, executor=executor, status="real")
 
         stage = specs[4]
@@ -3867,6 +3890,55 @@ def _ddgs_queries(query: str) -> list[str]:
     ]
 
 
+def _ddgs_queries_from_l1_candidates(query: str, stages: list[dict[str, Any]], *, base_dir: str | Path) -> list[str]:
+    by_name = {str(stage.get("stage_name") or ""): stage for stage in stages}
+    l1 = by_name.get("L1_gemini_search") or {}
+    artifact_path = str(l1.get("artifact_path") or "").strip()
+    if not artifact_path:
+        return _ddgs_queries(query)
+    try:
+        l1_text = Path(artifact_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _ddgs_queries(query)
+    payload = _load_jsonish_text(l1_text)
+    items = _list_from_jsonish(payload.get("source_candidates") if isinstance(payload, dict) else payload)
+    candidates: list[str] = []
+    for item in items:
+        raw = _l1_candidate_locator(item)
+        if not raw:
+            continue
+        value = raw.split(":", 1)[-1].strip(" '\"") if raw.lower().startswith(("query:", "search:")) else raw
+        if value.lower().startswith(("http://", "https://")):
+            value = " ".join(
+                part
+                for part in (
+                    str(item.get("title") or ""),
+                    str(item.get("why_relevant") or ""),
+                    str(item.get("coverage_axis") or ""),
+                )
+                if part
+            ).strip() or value
+        value = _compact_single_line(value, limit=180)
+        if value and value.lower() not in {seen.lower() for seen in candidates}:
+            candidates.append(value)
+        if len(candidates) >= 5:
+            break
+    return candidates or _ddgs_queries(query)
+
+
+def _l1_candidate_locator(item: dict[str, Any]) -> str:
+    return str(
+        item.get("candidate")
+        or item.get("query_or_url")
+        or item.get("source_or_query")
+        or item.get("source")
+        or item.get("target")
+        or item.get("url")
+        or item.get("title")
+        or ""
+    ).strip()
+
+
 def _ddgs_backend_list() -> list[str]:
     raw = os.getenv("HERMES_DDGS_BACKENDS", "duckduckgo,brave,yahoo")
     backends = [item.strip().lower() for item in raw.split(",") if item.strip()]
@@ -4686,6 +4758,9 @@ def _l2_5_item_text(item: dict[str, Any]) -> str:
         for key in (
             "candidate",
             "query_or_url",
+            "source_or_query",
+            "source",
+            "target",
             "title",
             "snippet",
             "why_relevant",
@@ -4707,7 +4782,7 @@ def _l2_5_source_rows(
 ) -> list[dict[str, str]]:
     candidates: list[tuple[dict[str, str], str]] = []
     for item in l1_items:
-        candidate = str(item.get("candidate") or item.get("query_or_url") or item.get("title") or "").strip()
+        candidate = _l1_candidate_locator(item)
         why = str(item.get("why_relevant") or item.get("snippet") or item.get("coverage_axis") or "").strip()
         if not candidate and not why:
             continue
@@ -5913,6 +5988,18 @@ def _supplementary_search_query_plan(query: str) -> list[dict[str, Any]]:
             "embodied AI home robot safety standards commercialization timeline",
             "consumer hardware venture investment home robots market uncertainty",
             "home companion robot cost curve manipulation Sim2Real adoption barriers",
+        ]
+    elif any(term in lowered for term in ("ai companion", "rabbit r1", "humane ai pin", "plaud", "wearable ai")) or any(
+        term in value for term in ("AI 伴侣", "AI伴侣", "硬件 AI", "硬件AI", "独立硬件", "智能伴侣")
+    ):
+        basis = "ai_hardware_companion_anchor"
+        allowed_expansions = ["Rabbit R1", "Humane AI Pin", "Plaud Note", "AI companion hardware", "wearable AI"]
+        candidates = [
+            "Rabbit R1 Humane AI Pin Plaud Note retention user satisfaction 2026",
+            "AI companion hardware market trend wearable AI devices 2026",
+            "consumer AI hardware funding Rabbit Humane Plaud Friend 2026",
+            "standalone AI device adoption churn return rates 2025 2026",
+            "AI wearable companion product market fit smartphone app competition",
         ]
     else:
         allowed_expansions = topic_terms[:5]

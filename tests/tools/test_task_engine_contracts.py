@@ -537,6 +537,47 @@ def test_l1_l2_smoke_can_complete_subset_but_full_pipeline_stays_incomplete(tmp_
     assert any("missing_stage:L2_5_codex_evidence_organizer" in error for error in result["full_pipeline_validation"]["errors"])
 
 
+def test_l2_ddgs_uses_l1_targeted_queries_instead_of_full_user_question(tmp_path: Path):
+    captured = {}
+
+    class FakeExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model):
+            return {
+                "source_candidates": [
+                    {
+                        "query_or_url": "AI hardware companion retention Rabbit Plaud 2026",
+                        "why_relevant": "Targets retention evidence for standalone AI hardware companions.",
+                    },
+                    {
+                        "source": "Search: consumer AI hardware funding trend 2026",
+                        "why_relevant": "Targets investment signal evidence.",
+                    },
+                    {
+                        "source_or_query": "Rabbit R1 Humane AI Pin customer return rates 2026",
+                        "why_relevant": "Targets customer satisfaction evidence.",
+                    },
+                    {
+                        "target": "Ray-Ban Meta smart glasses adoption case studies 2026",
+                        "why_relevant": "Targets wearable adoption evidence.",
+                    },
+                ]
+            }
+
+        def run_ddgs(self, stage, queries):
+            captured["queries"] = list(queries)
+            return [{"title": "fake ddgs", "url": "https://example.test/ddgs", "snippet": "ok"}]
+
+    question = "请用 RESEARCH 和 DECISION 管线评估：2026年前后小样本观察到的独立硬件 AI 伴侣设备使用趋势是否真的在上升？"
+    result = run_research_l1_l2_smoke(question, base_dir=tmp_path, executor=FakeExecutor())
+
+    assert result["status"] == "ok"
+    assert captured["queries"][0] == "AI hardware companion retention Rabbit Plaud 2026"
+    assert captured["queries"][1] == "consumer AI hardware funding trend 2026"
+    assert captured["queries"][2] == "Rabbit R1 Humane AI Pin customer return rates 2026"
+    assert captured["queries"][3] == "Ray-Ban Meta smart glasses adoption case studies 2026"
+    assert question[:120] not in captured["queries"]
+
+
 def test_l1_l2_smoke_fails_closed_on_first_real_adapter_error(tmp_path: Path):
     class FailingExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
@@ -2812,6 +2853,20 @@ def test_supplementary_queries_for_non_adhd_topics_do_not_include_parent_trainin
         assert "adhd parent training" not in joined
         assert "behavioral parent training" not in joined
         assert all(executors.detect_supplementary_search_topic_contamination(query, item)["supplementary_search_contaminated"] is False for item in queries)
+
+
+def test_supplementary_queries_cover_ai_hardware_companion_topic():
+    import tools.task_engine_executors as executors
+
+    query = "独立硬件 AI 伴侣设备趋势是否真的在上升，并判断是否值得作为产品投资方向？"
+    queries = executors._supplementary_search_queries(query)
+    joined = " ".join(queries).lower()
+
+    assert len(queries) >= 3
+    assert "rabbit r1" in joined
+    assert "humane ai pin" in joined
+    assert "ai companion hardware" in joined
+    assert "parent training" not in joined
 
 
 def test_l5_packet_preserves_l4_critical_l2_5_extraction_missing(tmp_path: Path):
@@ -6690,6 +6745,49 @@ def test_task_engine_runner_decision_final_action_does_not_use_research(tmp_path
     assert result["pipeline_status"] == PIPELINE_COMPLETE
     assert result["artifact_dir"] == str(tmp_path)
     assert len(calls) == 1
+
+
+def test_decision_final_evidence_judge_quality_failure_writes_invalid_artifact_and_diagnostic(tmp_path: Path):
+    class FakeExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
+            self.last_executor_models[stage.stage_name] = stage.model
+            return "decision intelligence report"
+
+        def run_ddgs(self, stage, queries):
+            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+
+        def run_omlx_model(self, stage, model, prompt):
+            if stage.stage_name == "structure_mapper":
+                self.last_executor_models[stage.stage_name] = QWEN72B_ACTUAL_MODEL_DEFAULT
+                return "problem_axes\nactor_map\ndecision_questions\nevidence_slots"
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            self.last_omlx_diagnostics[stage.stage_name] = {
+                "inference_request_sent": True,
+                "inference_response_received": True,
+                "compact_mode_used": False,
+            }
+            return "strength_by_claim\n- claim strength without required first section"
+
+    result = run_decision_final_smoke(
+        "这是一个决策任务。是否投资早期硬件项目？",
+        base_dir=tmp_path,
+        executor=FakeExecutor(),
+    )
+
+    invalid_path = tmp_path / "evidence_judge" / "evidence_judge.invalid.md"
+    diagnostic_path = tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "evidence_judge"
+    assert "artifact_quality_error:section_start_mismatch" in result["run"]["stages"][-1]["error"]
+    assert invalid_path.exists()
+    assert not (tmp_path / "evidence_judge" / "evidence_judge.md").exists()
+    assert diagnostic["artifact_quality_error"] == "section_start_mismatch"
+    assert diagnostic["first_nonempty_line"] == "strength_by_claim"
+    assert diagnostic["invalid_artifact_path"] == str(invalid_path)
+    assert diagnostic["inference_request_sent"] is True
+    assert diagnostic["inference_response_received"] is True
 
 
 def _write_valid_new_research_packet_run(root: Path) -> Path:
