@@ -19,6 +19,7 @@ from tools.task_engine_contracts import (
     NEMOTRON120B,
     PIPELINE_BLOCKED,
     PIPELINE_COMPLETE,
+    PIPELINE_INCOMPLETE,
     QWEN72B,
     R1_32B,
     StageSpec,
@@ -3188,6 +3189,50 @@ def test_l5_packet_preserves_l4_critical_l2_5_extraction_missing(tmp_path: Path)
     assert "evidence_packet_ready_for_decision: false" in rendered
 
 
+def test_l5_acceptance_does_not_treat_domain_rejecting_as_audit_rejection():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_EVIDENCE_GROUNDED],
+        "profile_acceptance_requirements": executors._research_profile_acceptance_requirements(
+            [executors.PROFILE_EVIDENCE_GROUNDED]
+        ),
+        "missing_or_invalid_artifacts": [],
+        "critical_defects": [],
+        "l2_5_valid": True,
+        "l2_5_analysis": {
+            "l2_5_valid": True,
+            "l2_5_stub_detected": False,
+            "insufficient_sources": False,
+            "issues": [],
+            "missing_or_invalid_artifacts": [],
+            "source_rows": 4,
+            "evidence_rows": 4,
+            "claim_count": 4,
+            "gap_count": 3,
+            "claim_source_alignment_valid": True,
+        },
+        "artifact_summaries": {
+            "L1_gemini_search": "UNCLOS, Ilulissat Declaration, CLCS, Arctic maritime claims evidence.",
+            "L2_ddgs_supplement": "Supplementary Arctic sovereignty and maritime dispute sources.",
+            "L2_5_codex_evidence_organizer": "sources.csv evidence.csv claims.md gaps.md contain legal evidence rows.",
+            "L3_r1_synthesis": "The Arctic route sovereignty dispute is governed by UNCLOS with bounded inference.",
+            "L4_gemini_audit": "2008 Ilulissat Declaration reaffirms commitment to UNCLOS, rejecting new comprehensive treaties. Status: Supported.",
+        },
+        "audit_text": "2008 Ilulissat Declaration reaffirms commitment to UNCLOS, rejecting new comprehensive treaties. Status: Supported.",
+        "audit_summary": "L4 audit supported the UNCLOS and Arctic maritime dispute claims.",
+    }
+
+    rendered = LocalTaskEngineExecutor().run_controller_acceptance(
+        CANONICAL_STAGES[ENGINE_RESEARCH][5],
+        packet,
+    )
+
+    assert "verdict: ACCEPTED" in rendered
+    assert "accepted: true" in rendered
+    assert "evidence_packet_ready_for_decision: true" in rendered
+
+
 def test_l5_research_packet_quality_blocks_missing_fixed_sections():
     import tools.task_engine_executors as executors
 
@@ -4390,7 +4435,9 @@ def test_supplementary_search_blocks_without_intelligence_layer(tmp_path: Path):
     assert "requires fresh L1-L5 plus intelligence_layer" in result["run"]["stages"][-1]["error"]
 
 
-def test_supplementary_search_no_fresh_result_blocks(tmp_path: Path):
+def test_supplementary_search_no_fresh_result_writes_controlled_caveat_artifact(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
@@ -4404,7 +4451,17 @@ def test_supplementary_search_no_fresh_result_blocks(tmp_path: Path):
         def run_ddgs(self, stage, queries):
             if stage.stage_name == "L2_ddgs_supplement":
                 return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
-            return []
+            return [
+                executors._supplementary_search_no_fresh_hits_marker(
+                    queries,
+                    ["duckduckgo", "brave", "yahoo"],
+                    ["duckduckgo:empty", "brave:DDGSException:No results found."],
+                )
+            ]
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
 
         def run_omlx_model(self, stage, model, prompt):
             self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
@@ -4418,9 +4475,14 @@ def test_supplementary_search_no_fresh_result_blocks(tmp_path: Path):
         executor=FakeExecutor(),
     )
 
-    assert result["status"] == "blocked"
-    assert result["blocked_stage"] == "supplementary_search"
-    assert "DDGS returned no fresh result URLs" in result["run"]["stages"][-1]["error"]
+    assert result["status"] == "ok"
+    assert result["pipeline_status"] == PIPELINE_INCOMPLETE
+    artifact = Path(result["run"]["stages"][-1]["artifact_path"])
+    text = artifact.read_text(encoding="utf-8")
+    assert "supplementary_search_status: no_fresh_hits" in text
+    assert "source_evidence_emitted: false" in text
+    assert "No topic-consistent fresh DDGS hits remained" in text
+    assert "https://" not in text
 
 
 def test_supplementary_search_artifact_missing_blocks_validation(tmp_path: Path):

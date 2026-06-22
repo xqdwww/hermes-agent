@@ -602,6 +602,8 @@ class LocalTaskEngineExecutor:
                     break
             time.sleep(0.2)
         if not hits:
+            if stage.stage_name == "supplementary_search" and _ddgs_errors_are_no_result_only(errors):
+                return [_supplementary_search_no_fresh_hits_marker(queries[:5], backends, errors)]
             raise RuntimeError(
                 f"{stage.stage_name}: DDGS returned no fresh hits; "
                 f"backends={','.join(backends)}; errors={'; '.join(errors[-8:])}"
@@ -4162,6 +4164,30 @@ def _ddgs_search_once(query: str, *, backend: str, timeout_s: int, max_results: 
         return list(ddgs.text(query, backend=backend, max_results=max_results) or [])
 
 
+def _ddgs_errors_are_no_result_only(errors: list[str]) -> bool:
+    if not errors:
+        return True
+    no_result_tokens = ("no results found", ":empty")
+    return all(any(token in str(error).lower() for token in no_result_tokens) for error in errors)
+
+
+def _supplementary_search_no_fresh_hits_marker(
+    queries: list[str],
+    backends: list[str],
+    errors: list[str],
+) -> dict[str, str]:
+    return {
+        "query": " | ".join(queries),
+        "title": "",
+        "url": "",
+        "snippet": "",
+        "supplementary_search_status": "no_fresh_hits",
+        "attempted_queries_json": json.dumps(list(queries), ensure_ascii=False),
+        "backends": ",".join(backends),
+        "errors": "; ".join(errors[-12:]),
+    }
+
+
 def _normalize_ddgs_hit(query: str, hit: dict[str, Any]) -> dict[str, str]:
     return {
         "query": query,
@@ -4689,15 +4715,15 @@ def _audit_summary(audit_text: str) -> str:
 
 
 def _audit_text_rejects(audit_text: str) -> bool:
-    lowered = (audit_text or "").lower()
-    reject_markers = (
-        "verdict: rejected",
-        "accepted: false",
-        "evidence_packet_ready_for_decision: false",
-        "reject",
-        "rejected",
-    )
-    return any(marker in lowered for marker in reject_markers)
+    value = audit_text or ""
+    lowered = value.lower()
+    if "accepted: false" in lowered or "evidence_packet_ready_for_decision: false" in lowered:
+        return True
+    for line in value.splitlines():
+        normalized = line.strip().lower()
+        if re.match(r"^(?:verdict|audit_verdict|acceptance_verdict|status)\s*:\s*rejected?\b", normalized):
+            return True
+    return False
 
 
 L2_5_EVIDENCE_ORGANIZER_OUTPUTS = ("sources.csv", "evidence.csv", "claims.md", "gaps.md")
@@ -5849,9 +5875,10 @@ def _decision_supplementary_search_report(
     base_dir: str | Path,
     research_packet_path: str | Path | None = None,
 ) -> str:
+    no_fresh_marker = _supplementary_search_no_fresh_hits_from_hits(hits)
     fresh_hits = [hit for hit in hits if hit.get("url")]
     clean_hits, quarantined_hits = _split_supplementary_hits_by_topic(query, fresh_hits)
-    if not clean_hits and not quarantined_hits:
+    if not clean_hits and not quarantined_hits and not no_fresh_marker:
         raise RuntimeError("supplementary_search: DDGS returned no fresh result URLs")
     base = Path(base_dir).resolve()
     intelligence = Path(str(stages[0].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")[:2500]
@@ -5865,6 +5892,7 @@ def _decision_supplementary_search_report(
         "mode: DECISION",
         "scope: fresh supplemental search anchored to the user's current question.",
         "boundary: source supplement only; no user-facing plan and no replacement for structure_mapper or evidence_judge.",
+        f"supplementary_search_status: {'no_fresh_hits' if no_fresh_marker else 'fresh_hits'}",
         f"supplementary_search_contaminated: {str(contaminated).lower()}",
         "quarantine_policy: contaminated DDGS hits are listed for audit only and must not be used as evidence candidates.",
         "",
@@ -5884,6 +5912,8 @@ def _decision_supplementary_search_report(
     if context:
         lines.extend(["", "## optional_research_evidence_packet_context", context])
     lines.extend(["", "## fresh_ddgs_result_summary"])
+    if no_fresh_marker:
+        lines.extend(_supplementary_search_no_fresh_hits_lines(no_fresh_marker))
     if not clean_hits:
         lines.append("No topic-consistent fresh DDGS hits remained after quarantine.")
         lines.append("")
@@ -6241,6 +6271,18 @@ def _supplementary_search_query_plan(query: str) -> list[dict[str, Any]]:
             "standalone AI device adoption churn return rates 2025 2026",
             "AI wearable companion product market fit smartphone app competition",
         ]
+    elif any(term in lowered for term in ("arctic", "unclos", "northwest passage", "northern sea route", "maritime law")) or any(
+        term in value for term in ("北极", "航道", "海洋法", "国际法", "主权争议", "海牙国际法院")
+    ):
+        basis = "international_maritime_law_anchor"
+        allowed_expansions = ["UNCLOS", "Article 234", "Northwest Passage", "Northern Sea Route", "CLCS", "Corfu Channel"]
+        candidates = [
+            "UNCLOS Article 234 Arctic shipping routes sovereignty dispute",
+            "Northwest Passage Northern Sea Route international straits legal status",
+            "Arctic shipping routes sovereignty dispute maritime law state practice",
+            "Corfu Channel international straits Arctic Northwest Passage Northern Sea Route",
+            "CLCS Arctic continental shelf claims Russia Canada Denmark legal status",
+        ]
     else:
         allowed_expansions = topic_terms[:5]
         candidates = [
@@ -6278,6 +6320,38 @@ def _split_supplementary_hits_by_topic(query: str, hits: list[dict[str, str]]) -
     return clean, quarantined
 
 
+def _supplementary_search_no_fresh_hits_from_hits(hits: list[dict[str, str]]) -> dict[str, str] | None:
+    for hit in hits:
+        if hit.get("supplementary_search_status") == "no_fresh_hits":
+            return hit
+    return None
+
+
+def _supplementary_search_no_fresh_hits_lines(marker: dict[str, str]) -> list[str]:
+    attempted_queries = []
+    try:
+        parsed = json.loads(marker.get("attempted_queries_json") or "[]")
+        if isinstance(parsed, list):
+            attempted_queries = [str(item) for item in parsed]
+    except json.JSONDecodeError:
+        attempted_queries = []
+    lines = [
+        "supplementary_search_status: no_fresh_hits",
+        "source_evidence_emitted: false",
+        "no_fresh_hits_but_no_contradiction_found: true",
+        "provider_failure: false",
+        f"backends_attempted: {marker.get('backends', '')}",
+        "caveat: DDGS returned no topic-consistent fresh result URLs. Downstream stages must not treat this as supporting evidence; use it only as an uncertainty boundary.",
+        "attempted_queries:",
+    ]
+    lines.extend(f"- {query}" for query in attempted_queries)
+    errors = str(marker.get("errors") or "").strip()
+    if errors:
+        lines.extend(["backend_no_result_details:", errors])
+    lines.append("")
+    return lines
+
+
 def _supplementary_search_report(
     hits: list[dict[str, str]],
     *,
@@ -6285,9 +6359,10 @@ def _supplementary_search_report(
     query: str,
     base_dir: str | Path,
 ) -> str:
+    no_fresh_marker = _supplementary_search_no_fresh_hits_from_hits(hits)
     fresh_hits = [hit for hit in hits if hit.get("url")]
     clean_hits, quarantined_hits = _split_supplementary_hits_by_topic(query, fresh_hits)
-    if not clean_hits and not quarantined_hits:
+    if not clean_hits and not quarantined_hits and not no_fresh_marker:
         raise RuntimeError("supplementary_search: DDGS returned no fresh result URLs")
     base = Path(base_dir).resolve()
     packet = Path(str(stages[5].get("artifact_path") or "")).resolve().read_text(encoding="utf-8", errors="replace")[:2500]
@@ -6301,6 +6376,7 @@ def _supplementary_search_report(
         "tool: DDGS",
         "scope: fresh supplemental search anchored to the user's current question.",
         "boundary: source supplement only; no user-facing plan and no replacement for structure_mapper or evidence_judge.",
+        f"supplementary_search_status: {'no_fresh_hits' if no_fresh_marker else 'fresh_hits'}",
         f"supplementary_search_contaminated: {str(contaminated).lower()}",
         "quarantine_policy: contaminated DDGS hits are listed for audit only and must not be used as evidence candidates.",
         "",
@@ -6322,6 +6398,8 @@ def _supplementary_search_report(
         "",
         "## fresh_ddgs_result_summary",
     ]
+    if no_fresh_marker:
+        lines.extend(_supplementary_search_no_fresh_hits_lines(no_fresh_marker))
     if not clean_hits:
         lines.append("No topic-consistent fresh DDGS hits remained after quarantine.")
         lines.append("")
