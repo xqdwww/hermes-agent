@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Protocol, TypeVar
 
+from tools import task_engine_scoring_calibration as scoring_calibration
 from tools.task_engine_contracts import (
     CANONICAL_STAGES,
     CONTROLLER_ACCEPTANCE,
@@ -3468,98 +3469,19 @@ def _task_engine_profiles_from_query(query: str) -> list[str]:
 
 
 def _external_calibration_quality_body(text: str) -> str:
-    metadata_prefixes = (
-        "executor_model:",
-        "fallback_reasons:",
-        "artifact_path:",
-        "valid_for_pipeline:",
-        "stage_name:",
-        "owner=",
-        "owner:",
-        "model:",
-        "metadata:",
-        "error:",
-        "error_summary:",
-        "attempt:",
-        "fallback_used:",
-        "created_in_current_run:",
-        "artifact_state:",
-    )
-    metadata_key_pattern = re.compile(
-        r'^\s*"?(?:executor_model|fallback_reasons|artifact_path|valid_for_pipeline|'
-        r'stage_name|owner|model|metadata|error|error_summary|attempt|fallback_used|'
-        r'created_in_current_run|artifact_state)"?\s*[:=]',
-        re.IGNORECASE,
-    )
-    skipped_exact = {"external_calibration", "metadata", "diagnostic"}
-    kept: list[str] = []
-    for raw_line in (text or "").splitlines():
-        line = raw_line.strip()
-        lowered = line.lower()
-        if not line:
-            if kept and kept[-1].strip():
-                kept.append("")
-            continue
-        if lowered in skipped_exact:
-            continue
-        if any(lowered.startswith(prefix) for prefix in metadata_prefixes):
-            continue
-        if metadata_key_pattern.match(line):
-            continue
-        kept.append(raw_line)
-    return "\n".join(kept).strip()
+    return scoring_calibration.external_calibration_quality_body(text)
 
 
 def _external_calibration_has_verdict_body(text: str) -> bool:
-    lowered = (text or "").lower()
-    return any(
-        term in lowered
-        for term in (
-            "calibration_verdict",
-            "calibration verdict",
-            "calibration-verdict",
-            "verdict:",
-            "verdict：",
-            "校准结论",
-            "final calibration sentence",
-            "final calibrated conclusion",
-        )
-    )
+    return scoring_calibration.external_calibration_has_verdict_body(text)
 
 
 def _external_calibration_quality_error(text: str) -> str:
-    value = _external_calibration_quality_body(text or "")
-    lowered = value.lower()
-    if _external_calibration_has_minimum_fields(value):
-        missing_body = _external_calibration_header_only_fields(value)
-        if missing_body:
-            return "external_calibration_header_only"
-        if not any(term in lowered for term in ("supported", "plausible", "speculative", "contradicted", "支持", "可信", "推测", "矛盾")):
-            return "external_calibration_missing_strength_labels"
-        return ""
-    if len(value) < 1500:
-        if any(term in lowered for term in ("calibration_scope", "claim_strength_table", "calibration_verdict")):
-            return "external_calibration_header_only"
-        return "external_calibration_too_short"
-    tail = _normalized_tail(value)
-    if _tail_looks_truncated(tail):
-        return "truncated_tail"
-    if not any(term in lowered for term in ("supported", "plausible", "speculative", "contradicted", "支持", "可信", "推测", "矛盾")):
-        return "external_calibration_missing_strength_labels"
-    if not _external_calibration_has_verdict_body(value):
-        return "external_calibration_missing_verdict"
-    if "claim_strength_table" in lowered and "calibration" not in lowered[lowered.rfind("claim_strength_table"):]:
-        return "external_calibration_header_only"
-    return ""
+    result = scoring_calibration.assess_external_calibration_text(text)
+    return "" if result.passed else result.reason
 
 
-EXTERNAL_CALIBRATION_MINIMUM_FIELDS = (
-    "calibration_verdict",
-    "agreement_points",
-    "disagreement_or_risk_points",
-    "missing_considerations",
-    "final_adjustment_recommendation",
-)
+EXTERNAL_CALIBRATION_MINIMUM_FIELDS = scoring_calibration.EXTERNAL_CALIBRATION_MINIMUM_FIELDS
 
 
 _T = TypeVar("_T")
@@ -3636,70 +3558,23 @@ def _is_omlx_stage(stage: StageSpec) -> bool:
 
 
 def _external_calibration_has_minimum_fields(text: str) -> bool:
-    lowered = (text or "").lower()
-    return all(field in lowered for field in EXTERNAL_CALIBRATION_MINIMUM_FIELDS)
+    return scoring_calibration.external_calibration_has_minimum_fields(text)
 
 
 def _external_calibration_header_only_fields(text: str) -> list[str]:
-    missing: list[str] = []
-    for field in EXTERNAL_CALIBRATION_MINIMUM_FIELDS:
-        body = _markdown_section_body(text, field) or _colon_or_plain_section_body(text, field)
-        if len(" ".join(body.split())) < 20:
-            missing.append(field)
-    return missing
+    return scoring_calibration.external_calibration_header_only_fields(text)
 
 
 def _colon_or_plain_section_body(text: str, field: str) -> str:
-    lines = (text or "").splitlines()
-    start = -1
-    lowered_field = field.lower()
-    known = set(EXTERNAL_CALIBRATION_MINIMUM_FIELDS)
-    for index, line in enumerate(lines):
-        stripped = line.strip().lower().lstrip("#").strip()
-        key = stripped.split(":", 1)[0].strip()
-        if key == lowered_field:
-            start = index
-            break
-    if start < 0:
-        return ""
-    collected: list[str] = []
-    first = lines[start].split(":", 1)
-    if len(first) == 2 and first[1].strip():
-        collected.append(first[1].strip())
-    for line in lines[start + 1:]:
-        stripped = line.strip().lower().lstrip("#").strip()
-        key = stripped.split(":", 1)[0].strip()
-        if key in known:
-            break
-        collected.append(line)
-    return "\n".join(collected).strip()
+    return scoring_calibration.colon_or_plain_section_body(text, field)
 
 
 def _final_controller_quality_error(text: str) -> str:
     value = (text or "").strip()
     lowered = value.lower()
-    raw_tokens = (
-        "persona raw",
-        "r1 convergence body",
-        "raw artifact",
-        "artifact dump",
-        "claim_strength_table | claim",
-        "```json\n{\n  \"stage_name\"",
-        "external_calibration executor_model",
-        "fallback_reasons:",
-        "evidence judge – decision stage",
-        "evidence judge - decision stage",
-        "convergence decision framework",
-        "convergence_fixed_section_digest",
-        "artifact (stage)",
-        "strength / quality of evidence",
-        "\n## key_drivers",
-        "\n## mechanism_chain",
-        "\n## certainty_levels",
-        "\n## uncertainty_boundary",
-    )
-    if any(token in lowered for token in raw_tokens):
-        return "raw_intermediate_dump"
+    calibration_result = scoring_calibration.assess_final_controller_text(value)
+    if calibration_result.blocked:
+        return calibration_result.reason
     overstrong_terms = (
         "pfc disuse atrophy",
         "prefrontal cortex disuse atrophy",
@@ -3712,10 +3587,6 @@ def _final_controller_quality_error(text: str) -> str:
     )
     if any(term in lowered or term in value for term in overstrong_terms):
         return "overstrong_mechanism_term"
-    if _looks_like_raw_markdown_table_dump(value):
-        return "raw_table_dump"
-    if _tail_looks_truncated(_normalized_tail(value)):
-        return "truncated_tail"
     if "decision_mode=true" in lowered and any(term in value for term in ("家长行为培训详细方案", "三年级准备路线", "ADHD 儿童研究决策报告")):
         return "decision_mode_family_advice_leak"
     return ""
@@ -3776,6 +3647,9 @@ def _assert_final_controller_packet_quality(packet: dict[str, Any], text: str) -
     token = _final_controller_quality_error(text)
     if token:
         raise RuntimeError(f"final_controller_report: artifact_quality_error:{token}")
+    calibration_result = scoring_calibration.assess_final_controller_packet(packet, text)
+    if calibration_result.blocked:
+        raise RuntimeError(f"final_controller_report: scoring_calibration:{calibration_result.reason}")
     query = str(packet.get("query") or "")
     if str(packet.get("mode") or "") == ENGINE_DECISION:
         if _decision_query_forbids_advice(query):
@@ -7095,24 +6969,8 @@ def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]
     )
     convergence_excerpt = _safe_final_excerpt(str(excerpts.get("convergence_report") or ""), limit=700)
     calibration_excerpt = _safe_final_excerpt(str(excerpts.get("external_calibration") or ""), limit=700)
-    lowered_query = query.lower()
-    is_audit_finance_query = any(
-        term in query
-        for term in (
-            "审计",
-            "审计底稿",
-            "财务异常",
-            "财务分析",
-            "管理层讨论分析",
-            "初级审计员",
-            "企业财务分析师",
-        )
-    )
-    is_legal_role_query = (not is_audit_finance_query) and any(
-        term in lowered_query or term in query
-        for term in ("法律", "律师", "法务", "合同", "legal", "lawyer")
-    )
-    if is_audit_finance_query:
+    compliance_domain = scoring_calibration.classify_compliance_domain(query)
+    if compliance_domain == "audit_finance_compliance":
         task_domain = "审计底稿整理、财务异常检测、合规报告生成和管理层讨论分析草稿等例行审计/财务分析工作"
         production_role = "初级审计员"
         operations_role = "企业财务分析师和财务流程分析角色"
@@ -7124,7 +6982,7 @@ def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]
         scenario_c = "企业财务分析师在权威、薪酬、声望、流动性和战略位置上整体超过初级审计员。certainty_level：low；当前证据不足。"
         controversy = "争议集中在 AI 采用速度、审计责任、监管问责、组织授权、数据质量和复杂判断的不可替代性。"
         counter_signal = "低风险底稿整理和草稿生成被自动化，但重大判断、异常解释、审计复核、监管问责和管理层沟通仍强绑定专业人员。"
-    elif is_legal_role_query:
+    elif compliance_domain == "legal_compliance":
         task_domain = "法律检索、合同起草、案例摘要、合规解释等例行法律生产"
         production_role = "初级律师"
         operations_role = "企业法务分析师/legal-ops 型角色"
