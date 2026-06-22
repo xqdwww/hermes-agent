@@ -1615,6 +1615,31 @@ def run_research_decision_evidence_judge_smoke(
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
             raise RuntimeError(f"evidence_judge: forbidden later-stage/final tokens: {', '.join(leaked)}; debug_artifact={debug_path}")
         quality_error = _evidence_judge_artifact_quality_error(content)
+        if quality_error and _evidence_judge_schema_retryable_quality_error(quality_error):
+            _write_invalid_stage_debug(
+                stage,
+                content,
+                base_dir=base_dir,
+                filename=f"{stage.stage_name}.schema_retry_source.invalid.md",
+            )
+            compact_prompt = _evidence_judge_compact_prompt_from_artifacts(stages, query=query, base_dir=base_dir)
+            retry_content = executor.run_omlx_model(stage, stage.model, compact_prompt)
+            retry_leaked = _evidence_judge_forbidden_tokens(retry_content)
+            if retry_leaked:
+                debug_path = _write_invalid_stage_debug(stage, retry_content, base_dir=base_dir)
+                raise RuntimeError(
+                    f"evidence_judge: schema_retry_forbidden later-stage/final tokens: "
+                    f"{', '.join(retry_leaked)}; debug_artifact={debug_path}"
+                )
+            retry_quality_error = _evidence_judge_artifact_quality_error(retry_content)
+            if not retry_quality_error:
+                content = retry_content
+                quality_error = ""
+                diagnostic_prompt = compact_prompt
+            else:
+                content = retry_content
+                quality_error = f"schema_retry_failed:{retry_quality_error}"
+                diagnostic_prompt = compact_prompt
         if quality_error:
             invalid_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
             _annotate_evidence_judge_invalid_artifact_diagnostic(
@@ -2402,8 +2427,15 @@ def run_decision_final_smoke(
 
         stage = specs[3]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search", "structure_mapper"], base_dir=base_dir, consumer_stage=stage.stage_name)
+        evidence_judge_prompt = _decision_stage_prompt(
+            stage,
+            stages,
+            query=query,
+            base_dir=base_dir,
+            research_packet_path=research_packet_path,
+        )
         try:
-            content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
+            content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, evidence_judge_prompt))
         except Exception as exc:
             diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
             if diagnostic_path:
@@ -2414,6 +2446,25 @@ def run_decision_final_smoke(
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
             raise RuntimeError(f"evidence_judge: forbidden later-stage/final tokens: {', '.join(leaked)}; debug_artifact={debug_path}")
         quality_error = _evidence_judge_artifact_quality_error(content)
+        if quality_error and _evidence_judge_schema_retryable_quality_error(quality_error):
+            _write_invalid_stage_debug(
+                stage,
+                content,
+                base_dir=base_dir,
+                filename=f"{stage.stage_name}.schema_retry_source.invalid.md",
+            )
+            retry_prompt = _decision_evidence_judge_schema_retry_prompt(evidence_judge_prompt)
+            content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, retry_prompt))
+            leaked = _evidence_judge_forbidden_tokens(content)
+            if leaked:
+                debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
+                raise RuntimeError(
+                    f"evidence_judge: schema_retry_forbidden later-stage/final tokens: "
+                    f"{', '.join(leaked)}; debug_artifact={debug_path}"
+                )
+            retry_quality_error = _evidence_judge_artifact_quality_error(content)
+            quality_error = "" if not retry_quality_error else f"schema_retry_failed:{retry_quality_error}"
+            evidence_judge_prompt = retry_prompt
         if quality_error:
             invalid_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
             _annotate_evidence_judge_invalid_artifact_diagnostic(
@@ -2421,13 +2472,7 @@ def run_decision_final_smoke(
                 executor,
                 base_dir=base_dir,
                 content=content,
-                prompt=_decision_stage_prompt(
-                    stage,
-                    stages,
-                    query=query,
-                    base_dir=base_dir,
-                    research_packet_path=research_packet_path,
-                ),
+                prompt=evidence_judge_prompt,
                 quality_error=quality_error,
                 invalid_artifact_path=invalid_path,
             )
@@ -5775,6 +5820,7 @@ def _decision_stage_prompt(
         ),
         duties[stage.stage_name],
         forbidden[stage.stage_name],
+        *_decision_stage_output_contract_lines(stage),
         "Internal output_quality_profile: " + ", ".join(profiles) + ".",
         *foresight_sections,
         f"Current run root: {base}",
@@ -5791,6 +5837,33 @@ def _decision_stage_prompt(
     if context:
         lines.extend(["", "## optional_research_evidence_packet_context", context])
     return "\n".join(lines)
+
+
+def _decision_stage_output_contract_lines(stage: StageSpec) -> list[str]:
+    if stage.stage_name != "evidence_judge":
+        return []
+    return [
+        "Return only these sections: evidence_quality_map, strength_by_claim, applicability_to_user_context, uncertainty_and_limits, evidence_gaps_for_later_stages.",
+        "Your first non-empty line must be exactly: evidence_quality_map",
+        "Write strength_by_claim as a standalone line exactly: strength_by_claim",
+        "Do not write a report title, markdown H1/H2 heading, table-first response, summary judgment, recommendation, or downstream advice.",
+        "For each strength_by_claim item include: claim / strength: high-medium-low / evidence_basis / uncertainty_or_gap.",
+    ]
+
+
+def _decision_evidence_judge_schema_retry_prompt(prompt: str) -> str:
+    return "\n".join(
+        [
+            prompt,
+            "",
+            "## Schema retry contract",
+            "The previous evidence_judge attempt did not satisfy the required section schema.",
+            "Return only the five required sections now.",
+            "First line exactly: evidence_quality_map",
+            "Second required section heading exactly: strength_by_claim",
+            "No title, no markdown heading prefix, no table-first answer, no recommendation, no final decision.",
+        ]
+    )
 
 
 def _decision_external_calibration_prompt(
@@ -6491,6 +6564,25 @@ def _evidence_judge_artifact_quality_error(text: str) -> str:
     return ""
 
 
+def _evidence_judge_schema_retryable_quality_error(error: str) -> bool:
+    retryable = {
+        "section_start_mismatch",
+        "missing_required_section",
+        "missing_evidence_quality_map",
+        "missing_strength_by_claim",
+    }
+    hard_blocked = {
+        "forbidden_final_or_later_stage_terms",
+        "forbidden_process_narration",
+        "process_narration_leak",
+        "stage_leakage",
+        "final_controller_leakage",
+        "premise_auditor_leakage",
+    }
+    value = str(error or "")
+    return value in retryable and value not in hard_blocked
+
+
 def _evidence_judge_process_narration_hits(text: str) -> list[str]:
     checks = (
         ("we_need_to", r"\bwe\s+need\s+to\b"),
@@ -6530,10 +6622,10 @@ def _is_forbidden_stage_heading(line: str, stage_names: set[str]) -> bool:
     return any(stripped == name or stripped.startswith(f"{name}:") for name in stage_names)
 
 
-def _write_invalid_stage_debug(stage: StageSpec, content: Any, *, base_dir: str | Path) -> Path:
+def _write_invalid_stage_debug(stage: StageSpec, content: Any, *, base_dir: str | Path, filename: str | None = None) -> Path:
     stage_dir = Path(base_dir) / stage.stage_name
     stage_dir.mkdir(parents=True, exist_ok=True)
-    path = stage_dir / f"{stage.stage_name}.invalid.md"
+    path = stage_dir / (filename or f"{stage.stage_name}.invalid.md")
     path.write_text(_stringify_artifact(content), encoding="utf-8")
     return path
 
@@ -7917,9 +8009,9 @@ def _omlx_max_tokens() -> int:
 def _omlx_max_tokens_for_stage(stage: StageSpec) -> int:
     if stage.stage_name == "evidence_judge":
         try:
-            return max(128, min(int(os.getenv("HERMES_OMLX_EVIDENCE_JUDGE_MAX_TOKENS", "512")), 2048))
+            return max(512, min(int(os.getenv("HERMES_OMLX_EVIDENCE_JUDGE_MAX_TOKENS", "1536")), 4096))
         except ValueError:
-            return 512
+            return 1536
     return _omlx_max_tokens()
 
 

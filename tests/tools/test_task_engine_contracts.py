@@ -1585,7 +1585,7 @@ def test_evidence_judge_omlx_retries_empty_content_with_reload(monkeypatch):
 
     assert "evidence_quality_map" in output
     assert len([call for call in calls if call[0] == "chat"]) == 2
-    assert all(call[-1] == 512 for call in calls if call[0] == "chat")
+    assert all(call[-1] == 1536 for call in calls if call[0] == "chat")
     assert len([call for call in calls if call[0] == "load_model"]) == 2
     assert calls.count(("unload_all",)) == 2
     assert executor.last_omlx_diagnostics["evidence_judge"]["attempt"] == "first"
@@ -1618,6 +1618,15 @@ def test_omlx_empty_content_diagnostic_classifies_error_object():
     assert "prefill_memory_exceeded" in diagnostic["error_summary"]
     assert diagnostic["blocked_reason"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
     assert diagnostic["raw_error_code"] == "prefill_memory_exceeded"
+
+
+def test_evidence_judge_default_token_budget_can_fit_required_sections(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    monkeypatch.delenv("HERMES_OMLX_EVIDENCE_JUDGE_MAX_TOKENS", raising=False)
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+
+    assert executors._omlx_max_tokens_for_stage(stage) == 1536
 
 
 def test_evidence_judge_prefill_memory_guard_diagnostic_records_request_context(monkeypatch):
@@ -1686,7 +1695,7 @@ def test_evidence_judge_prefill_memory_guard_diagnostic_records_request_context(
     assert diagnostic["message_count"] == 1
     assert diagnostic["system_message_chars"] == 0
     assert diagnostic["user_message_chars"] == len(prompt)
-    assert diagnostic["max_tokens"] == 512
+    assert diagnostic["max_tokens"] == 1536
     assert diagnostic["temperature"] == 0
     assert diagnostic["stream"] is False
     assert diagnostic["actual_model"] == NEMOTRON120B_ACTUAL_MODEL_DEFAULT
@@ -1702,7 +1711,7 @@ def test_evidence_judge_prefill_memory_guard_diagnostic_records_request_context(
     assert "prompt_hash" in diagnostic
     assert prompt not in diagnostic_text
     assert "secret-test-key" not in diagnostic_text
-    assert any(call == ("chat", NEMOTRON120B_ACTUAL_MODEL_DEFAULT, 1, 512) for call in calls)
+    assert any(call == ("chat", NEMOTRON120B_ACTUAL_MODEL_DEFAULT, 1, 1536) for call in calls)
 
 
 def test_omlx_empty_content_diagnostic_keeps_non_prefill_classification():
@@ -4525,6 +4534,10 @@ def test_evidence_judge_uses_nemotron_and_stops_before_premise_auditor(tmp_path:
         def run_ddgs(self, stage, queries):
             return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
 
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
+
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
                 self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
@@ -4578,6 +4591,8 @@ def test_evidence_judge_blocks_without_structure_mapper(tmp_path: Path):
 
 
 def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_path: Path):
+    calls = []
+
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
@@ -4591,6 +4606,10 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
         def run_ddgs(self, stage, queries):
             return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
 
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
+
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
                 self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
@@ -4599,6 +4618,7 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
                 self.last_executor_models[stage.stage_name] = QWEN72B_ACTUAL_MODEL_DEFAULT
                 return "problem_axes\nactor_map\ndecision_questions\nevidence_slots"
             self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            calls.append(prompt)
             return "# Final Controller Report\nconvergence_report\nfinal_controller_report"
 
     l1_l9 = run_research_decision_l1_l9_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
@@ -4614,6 +4634,7 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
     error = result["run"]["stages"][-1]["error"]
     assert "forbidden later-stage/final tokens" in error
     assert "debug_artifact=" in error
+    assert len(calls) == 1
     assert (tmp_path / "evidence_judge" / "evidence_judge.invalid.md").exists()
 
 
@@ -4664,17 +4685,18 @@ def test_evidence_judge_section_start_mismatch_writes_invalid_artifact_and_diagn
 
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "evidence_judge"
-    assert "artifact_quality_error:section_start_mismatch" in result["run"]["stages"][-1]["error"]
+    assert "artifact_quality_error:schema_retry_failed:section_start_mismatch" in result["run"]["stages"][-1]["error"]
     assert invalid_path.exists()
+    assert (tmp_path / "evidence_judge" / "evidence_judge.schema_retry_source.invalid.md").exists()
     assert not (tmp_path / "evidence_judge" / "evidence_judge.md").exists()
-    assert diagnostic["artifact_quality_error"] == "section_start_mismatch"
+    assert diagnostic["artifact_quality_error"] == "schema_retry_failed:section_start_mismatch"
     assert diagnostic["first_nonempty_line"] == "strength_by_claim"
     assert diagnostic["normalized_first_line"] == "strength_by_claim"
     assert diagnostic["final_content_chars"] == len(invalid_path.read_text(encoding="utf-8"))
     assert diagnostic["invalid_artifact_path"] == str(invalid_path)
     assert diagnostic["inference_request_sent"] is True
     assert diagnostic["inference_response_received"] is True
-    assert diagnostic["compact_mode_used"] is False
+    assert diagnostic["compact_mode_used"] is True
     assert diagnostic["prompt_chars"] > 0
     assert diagnostic["prompt_estimated_tokens"] > 0
     assert diagnostic["valid_for_pipeline"] is False
@@ -4747,6 +4769,17 @@ def test_evidence_judge_prompt_derives_claims_when_claim_table_missing(tmp_path:
     assert "Never write \"not applicable\" for evidence_quality_map or strength_by_claim" in prompt
 
 
+def test_decision_evidence_judge_prompt_includes_schema_contract(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][3]
+    prompt = executors._decision_stage_prompt(stage, [], query="Should we invest?", base_dir=tmp_path)
+
+    assert "Your first non-empty line must be exactly: evidence_quality_map" in prompt
+    assert "Write strength_by_claim as a standalone line exactly: strength_by_claim" in prompt
+    assert "Do not write a report title" in prompt
+
+
 def test_evidence_judge_not_applicable_sections_continue_to_fail_closed():
     import tools.task_engine_executors as executors
 
@@ -4761,6 +4794,70 @@ def test_evidence_judge_not_applicable_sections_continue_to_fail_closed():
         raise AssertionError("not-applicable evidence_judge output must fail closed")
 
     assert "evidence_judge: artifact_quality_error:section_start_mismatch" in error
+
+
+def test_evidence_judge_schema_failure_retries_with_compact_prompt(tmp_path: Path):
+    calls = []
+
+    class FakeExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model):
+            if stage.stage_name == "L1_gemini_search":
+                return {"source_candidates": [{"title": "fake"}]}
+            if stage.stage_name == "L4_gemini_audit":
+                self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
+                return "Gemini audit body"
+            self.last_executor_models[stage.stage_name] = GEMINI_HIGH
+            return "user_question_map\nresearch_packet_map"
+
+        def run_ddgs(self, stage, queries):
+            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+
+        def run_controller_acceptance(self, stage, packet):
+            self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
+            return _complete_research_evidence_packet_text()
+
+        def run_omlx_model(self, stage, model, prompt):
+            if stage.stage_name == "L3_r1_synthesis":
+                self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
+                return "R1 synthesis body"
+            if stage.stage_name == "structure_mapper":
+                self.last_executor_models[stage.stage_name] = QWEN72B_ACTUAL_MODEL_DEFAULT
+                return "problem_axes\nactor_map\ndecision_questions\nevidence_slots"
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            calls.append(prompt)
+            if len(calls) == 1:
+                return "# evidence_judge Report\n\nEvidence quality is mixed but usable."
+            return """evidence_quality_map
+Evidence is mixed but usable.
+
+strength_by_claim
+- claim: trend evidence is uncertain
+  strength: medium
+  evidence_basis: research packet and structure mapper
+  uncertainty_or_gap: direct retention evidence remains missing
+
+applicability_to_user_context
+Applicable with explicit uncertainty boundaries.
+
+uncertainty_and_limits
+Small-sample observations remain weak.
+
+evidence_gaps_for_later_stages
+Need direct retention and activation data.
+"""
+
+    l1_l9 = run_research_decision_l1_l9_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
+    result = run_research_decision_evidence_judge_smoke(
+        l1_l9["run"],
+        query=ADHD_PROMPT,
+        base_dir=tmp_path,
+        executor=FakeExecutor(),
+    )
+
+    assert result["status"] == "ok"
+    assert len(calls) == 2
+    assert (tmp_path / "evidence_judge" / "evidence_judge.schema_retry_source.invalid.md").exists()
+    assert (tmp_path / "evidence_judge" / "evidence_judge.md").exists()
 
 
 def test_valid_evidence_judge_requires_independent_first_line_and_strength_section():
@@ -6853,10 +6950,11 @@ def test_decision_final_evidence_judge_quality_failure_writes_invalid_artifact_a
 
     assert result["status"] == "blocked"
     assert result["blocked_stage"] == "evidence_judge"
-    assert "artifact_quality_error:section_start_mismatch" in result["run"]["stages"][-1]["error"]
+    assert "artifact_quality_error:schema_retry_failed:section_start_mismatch" in result["run"]["stages"][-1]["error"]
     assert invalid_path.exists()
+    assert (tmp_path / "evidence_judge" / "evidence_judge.schema_retry_source.invalid.md").exists()
     assert not (tmp_path / "evidence_judge" / "evidence_judge.md").exists()
-    assert diagnostic["artifact_quality_error"] == "section_start_mismatch"
+    assert diagnostic["artifact_quality_error"] == "schema_retry_failed:section_start_mismatch"
     assert diagnostic["first_nonempty_line"] == "strength_by_claim"
     assert diagnostic["invalid_artifact_path"] == str(invalid_path)
     assert diagnostic["inference_request_sent"] is True
