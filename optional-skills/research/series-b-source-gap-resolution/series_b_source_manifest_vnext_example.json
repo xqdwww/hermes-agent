@@ -1,0 +1,189 @@
+{
+  "schema_version": "series_b_source_manifest.vNext.draft",
+  "case_id": "obj_art_003",
+  "case_family": "material_object",
+  "required_professional_axes": [
+    "materials_book",
+    "archaeology_book"
+  ],
+  "required_context_axes": [
+    "wiki_or_zim"
+  ],
+  "professional_sources": [
+    {
+      "source_id": "example:materials_book:roman_concrete_materials",
+      "axis": "materials_book",
+      "source_group": "example_professional_sources",
+      "title": "Example Roman Concrete Materials Source",
+      "source_path_or_locator": "registry://series-b/examples/roman-concrete-materials",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "license_or_provenance_status": "confirmed",
+      "ingestion_run_id": "manual_intake:2026-06-23:example",
+      "accepted_chunks": [
+        {
+          "chunk_id": "roman_concrete_materials:c001",
+          "supports_terms": [
+            "pozzolana",
+            "opus caementicium",
+            "hydraulic setting"
+          ],
+          "supports_sections": [
+            "materials_mechanics",
+            "historical_layers"
+          ],
+          "evidence_strength": "direct",
+          "wrong_context_guard": [
+            "not modern concrete marketing",
+            "not travel listing"
+          ]
+        }
+      ],
+      "supports_terms": [
+        "pozzolana",
+        "Roman concrete",
+        "opus caementicium",
+        "hydraulic setting"
+      ],
+      "supports_sections": [
+        "materials_mechanics",
+        "historical_layers"
+      ],
+      "wrong_context_guard": [
+        "not modern concrete marketing",
+        "not hydraulic machinery",
+        "not travel listing"
+      ],
+      "formal_ready": true
+    },
+    {
+      "source_id": "example:archaeology_book:roman_construction_archaeology",
+      "axis": "archaeology_book",
+      "source_group": "example_professional_sources",
+      "title": "Example Roman Construction Archaeology Source",
+      "source_path_or_locator": "registry://series-b/examples/roman-construction-archaeology",
+      "identity_hash": {
+        "hash_type": "example_registry_identity",
+        "hash_value": "roman-construction-archaeology-example-v1"
+      },
+      "license_or_provenance_status": "confirmed",
+      "ingestion_run_id": "manual_intake:2026-06-23:example",
+      "accepted_chunks": [
+        {
+          "chunk_id": "roman_construction_archaeology:c001",
+          "supports_terms": [
+            "Roman concrete",
+            "pozzolana"
+          ],
+          "supports_sections": [
+            "historical_layers",
+            "materials_mechanics"
+          ],
+          "evidence_strength": "direct",
+          "wrong_context_guard": [
+            "not broad Mediterranean background only"
+          ]
+        }
+      ],
+      "supports_terms": [
+        "Roman concrete",
+        "pozzolana"
+      ],
+      "supports_sections": [
+        "historical_layers",
+        "materials_mechanics"
+      ],
+      "wrong_context_guard": [
+        "not broad Mediterranean background only"
+      ],
+      "formal_ready": true
+    }
+  ],
+  "context_sources": [
+    {
+      "source_id": "zim:example:Concrete",
+      "axis": "wiki_or_zim",
+      "role": "context_only",
+      "supports_disambiguation": true,
+      "supports_terms": [
+        "Roman concrete",
+        "pozzolana",
+        "hydraulic setting"
+      ],
+      "supports_sections": [
+        "materials_mechanics"
+      ],
+      "cannot_satisfy_professional_axis": true
+    }
+  ],
+  "prototype_evidence": [
+    {
+      "artifact": "codex-output://series-b/obj_art_003/context-prototype",
+      "status": "prototype_only",
+      "cannot_be_counted_as_formal_pass": true,
+      "cannot_update_official_baseline": true
+    }
+  ],
+  "excluded_sources": [
+    {
+      "source_id": "title-only:Concrete",
+      "reason": "title_only",
+      "excluded_from_axes": [
+        "*"
+      ],
+      "notes": "Title-only match is not a source body."
+    },
+    {
+      "source_id": "lp_or_other:hotel_listing_example",
+      "reason": "listing_or_travel_planning",
+      "excluded_from_axes": [
+        "*"
+      ],
+      "notes": "Travel planning listing must not enter background evidence."
+    }
+  ],
+  "axis_satisfaction": [
+    {
+      "axis": "materials_book",
+      "axis_type": "professional",
+      "satisfied": true,
+      "satisfied_by_source_ids": [
+        "example:materials_book:roman_concrete_materials"
+      ],
+      "satisfied_by_category": "professional_sources",
+      "validation_notes": "Direct accepted chunk supports pozzolana and hydraulic setting."
+    },
+    {
+      "axis": "archaeology_book",
+      "axis_type": "professional",
+      "satisfied": true,
+      "satisfied_by_source_ids": [
+        "example:archaeology_book:roman_construction_archaeology"
+      ],
+      "satisfied_by_category": "professional_sources",
+      "validation_notes": "Direct accepted chunk supports Roman construction archaeology context."
+    },
+    {
+      "axis": "wiki_or_zim",
+      "axis_type": "context",
+      "satisfied": true,
+      "satisfied_by_source_ids": [
+        "zim:example:Concrete"
+      ],
+      "satisfied_by_category": "context_sources",
+      "validation_notes": "Context-only ZIM evidence supports disambiguation and background."
+    }
+  ],
+  "formal_pass_gate": {
+    "required_professional_axes_satisfied": true,
+    "context_sources_used_as_professional_sources": false,
+    "prototype_evidence_used_as_formal_pass": false,
+    "decision": "FORMAL_PASS_READY",
+    "blocked_reasons": []
+  },
+  "production_path_policy": {
+    "case_scoped_only": true,
+    "production_default_loader_enabled": false,
+    "full_series_b_enabled": false,
+    "official_baseline_update_enabled": false
+  }
+}

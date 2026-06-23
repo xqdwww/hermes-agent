@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/schemas/series_b_source_manifest.vNext.draft.schema.json",
+  "title": "Series B Source Manifest vNext Draft",
+  "description": "Case-scoped draft schema for Series B controlled source manifests. This schema separates professional sources, context sources, prototype evidence, excluded sources, axis satisfaction, formal pass gates, and production path policy. It is not a production-default integration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "case_family",
+    "required_professional_axes",
+    "required_context_axes",
+    "professional_sources",
+    "context_sources",
+    "prototype_evidence",
+    "excluded_sources",
+    "axis_satisfaction",
+    "formal_pass_gate",
+    "production_path_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "series_b_source_manifest.vNext.draft"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^[a-z]+_[a-z]+_[0-9]{3}$"
+    },
+    "case_family": {
+      "type": "string",
+      "enum": [
+        "material_object",
+        "sacred_space",
+        "archaeological_site",
+        "natural_ecology",
+        "cross_route",
+        "adversarial_trap",
+        "other"
+      ]
+    },
+    "required_professional_axes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/professional_axis"
+      }
+    },
+    "required_context_axes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/context_axis"
+      }
+    },
+    "professional_sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/professional_source"
+      }
+    },
+    "context_sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/context_source"
+      }
+    },
+    "prototype_evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/prototype_evidence"
+      }
+    },
+    "excluded_sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/excluded_source"
+      }
+    },
+    "axis_satisfaction": {
+      "type": "array",
+      "$comment": "The standalone validator enforces coverage of each required axis and prevents context/prototype evidence from satisfying professional axes.",
+      "items": {
+        "$ref": "#/$defs/axis_satisfaction"
+      }
+    },
+    "formal_pass_gate": {
+      "$ref": "#/$defs/formal_pass_gate"
+    },
+    "production_path_policy": {
+      "$ref": "#/$defs/production_path_policy"
+    }
+  },
+  "$defs": {
+    "professional_axis": {
+      "type": "string",
+      "enum": [
+        "religion_book",
+        "history_book",
+        "materials_book",
+        "archaeology_book",
+        "nature_book",
+        "geography_book",
+        "art_architecture_book",
+        "food_book",
+        "architecture_book",
+        "engineering_book",
+        "conservation_book",
+        "local_history_book"
+      ]
+    },
+    "context_axis": {
+      "type": "string",
+      "enum": [
+        "wiki_or_zim",
+        "encyclopedia",
+        "gazetteer",
+        "local_guide_context",
+        "source_backed_extracted_context_packet",
+        "domain_glossary"
+      ]
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "string_array": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "professional_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "source_path"
+              ]
+            },
+            {
+              "required": [
+                "source_path_or_locator"
+              ]
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "required": [
+                "source_sha256"
+              ]
+            },
+            {
+              "required": [
+                "identity_hash"
+              ]
+            }
+          ]
+        }
+      ],
+      "required": [
+        "source_id",
+        "axis",
+        "source_group",
+        "title",
+        "license_or_provenance_status",
+        "ingestion_run_id",
+        "accepted_chunks",
+        "supports_terms",
+        "supports_sections",
+        "wrong_context_guard",
+        "formal_ready"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/source_id"
+        },
+        "axis": {
+          "$ref": "#/$defs/professional_axis"
+        },
+        "source_group": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "title": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "source_path": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "source_path_or_locator": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        },
+        "identity_hash": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hash_type",
+            "hash_value"
+          ],
+          "properties": {
+            "hash_type": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "hash_value": {
+              "$ref": "#/$defs/non_empty_string"
+            }
+          }
+        },
+        "license_or_provenance_status": {
+          "type": "string",
+          "enum": [
+            "confirmed",
+            "approved",
+            "reviewed_case_scope_only"
+          ]
+        },
+        "ingestion_run_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "accepted_chunks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/accepted_chunk"
+          }
+        },
+        "supports_terms": {
+          "$ref": "#/$defs/string_array"
+        },
+        "supports_sections": {
+          "$ref": "#/$defs/string_array"
+        },
+        "wrong_context_guard": {
+          "$ref": "#/$defs/string_array"
+        },
+        "formal_ready": {
+          "type": "boolean"
+        }
+      }
+    },
+    "accepted_chunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chunk_id",
+        "supports_terms",
+        "supports_sections",
+        "evidence_strength",
+        "wrong_context_guard"
+      ],
+      "properties": {
+        "chunk_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "supports_terms": {
+          "$ref": "#/$defs/string_array"
+        },
+        "supports_sections": {
+          "$ref": "#/$defs/string_array"
+        },
+        "evidence_strength": {
+          "type": "string",
+          "enum": [
+            "direct",
+            "supporting",
+            "background"
+          ]
+        },
+        "wrong_context_guard": {
+          "$ref": "#/$defs/string_array"
+        }
+      }
+    },
+    "context_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "axis",
+        "role",
+        "supports_disambiguation",
+        "supports_terms",
+        "supports_sections",
+        "cannot_satisfy_professional_axis"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/source_id"
+        },
+        "axis": {
+          "$ref": "#/$defs/context_axis"
+        },
+        "role": {
+          "type": "string",
+          "const": "context_only"
+        },
+        "supports_disambiguation": {
+          "type": "boolean"
+        },
+        "supports_terms": {
+          "$ref": "#/$defs/string_array"
+        },
+        "supports_sections": {
+          "$ref": "#/$defs/string_array"
+        },
+        "cannot_satisfy_professional_axis": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "prototype_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact",
+        "status",
+        "cannot_be_counted_as_formal_pass",
+        "cannot_update_official_baseline"
+      ],
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "status": {
+          "type": "string",
+          "const": "prototype_only"
+        },
+        "cannot_be_counted_as_formal_pass": {
+          "type": "boolean",
+          "const": true
+        },
+        "cannot_update_official_baseline": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "excluded_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "reason",
+        "excluded_from_axes",
+        "notes"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/source_id"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "title_only",
+            "query_echo",
+            "generated_echo",
+            "image_filename_only",
+            "wrong_context",
+            "listing_or_travel_planning",
+            "modern_event_irrelevant",
+            "food_only_wrong_case",
+            "generic_orientation_or_platform",
+            "weak_inventory_only"
+          ]
+        },
+        "excluded_from_axes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/professional_axis"
+              },
+              {
+                "$ref": "#/$defs/context_axis"
+              },
+              {
+                "type": "string",
+                "const": "*"
+              }
+            ]
+          }
+        },
+        "notes": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "axis_satisfaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "axis",
+        "axis_type",
+        "satisfied",
+        "satisfied_by_source_ids",
+        "satisfied_by_category",
+        "validation_notes"
+      ],
+      "properties": {
+        "axis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/professional_axis"
+            },
+            {
+              "$ref": "#/$defs/context_axis"
+            }
+          ]
+        },
+        "axis_type": {
+          "type": "string",
+          "enum": [
+            "professional",
+            "context"
+          ]
+        },
+        "satisfied": {
+          "type": "boolean"
+        },
+        "satisfied_by_source_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_id"
+          }
+        },
+        "satisfied_by_category": {
+          "type": "string",
+          "enum": [
+            "professional_sources",
+            "context_sources",
+            "none"
+          ]
+        },
+        "validation_notes": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "formal_pass_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_professional_axes_satisfied",
+        "context_sources_used_as_professional_sources",
+        "prototype_evidence_used_as_formal_pass",
+        "decision",
+        "blocked_reasons"
+      ],
+      "properties": {
+        "required_professional_axes_satisfied": {
+          "type": "boolean"
+        },
+        "context_sources_used_as_professional_sources": {
+          "type": "boolean"
+        },
+        "prototype_evidence_used_as_formal_pass": {
+          "type": "boolean"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "FORMAL_PASS_READY",
+            "SOURCE_AXIS_BLOCKED",
+            "EXTERNAL_PROTOTYPE_ONLY",
+            "LONG_DEFER_SOURCE_NEEDED",
+            "BLOCKED_PROFESSIONAL_SOURCE_UNAVAILABLE",
+            "FAIL_CLOSED"
+          ]
+        },
+        "blocked_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "production_path_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_scoped_only",
+        "production_default_loader_enabled",
+        "full_series_b_enabled",
+        "official_baseline_update_enabled"
+      ],
+      "properties": {
+        "case_scoped_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "production_default_loader_enabled": {
+          "type": "boolean",
+          "const": false
+        },
+        "full_series_b_enabled": {
+          "type": "boolean",
+          "const": false
+        },
+        "official_baseline_update_enabled": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    }
+  }
+}
