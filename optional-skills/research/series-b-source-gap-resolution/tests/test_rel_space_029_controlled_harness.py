@@ -62,7 +62,7 @@ def _assert_raises(exc_type: type[Exception], func, *args, **kwargs) -> None:
 
 def _runner(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(RUNNER), *args],
+        [sys.executable, "-B", str(RUNNER), *args],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

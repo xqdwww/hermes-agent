@@ -32,6 +32,13 @@ from series_b_controlled_artifact_exporter import (
 )
 from series_b_controlled_handoff_loader import HandoffValidationError, load_handoff_manifest
 from series_b_controlled_result_schema import CASE_ID, EXECUTION_FALSE_FLAGS, REQUIRED_ARTIFACTS
+from series_b_real_artifact_contract import RealArtifactContractError, validate_real_mode_artifact_contract
+from series_b_real_audit_adapter import AuditAdapterError, audit_rel_space_029_controlled_dossier
+from series_b_real_dossier_builder_adapter import BuilderAdapterError, build_rel_space_029_controlled_raw_dossier
+from series_b_real_source_packet_exporter import (
+    SourcePacketExportError,
+    export_rel_space_029_controlled_source_packet,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -57,6 +64,17 @@ def _result_enum_for_error(error_code: str) -> str:
         return "BLOCKED_REPO_PATCH_REQUIRED"
     if error_code == "GUARD_VALIDATION_FAILED":
         return "BLOCKED_GUARD_VIOLATION"
+    if error_code in {
+        "BLOCKED_BUILDER_ENTRY_UNIMPLEMENTED",
+        "BLOCKED_AUDIT_ENTRY_UNIMPLEMENTED",
+        "BLOCKED_BUILDER_ENTRY_UNSAFE",
+        "BLOCKED_AUDIT_ENTRY_UNSAFE",
+        "BLOCKED_PRODUCTION_DEFAULT_RISK",
+        "BLOCKED_BASELINE_UPDATE_RISK",
+        "BLOCKED_FULL_SERIES_B_RISK",
+        "BLOCKED_GUARD_VIOLATION",
+    }:
+        return error_code
     return "BLOCKED_REPO_PATCH_REQUIRED"
 
 
@@ -79,6 +97,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--write-dummy-artifacts",
         action="store_true",
         help="Write dummy_test_artifact_only skeleton artifacts; never writes a real result.",
+    )
+    parser.add_argument(
+        "--execute-real-controlled-dry-run",
+        action="store_true",
+        help="Layer-1 explicit real-mode skeleton; fails closed unless mock adapters are explicitly enabled.",
+    )
+    parser.add_argument(
+        "--use-mock-builder",
+        action="store_true",
+        help="Test-only: write mock_builder_output instead of calling a real builder.",
+    )
+    parser.add_argument(
+        "--use-mock-audit",
+        action="store_true",
+        help="Test-only: write mock_audit_output instead of calling a real audit scorer.",
     )
     return parser
 
@@ -126,6 +159,166 @@ def _approved_chunks_error_code(message: str) -> str:
     return "APPROVED_CHUNKS_MALFORMED"
 
 
+def _write_manifest_used(output_dir: Path, manifest: dict[str, object]) -> str:
+    path = output_dir / "rel_space_029_controlled_manifest_used.json"
+    path.write_text(
+        json.dumps(
+            {
+                "case_id": CASE_ID,
+                "layer1_real_mode_skeleton": True,
+                "mock_artifact": False,
+                "manifest": manifest,
+                **EXECUTION_FALSE_FLAGS,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _write_blocked_real_mode_result(
+    output_dir: Path,
+    *,
+    error_code: str,
+    message: str,
+    artifacts_written: list[str],
+) -> dict[str, object]:
+    result_enum = _result_enum_for_error(error_code)
+    result = {
+        "status": "ERROR",
+        "harness_status": "BLOCKED",
+        "case_id": CASE_ID,
+        "error_code": error_code,
+        "message": message,
+        "safe_to_retry": False,
+        "result_enum": result_enum,
+        "passed": False,
+        "partial": False,
+        "blocked": True,
+        "layer1_real_mode_skeleton": True,
+        "artifacts_written": artifacts_written,
+        **EXECUTION_FALSE_FLAGS,
+    }
+    summary_path = output_dir / "rel_space_029_controlled_execution_summary.md"
+    result_path = output_dir / "rel_space_029_controlled_execution_result.json"
+    summary_path.write_text(
+        "# rel_space_029 controlled execution summary\n\n"
+        "layer1_real_mode_skeleton: true\n\n"
+        f"result_enum: {result_enum}\n\n"
+        f"blocked_reason: {message}\n\n"
+        "No real controlled regression, real dossier generation, audit scoring, "
+        "full Series B, baseline update, or production default integration was performed.\n",
+        encoding="utf-8",
+    )
+    result["artifacts_written"] = [*artifacts_written, str(summary_path), str(result_path)]
+    result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result
+
+
+def _run_real_mode_skeleton(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+    manifest: dict[str, object],
+) -> tuple[int, dict[str, object]]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_written = [_write_manifest_used(output_dir, manifest)]
+
+    try:
+        source_packet_result = export_rel_space_029_controlled_source_packet(
+            case_id=args.case_id,
+            approved_chunks_handoff_path=args.approved_chunks,
+            controlled_handoff_manifest_path=args.handoff_manifest,
+            output_dir=output_dir,
+            no_production_default=args.no_production_default,
+            no_baseline_update=args.no_baseline_update,
+            no_full_series_b=args.no_full_series_b,
+            repo_root=REPO_ROOT,
+        )
+        source_packet_path = source_packet_result["artifact_path"]
+        artifacts_written.append(str(source_packet_path))
+        builder_result = build_rel_space_029_controlled_raw_dossier(
+            case_id=args.case_id,
+            source_packet_path=source_packet_path,
+            handoff_manifest_path=args.handoff_manifest,
+            output_dir=output_dir,
+            no_production_default=args.no_production_default,
+            no_baseline_update=args.no_baseline_update,
+            no_full_series_b=args.no_full_series_b,
+            use_mock_builder=args.use_mock_builder,
+            repo_root=REPO_ROOT,
+        )
+        raw_dossier_path = builder_result["artifact_path"]
+        artifacts_written.append(str(raw_dossier_path))
+        audit_result = audit_rel_space_029_controlled_dossier(
+            case_id=args.case_id,
+            raw_dossier_path=raw_dossier_path,
+            source_packet_path=source_packet_path,
+            handoff_manifest_path=args.handoff_manifest,
+            output_dir=output_dir,
+            no_production_default=args.no_production_default,
+            no_baseline_update=args.no_baseline_update,
+            no_full_series_b=args.no_full_series_b,
+            use_mock_audit=args.use_mock_audit,
+            repo_root=REPO_ROOT,
+        )
+        contract = validate_real_mode_artifact_contract(
+            output_dir,
+            allow_mock=args.use_mock_builder or args.use_mock_audit,
+        )
+    except SourcePacketExportError as exc:
+        payload = _write_blocked_real_mode_result(
+            output_dir,
+            error_code=exc.error_code,
+            message=str(exc),
+            artifacts_written=artifacts_written,
+        )
+        return 2, payload
+    except BuilderAdapterError as exc:
+        payload = _write_blocked_real_mode_result(
+            output_dir,
+            error_code=exc.error_code,
+            message=str(exc),
+            artifacts_written=artifacts_written,
+        )
+        return 2, payload
+    except AuditAdapterError as exc:
+        payload = _write_blocked_real_mode_result(
+            output_dir,
+            error_code=exc.error_code,
+            message=str(exc),
+            artifacts_written=artifacts_written,
+        )
+        return 2, payload
+    except RealArtifactContractError as exc:
+        payload = _write_blocked_real_mode_result(
+            output_dir,
+            error_code="BLOCKED_AUDIT_ENTRY_UNSAFE",
+            message=str(exc),
+            artifacts_written=artifacts_written,
+        )
+        return 2, payload
+
+    payload = {
+        "harness_status": "PASS_LAYER1_REAL_MODE_SKELETON_MOCK_ONLY",
+        "case_id": CASE_ID,
+        "source_packet_exporter_status": source_packet_result["status"],
+        "builder_adapter_status": builder_result["status"],
+        "audit_adapter_status": audit_result["status"],
+        "artifact_contract_status": contract["status"],
+        "result_enum": audit_result["result"]["result_enum"],
+        "passed": False,
+        "mock_builder_output": bool(args.use_mock_builder),
+        "mock_audit_output": bool(args.use_mock_audit),
+        "note": "Layer-1 mock real-mode skeleton only; not a formal controlled regression pass.",
+        **EXECUTION_FALSE_FLAGS,
+    }
+    return 0, payload
+
+
 def run(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
     if args.case_id != CASE_ID:
         return _json_error("CASE_ID_MISMATCH", "case id must be rel_space_029")
@@ -156,6 +349,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
         guard_report = validate_chunks(chunks)
         validate_required_artifact_names(REQUIRED_ARTIFACTS)
         artifacts: list[str] = []
+        if args.execute_real_controlled_dry_run:
+            return _run_real_mode_skeleton(args, output_dir=output_dir, manifest=manifest)
         if args.write_dummy_artifacts:
             artifacts = write_dummy_artifacts(output_dir, manifest, chunks, repo_root=REPO_ROOT)
     except HandoffValidationError as exc:
