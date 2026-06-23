@@ -818,6 +818,73 @@ def test_agy_timeout_is_layered_by_stage():
     assert executors._agy_timeout_for_stage(external_stage) == 600
 
 
+def test_decision_agy_stage_wrapper_timeout_allows_provider_timeout_diagnostic():
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][0]
+    assert stage.stage_name == "intelligence_layer"
+    assert executors._decision_stage_timeout_s(stage) > executors._agy_timeout_for_stage(stage) + 30
+
+
+def test_intelligence_layer_prompt_is_text_only_and_path_free(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text(_complete_research_evidence_packet_text(), encoding="utf-8")
+
+    prompt = executors._decision_intelligence_prompt(
+        "Should we shift sales motion?",
+        base_dir=tmp_path / "run",
+        research_packet_path=packet,
+    )
+
+    assert "TEXT ONLY CONTRACT" in prompt
+    assert "Do not call tools" in prompt
+    assert "write files" in prompt
+    assert "Current run root" not in prompt
+    assert "research_packet_path:" not in prompt
+    assert str(tmp_path) not in prompt
+    assert "research_packet_digest:" in prompt
+
+
+def test_agy_stage_timeout_diagnostic_classifies_invalid_artifact_tool_call(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stage = CANONICAL_STAGES[ENGINE_DECISION][0]
+    log_file = tmp_path / "agy.log"
+    log_file.write_text(
+        "model output error: invalid tool call error (invalid_args) "
+        "/tmp/out/decision/intelligence_layer/intelligence_layer_report.md "
+        "is not a valid artifact path; artifacts must be in /Users/example/.gemini/brain",
+        encoding="utf-8",
+    )
+    executor = LocalTaskEngineExecutor()
+    executor.last_agy_diagnostics[stage.stage_name] = {
+        "prompt_chars": 4117,
+        "log_file": str(log_file),
+        "error_type": "in_progress",
+    }
+
+    diagnostic = executors._classify_agy_stage_timeout(
+        stage,
+        executor=executor,
+        started=executors.time.time() - 1,
+        timeout_s=executors._decision_stage_timeout_s(stage),
+    )
+
+    assert diagnostic["blocked_reason"] == "provider_tool_call_invalid_artifact_path"
+    assert diagnostic["invalid_artifact_tool_call"] is True
+    assert diagnostic["provider_timeout"] is False
+    assert diagnostic["wrapper_timeout"] is False
+    assert diagnostic["oversized_payload"] is False
+    assert diagnostic["parse_or_postprocessing_timeout"] is False
+    assert diagnostic["successful_completion"] is False
+
+    diagnostic_path = executors._write_agy_stage_diagnostic(stage, diagnostic, base_dir=tmp_path)
+    persisted = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert persisted["blocked_reason"] == "provider_tool_call_invalid_artifact_path"
+
+
 def test_agy_printmode_timeout_after_auth_success_classification():
     import tools.task_engine_executors as executors
 
@@ -2454,13 +2521,39 @@ def test_l1_l5_smoke_accepts_research_packet_and_stops_before_decision(tmp_path:
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return {
+                    "source_candidates": [
+                        {
+                            "candidate": "https://parent-training.example.test/adhd-parent-training",
+                            "why_relevant": "ADHD intervention evidence for parent training covers population, treatment intensity, and outcome tracking.",
+                            "coverage_axis": "intervention evidence",
+                        },
+                        {
+                            "candidate": "https://guideline.example.test/adhd-medication-guideline",
+                            "why_relevant": "ADHD treatment guideline evidence compares behavioral intervention, medication, and monitoring outcomes.",
+                            "coverage_axis": "comparison evidence",
+                        },
+                    ]
+                }
             assert stage.stage_name == "L4_gemini_audit"
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
             return "Gemini audit body"
 
         def run_ddgs(self, stage, queries):
-            return [{"title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return [
+                {
+                    "query": queries[0],
+                    "title": "ADHD intervention evidence review",
+                    "url": "https://review.example.test/ddgs-review",
+                    "snippet": "ADHD children intervention evidence reports parent training outcomes and decision-relevant limits.",
+                },
+                {
+                    "query": queries[0],
+                    "title": "ADHD long term treatment outcomes",
+                    "url": "https://outcomes.example.test/ddgs-outcomes",
+                    "snippet": "ADHD treatment outcome evidence discusses active intervention degree, monitoring, and uncertainty.",
+                },
+            ]
 
         def run_omlx_model(self, stage, model, prompt):
             self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
@@ -2713,7 +2806,10 @@ def test_decision_prompt_can_accept_research_packet_path_without_research_stages
     )
 
     assert "optional_research_evidence_packet_context" in prompt
-    assert "research_packet_path:" in prompt
+    assert "TEXT ONLY CONTRACT" in prompt
+    assert "research_packet_path:" not in prompt
+    assert "Current run root" not in prompt
+    assert str(tmp_path) not in prompt
     assert "research packet evidence summary" in prompt
     assert "research_packet_digest:" in prompt
     assert "do not dump raw research packet into the final report" in prompt
@@ -6457,6 +6553,8 @@ def test_decision_final_smoke_completes_10_stage_pipeline_without_research(tmp_p
             self.last_executor_models[stage.stage_name] = actual
             if stage.stage_name == "convergence_report":
                 return "divergence_role_summary\nconflicts_to_resolve\nconvergence_decision_framework\nuncertainty_boundaries"
+            if stage.stage_name == "evidence_judge":
+                return "evidence_quality_map\nstrength_by_claim\napplicability_to_user_context\nuncertainty_and_limits"
             return f"{stage.stage_name} body"
 
         def run_external_calibration(self, stage, packet):

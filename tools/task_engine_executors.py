@@ -313,6 +313,7 @@ class LocalTaskEngineExecutor:
     def __init__(self, *, agy_log_dir: str | Path | None = None):
         self.agy_log_dir = Path(agy_log_dir or os.getenv("HERMES_AGY_LOG_DIR", "work/agy_logs"))
         self.last_executor_models: dict[str, str] = {}
+        self.last_agy_diagnostics: dict[str, dict[str, Any]] = {}
         self.last_omlx_diagnostics: dict[str, dict[str, Any]] = {}
         self._agy_preflight_warmed = False
 
@@ -363,6 +364,19 @@ class LocalTaskEngineExecutor:
                 "--print-timeout",
                 f"{timeout_s}s",
             ]
+            self.last_agy_diagnostics[stage.stage_name] = {
+                "stage_name": stage.stage_name,
+                "model": model,
+                "actual_model": actual_model,
+                "prompt_chars": len(prompt or ""),
+                "print_timeout_seconds": timeout_s,
+                "subprocess_timeout_seconds": timeout_s + 30,
+                "attempt": attempt + 1,
+                "log_file": str(log_file),
+                "command_preview": [agy_path, "--log-file", str(log_file), "--model", actual_model, "-p", "<prompt>", "--print-timeout", f"{timeout_s}s"],
+                "agy_cwd": str(agy_cwd),
+                "error_type": "in_progress",
+            }
             started = time.time()
             try:
                 result = subprocess.run(
@@ -470,6 +484,15 @@ class LocalTaskEngineExecutor:
                     break
                 output = stdout.strip()
                 if output:
+                    self.last_agy_diagnostics[stage.stage_name].update(
+                        {
+                            "error_type": "successful_completion",
+                            "elapsed_seconds": round(elapsed, 2),
+                            "returncode": result.returncode,
+                            "stdout_chars": len(stdout),
+                            "stderr_chars": len(stderr),
+                        }
+                    )
                     return output
                 last_error = _format_agy_failure(
                     stage=stage,
@@ -537,6 +560,13 @@ class LocalTaskEngineExecutor:
                     elapsed=elapsed,
                     agy_cwd=agy_cwd,
                     reason=reason,
+                )
+                self.last_agy_diagnostics[stage.stage_name].update(
+                    {
+                        "error_type": "provider_timeout",
+                        "elapsed_seconds": round(elapsed, 2),
+                        "reason": reason,
+                    }
                 )
                 if _agy_reason_requires_refresh(reason, combined):
                     refresh = _run_agy_auth_refresh_gate(
@@ -2733,6 +2763,15 @@ def _run_decision_stage_with_timeout(
                 timeout_s=timeout_s,
             )
             diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
+        elif _is_agy_stage(stage):
+            diagnostic = _classify_agy_stage_timeout(
+                stage,
+                executor=executor,
+                started=started,
+                timeout_s=timeout_s,
+            )
+            blocked_reason = str(diagnostic.get("blocked_reason") or "agy_stage_timeout")
+            diagnostic_path = _write_agy_stage_diagnostic(stage, diagnostic, base_dir=base_dir)
         message = f"{stage.stage_name}: {blocked_reason}: exceeded {timeout_s}s"
         if diagnostic_path:
             message += f"; diagnostic_artifact={diagnostic_path}"
@@ -3757,11 +3796,83 @@ def _decision_stage_timeout_s(stage: StageSpec) -> int:
         raw = os.getenv("HERMES_DECISION_OMLX_STAGE_TIMEOUT_S", "").strip()
     if not raw:
         raw = os.getenv("HERMES_DECISION_STAGE_TIMEOUT_S", "").strip()
-    default = "720" if _is_omlx_stage(stage) else "360"
+    if _is_omlx_stage(stage):
+        default = "720"
+    elif _is_agy_stage(stage):
+        default = str(min(_agy_timeout_for_stage(stage) + 60, 3600))
+    else:
+        default = "360"
     try:
-        return max(1, min(int(raw or default), 3600))
+        parsed = max(1, min(int(raw or default), 3600))
     except ValueError:
-        return int(default)
+        parsed = int(default)
+    if _is_agy_stage(stage):
+        parsed = max(parsed, min(_agy_timeout_for_stage(stage) + 60, 3600))
+    return parsed
+
+
+def _is_agy_stage(stage: StageSpec) -> bool:
+    return stage.model in {GEMINI_HIGH, GEMINI_PRO_HIGH}
+
+
+def _decision_intelligence_prompt_char_budget() -> int:
+    return 12000
+
+
+def _agy_invalid_artifact_tool_call(text: str) -> bool:
+    lowered = (text or "").lower()
+    return "invalid tool call" in lowered and (
+        "not a valid artifact path" in lowered or "artifacts must be" in lowered
+    )
+
+
+def _classify_agy_stage_timeout(
+    stage: StageSpec,
+    *,
+    executor: TaskEngineExecutor,
+    started: float,
+    timeout_s: int,
+) -> dict[str, Any]:
+    diagnostics = getattr(executor, "last_agy_diagnostics", {})
+    stage_diagnostic = diagnostics.get(stage.stage_name, {}) if isinstance(diagnostics, dict) else {}
+    log_file = str(stage_diagnostic.get("log_file") or "") if isinstance(stage_diagnostic, dict) else ""
+    log_text = _read_text(Path(log_file)) if log_file else ""
+    prompt_chars = int(stage_diagnostic.get("prompt_chars") or 0) if isinstance(stage_diagnostic, dict) else 0
+    oversized_payload = prompt_chars > _decision_intelligence_prompt_char_budget()
+    invalid_artifact_tool_call = _agy_invalid_artifact_tool_call(log_text)
+    provider_timeout = _agy_timeout_response(log_text) or stage_diagnostic.get("error_type") == "provider_timeout"
+    if invalid_artifact_tool_call:
+        blocked_reason = "provider_tool_call_invalid_artifact_path"
+    elif oversized_payload:
+        blocked_reason = "oversized_payload"
+    elif provider_timeout:
+        blocked_reason = "model_provider_timeout"
+    else:
+        blocked_reason = "wrapper_timeout"
+    return {
+        "stage_name": stage.stage_name,
+        "blocked_reason": blocked_reason,
+        "timeout_seconds": timeout_s,
+        "elapsed_seconds": round(time.time() - started, 2),
+        "provider_timeout": provider_timeout,
+        "wrapper_timeout": blocked_reason == "wrapper_timeout",
+        "oversized_payload": oversized_payload,
+        "invalid_artifact_tool_call": invalid_artifact_tool_call,
+        "parse_or_postprocessing_timeout": False,
+        "successful_completion": False,
+        "prompt_chars": prompt_chars,
+        "prompt_char_budget": _decision_intelligence_prompt_char_budget(),
+        "agy_diagnostic": stage_diagnostic,
+        "log_file": log_file,
+        "log_tail": log_text[-4000:],
+    }
+
+
+def _write_agy_stage_diagnostic(stage: StageSpec, diagnostic: dict[str, Any], *, base_dir: str | Path) -> Path:
+    path = Path(base_dir) / stage.stage_name / f"{stage.stage_name}.diagnostic.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def _is_omlx_stage(stage: StageSpec) -> bool:
@@ -5790,7 +5901,12 @@ def _decision_excerpts(stages: list[dict[str, Any]], *, limit: int = 2500) -> di
     return excerpts
 
 
-def _decision_research_packet_context(research_packet_path: str | Path | None, *, limit: int = 2500) -> str:
+def _decision_research_packet_context(
+    research_packet_path: str | Path | None,
+    *,
+    limit: int = 2500,
+    include_path: bool = True,
+) -> str:
     if not research_packet_path:
         return ""
     path = Path(research_packet_path).expanduser().resolve()
@@ -5799,14 +5915,17 @@ def _decision_research_packet_context(research_packet_path: str | Path | None, *
     text = path.read_text(encoding="utf-8", errors="replace")
     digest = _research_packet_fixed_section_digest(text, limit=limit)
     excerpt = digest or _safe_final_excerpt(text, limit=limit)
-    return "\n".join(
+    lines = []
+    if include_path:
+        lines.append(f"research_packet_path: {path}")
+    lines.extend(
         [
-            f"research_packet_path: {path}",
             "boundary: use as decision context only; do not dump raw research packet into the final report.",
             "research_packet_digest:",
             excerpt,
         ]
     )
+    return "\n".join(lines)
 
 
 def _research_packet_fixed_section_digest(text: str, *, limit: int = 2500) -> str:
@@ -5843,11 +5962,15 @@ def _decision_intelligence_prompt(
     base_dir: str | Path,
     research_packet_path: str | Path | None = None,
 ) -> str:
-    base = Path(base_dir).resolve()
-    context = _decision_research_packet_context(research_packet_path)
+    context = _decision_research_packet_context(
+        research_packet_path,
+        limit=_decision_intelligence_prompt_char_budget(),
+        include_path=False,
+    )
     lines = [
         "Run DECISION stage 1: intelligence_layer through AGY/Gemini.",
         "Use Gemini 3.5 Flash (High) only. Do not use CCPA, Controller, R1, or divergence models.",
+        "TEXT ONLY CONTRACT: return plain markdown text on stdout. Do not call tools, write files, create artifacts, modify the workspace, or reference output paths.",
         (
             "Input scope is restricted to the user's original decision question plus the supplied research_evidence_packet.md excerpt. This is DECISION mode, so do not run or invent RESEARCH L1-L5 artifacts."
             if context
@@ -5857,7 +5980,6 @@ def _decision_intelligence_prompt(
         "Return only these sections: user_question_map, decision_dimensions_for_later_stages, evidence_needs_for_stage2, open_items_for_stage2.",
         "Do not add conclusions, clinical action plans, final advice, or user-facing guidance.",
         "Do not perform later-stage work: supplementary_search, structure_mapper, evidence_judge, premise_auditor, alternative_generator, insight_harvester, convergence_report.",
-        f"Current run root: {base}",
         "",
         "## User original decision question",
         query,
