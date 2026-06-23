@@ -17,6 +17,15 @@ Source pages reviewed:
 - SSH/remote: prints a secure authorization URL, then expects the auth code to be pasted back.
 - `/logout` removes saved credentials.
 
+### Validation readiness rule
+- For AGY-backed validation, always run bare `agy` first in a TTY/PTY.
+- If bare `agy` asks for an auth code, pause and ask the user for the code before continuing.
+- After successful bare login, run `agy models`; if the first result says sign-in required, wait 6 seconds and retry once before declaring an auth blocker.
+- Require a successful model listing before the print sentinel.
+- Sentinel command: `agy --model "Gemini 3.1 Pro (High)" -p "Reply exactly: HERMES_AGY_READY" --print-timeout 60s`.
+- Require `HERMES_AGY_READY` exactly or unambiguously.
+- If the sentinel reports auth required after models passed, run bare `agy` once more, pause for code if needed, rerun the models double-check, then retry the sentinel once.
+
 ## Config and files
 - Settings: `~/.gemini/antigravity-cli/settings.json`
 - Keybindings: `~/.gemini/antigravity-cli/keybindings.json`

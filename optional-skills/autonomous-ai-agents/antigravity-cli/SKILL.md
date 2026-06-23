@@ -138,6 +138,57 @@ paths below — do not `cat` them through the terminal.
   and expects the auth code pasted back.
 - `/logout` removes saved credentials.
 
+### Guarded AGY readiness for validation
+
+Use this exact readiness gate before any AGY-backed validation, smoke test, or
+sample execution. Do not replace the sequence with only `agy models` or only a
+print-mode sentinel.
+
+1. Start from the target project directory and record a preflight guard when a
+   git worktree is involved: HEAD, branch, status, unstaged diff, staged diff,
+   and tracked modified/deleted files.
+2. Run bare `agy` first in a real TTY/PTY. This is mandatory; `agy models` is
+   not a substitute.
+3. If bare `agy` starts login/auth and asks for an authorization code, pause and
+   ask the user for the code. Do not continue to `agy models`, do not guess, and
+   do not report an auth blocker while the CLI is still waiting for user input.
+4. Enter the user-provided code, wait for the CLI to reach the signed-in model
+   interface, record the account shown if visible, record whether messages such
+   as `AI: Out of credits` appear, then exit the TUI cleanly.
+5. Record a post-bare-AGY guard for git worktrees. Stop with a guard failure if
+   HEAD, branch, staged files, or tracked files changed unexpectedly.
+6. Run `agy models`.
+7. If the first `agy models` check reports sign-in required immediately after a
+   successful bare login, treat it as a possible transient stale-auth result.
+   Wait 6 seconds and run `agy models` once more before deciding.
+8. Require a confirmed model listing from the retry or first check. If both
+   checks fail, report auth not ready.
+9. Run a print-mode sentinel:
+
+   ```sh
+   agy --model "Gemini 3.1 Pro (High)" -p "Reply exactly: HERMES_AGY_READY" --print-timeout 60s
+   ```
+
+   Require exactly or unambiguously `HERMES_AGY_READY`.
+10. If the sentinel returns an auth-required/stale-session error after models
+    succeeded, return to bare `agy` once, pause for a user auth code if needed,
+    rerun the models double-check, then rerun the sentinel once. Only then
+    report auth not ready.
+11. For Hermes Research/Decision flows that also use the ChatGPT app bridge,
+    check bridge health twice with a 6-second interval and require both checks
+    to show `status: ok`, `busy: false`, and `queue_size: 0`.
+12. Record a final readiness guard before running any validation command.
+
+Block labels to use in reports:
+
+- `BLOCKED_AGY_INTERACTIVE_AUTH_REQUIRED` when bare `agy` is waiting for user
+  auth input and the code is not available yet.
+- `BLOCKED_AGY_AUTH_NOT_READY` only after bare `agy` ran, the models retry
+  failed or the sentinel failed after the allowed refresh retry, and guards
+  stayed clean.
+- `BLOCKED_AGY_SENTINEL_FAILED` for non-auth sentinel failures.
+- `FAIL_GUARD` if HEAD, branch, staged state, or tracked files changed.
+
 ## Plugins
 
 - Plugins stage under `~/.gemini/antigravity-cli/plugins/<plugin_name>/`.
