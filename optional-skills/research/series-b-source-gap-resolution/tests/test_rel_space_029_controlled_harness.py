@@ -70,6 +70,30 @@ def _runner(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _runner_json(args: list[str]) -> tuple[subprocess.CompletedProcess[str], dict]:
+    completed = _runner(args)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"runner stdout was not JSON: {completed.stdout}") from exc
+    return completed, payload
+
+
+def _assert_runner_error(args: list[str], error_code: str) -> None:
+    completed, payload = _runner_json(args)
+    assert completed.returncode != 0
+    assert completed.stderr == ""
+    assert payload["status"] == "ERROR"
+    assert payload["case_id"] == "rel_space_029"
+    assert payload["error_code"] == error_code
+    assert payload["safe_to_retry"] is False
+    assert payload["official_baseline_update_performed"] is False
+    assert payload["full_series_b_run_performed"] is False
+    assert payload["production_default_manifest_integration_performed"] is False
+    assert payload["controlled_regression_execution_performed"] is False
+    assert payload["case_repair_performed"] is False
+
+
 def run_tests() -> None:
     ok, report = run_self_test()
     assert ok, report
@@ -160,10 +184,66 @@ def run_tests() -> None:
             "--no-full-series-b",
         ]
         assert _runner(base_args).returncode == 0
-        assert _runner(base_args[2:]).returncode != 0
+        _assert_runner_error(base_args[:1] + ["obj_art_003"] + base_args[2:], "CASE_ID_MISMATCH")
         assert _runner([arg for arg in base_args if arg != "--no-production-default"]).returncode != 0
         assert _runner([arg for arg in base_args if arg != "--no-baseline-update"]).returncode != 0
         assert _runner([arg for arg in base_args if arg != "--no-full-series-b"]).returncode != 0
+
+        _assert_runner_error(
+            base_args[: base_args.index("--handoff-manifest") + 1]
+            + [str(tmp / "missing_handoff.json")]
+            + base_args[base_args.index("--approved-chunks") :],
+            "HANDOFF_MANIFEST_NOT_FOUND",
+        )
+        _assert_runner_error(
+            base_args[: base_args.index("--approved-chunks") + 1]
+            + [str(tmp / "missing_chunks.json")]
+            + base_args[base_args.index("--output-dir") :],
+            "APPROVED_CHUNKS_NOT_FOUND",
+        )
+
+        malformed_manifest = tmp / "malformed_manifest.json"
+        malformed_manifest.write_text("{not json", encoding="utf-8")
+        _assert_runner_error(
+            base_args[: base_args.index("--handoff-manifest") + 1]
+            + [str(malformed_manifest)]
+            + base_args[base_args.index("--approved-chunks") :],
+            "HANDOFF_MANIFEST_MALFORMED",
+        )
+
+        malformed_chunks = tmp / "malformed_chunks.json"
+        malformed_chunks.write_text("{not json", encoding="utf-8")
+        _assert_runner_error(
+            base_args[: base_args.index("--approved-chunks") + 1]
+            + [str(malformed_chunks)]
+            + base_args[base_args.index("--output-dir") :],
+            "APPROVED_CHUNKS_MALFORMED",
+        )
+
+        _assert_runner_error(
+            base_args[: base_args.index("--output-dir") + 1]
+            + [str(REPO_ROOT / "tmp-runner-output")]
+            + base_args[base_args.index("--no-production-default") :],
+            "OUTPUT_DIR_UNSAFE",
+        )
+
+        unsafe_policy_manifest = copy.deepcopy(manifest)
+        unsafe_policy_manifest["production_path_policy"]["production_default_loader_enabled"] = True
+        _assert_runner_error(
+            base_args[: base_args.index("--handoff-manifest") + 1]
+            + [str(_write_json(tmp, "unsafe_policy_manifest.json", unsafe_policy_manifest))]
+            + base_args[base_args.index("--approved-chunks") :],
+            "POLICY_LOCK_UNSAFE",
+        )
+
+        mismatched_chunks = copy.deepcopy(chunk_payload)
+        mismatched_chunks["case_id"] = "obj_art_003"
+        _assert_runner_error(
+            base_args[: base_args.index("--approved-chunks") + 1]
+            + [str(_write_json(tmp, "mismatched_chunks.json", mismatched_chunks))]
+            + base_args[base_args.index("--output-dir") :],
+            "CASE_ID_MISMATCH",
+        )
 
     print("rel_space_029 harness smoke tests PASS")
 
