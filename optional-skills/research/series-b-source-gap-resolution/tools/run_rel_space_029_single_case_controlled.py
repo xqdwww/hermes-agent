@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Explicit-only rel_space_029 single-case controlled harness shell.
+"""Explicit-only rel_space_029 single-case controlled harness.
 
-This runner validates handoff inputs and guard contracts. It does not generate
-a dossier, does not run audit scoring, does not run full Series B, and does not
-write official baseline files.
+This runner validates handoff inputs and guard contracts. Its explicit real
+mode may run only the case-scoped source packet exporter, controlled builder,
+and controlled auditor for rel_space_029. It never runs full Series B, never
+uses production default retrieval, and never writes official baseline files.
 """
 
 from __future__ import annotations
@@ -101,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--execute-real-controlled-dry-run",
         action="store_true",
-        help="Layer-1 explicit real-mode skeleton; fails closed unless mock adapters are explicitly enabled.",
+        help="Explicit rel_space_029 single-case controlled dry-run mode.",
     )
     parser.add_argument(
         "--use-mock-builder",
@@ -302,21 +303,38 @@ def _run_real_mode_skeleton(
         )
         return 2, payload
 
+    result = audit_result["result"]
+    using_mock = bool(args.use_mock_builder or args.use_mock_audit)
+    result_enum = result["result_enum"]
+    if using_mock:
+        harness_status = "PASS_LAYER1_REAL_MODE_SKELETON_MOCK_ONLY"
+    elif result_enum == "PASS_CONTROLLED_REGRESSION":
+        harness_status = "PASS_SINGLE_CASE_CONTROLLED_DRY_RUN"
+    elif result_enum == "PARTIAL_SOURCE_GUARDED_PASS":
+        harness_status = "PARTIAL_SINGLE_CASE_CONTROLLED_DRY_RUN"
+    else:
+        harness_status = "FAIL_SINGLE_CASE_CONTROLLED_DRY_RUN"
     payload = {
-        "harness_status": "PASS_LAYER1_REAL_MODE_SKELETON_MOCK_ONLY",
+        "harness_status": harness_status,
         "case_id": CASE_ID,
         "source_packet_exporter_status": source_packet_result["status"],
         "builder_adapter_status": builder_result["status"],
         "audit_adapter_status": audit_result["status"],
         "artifact_contract_status": contract["status"],
-        "result_enum": audit_result["result"]["result_enum"],
-        "passed": False,
+        "result_enum": result_enum,
+        "passed": result.get("passed") is True and not using_mock,
+        "quality": result.get("quality"),
+        "term_coverage": result.get("term_coverage"),
+        "axis_coverage": result.get("axis_coverage"),
+        "section_coverage": result.get("section_coverage"),
+        "guard_result": result.get("guard_result"),
         "mock_builder_output": bool(args.use_mock_builder),
         "mock_audit_output": bool(args.use_mock_audit),
-        "note": "Layer-1 mock real-mode skeleton only; not a formal controlled regression pass.",
+        "single_case_controlled_dryrun_evidence": not using_mock,
+        "note": "Single-case controlled dry-run evidence only; not an official Series B baseline improvement.",
         **EXECUTION_FALSE_FLAGS,
     }
-    return 0, payload
+    return (2 if str(result_enum).startswith("BLOCKED_") else 0), payload
 
 
 def run(args: argparse.Namespace) -> tuple[int, dict[str, object]]:

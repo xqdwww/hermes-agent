@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fail-closed rel_space_029 audit adapter.
+"""rel_space_029 audit adapter.
 
-Layer 1 never calls production audit/scoring and never writes an official pass.
-Tests may opt into a mock audit path that writes complete mock artifacts.
+The default path calls the deterministic, case-scoped controlled auditor. Tests
+may opt into a mock audit path that writes complete mock artifacts.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ if str(TOOL_DIR) not in sys.path:
 from rel_space_029_alias_source_guard import check_text
 from series_b_controlled_artifact_exporter import ArtifactContractError, validate_output_dir_policy
 from series_b_controlled_result_schema import CASE_ID, EXECUTION_FALSE_FLAGS
+from series_b_rel_space_029_controlled_auditor import ControlledAuditError, audit_controlled_dossier
 
 
 AUDIT_TRACE_FILENAME = "rel_space_029_controlled_audit_trace.json"
@@ -63,7 +64,7 @@ def audit_rel_space_029_controlled_dossier(
     use_mock_audit: bool = False,
     repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Audit a raw dossier only when explicitly using the mock audit."""
+    """Audit a raw dossier with the controlled auditor or explicit test mock."""
 
     if case_id != CASE_ID:
         raise AuditAdapterError("CASE_ID_MISMATCH", "case_id must be rel_space_029")
@@ -73,16 +74,23 @@ def audit_rel_space_029_controlled_dossier(
         raise AuditAdapterError("BLOCKED_BASELINE_UPDATE_RISK", "no_baseline_update must be true")
     if no_full_series_b is not True:
         raise AuditAdapterError("BLOCKED_FULL_SERIES_B_RISK", "no_full_series_b must be true")
-    if not use_mock_audit:
-        raise AuditAdapterError(
-            "BLOCKED_AUDIT_ENTRY_UNIMPLEMENTED",
-            "real rel_space_029 audit scoring API is not implemented in layer 1",
-        )
 
     try:
         target_dir = validate_output_dir_policy(output_dir, repo_root=repo_root)
     except ArtifactContractError as exc:
         raise AuditAdapterError("OUTPUT_DIR_UNSAFE", str(exc)) from exc
+    if not use_mock_audit:
+        try:
+            return audit_controlled_dossier(
+                case_id=case_id,
+                raw_dossier_path=raw_dossier_path,
+                source_packet_path=source_packet_path,
+                handoff_manifest_path=handoff_manifest_path,
+                output_dir=target_dir,
+            )
+        except ControlledAuditError as exc:
+            raise AuditAdapterError(exc.error_code, str(exc)) from exc
+
     packet = _load_json_object(source_packet_path, kind="source packet")
     if packet.get("case_id") != CASE_ID:
         raise AuditAdapterError("CASE_ID_MISMATCH", "source packet case_id must be rel_space_029")

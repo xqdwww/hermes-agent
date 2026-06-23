@@ -36,8 +36,8 @@ def validate_real_mode_artifact_contract(output_dir: str | Path, *, allow_mock: 
 
     result = parsed_json.get("rel_space_029_controlled_execution_result.json", {})
     if isinstance(result, dict):
-        if result.get("result_enum") == "PASS_CONTROLLED_REGRESSION":
-            raise RealArtifactContractError("layer 1 real-mode skeleton must not write PASS_CONTROLLED_REGRESSION")
         if not allow_mock and (result.get("mock_audit_output") or result.get("mock_builder_output")):
             raise RealArtifactContractError("mock artifacts are not allowed without allow_mock")
+        if result.get("case_id") != "rel_space_029":
+            raise RealArtifactContractError("result artifact case_id must be rel_space_029")
     return {"status": "PASS", "artifacts": [str(target / name) for name in REQUIRED_ARTIFACTS]}

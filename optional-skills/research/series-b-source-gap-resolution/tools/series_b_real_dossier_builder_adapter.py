@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed rel_space_029 dossier builder adapter.
+"""rel_space_029 dossier builder adapter.
 
-Layer 1 intentionally does not connect a real builder. Tests may opt into a
-mock builder path, which writes a clearly marked mock dossier and never counts
-as a controlled regression pass.
+The default path calls the deterministic, case-scoped, source-grounded builder.
+Tests may still opt into a mock builder path, which writes a clearly marked
+mock dossier and never counts as a controlled regression pass.
 """
 
 from __future__ import annotations
@@ -20,6 +20,10 @@ if str(TOOL_DIR) not in sys.path:
 
 from series_b_controlled_artifact_exporter import ArtifactContractError, validate_output_dir_policy
 from series_b_controlled_result_schema import CASE_ID, EXECUTION_FALSE_FLAGS
+from series_b_rel_space_029_source_grounded_builder import (
+    SourceGroundedBuilderError,
+    build_source_grounded_dossier,
+)
 
 
 RAW_DOSSIER_FILENAME = "rel_space_029_controlled_raw_dossier.md"
@@ -56,7 +60,7 @@ def build_rel_space_029_controlled_raw_dossier(
     use_mock_builder: bool = False,
     repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build a raw dossier only when explicitly using the mock builder."""
+    """Build a raw dossier with the controlled builder or explicit test mock."""
 
     if case_id != CASE_ID:
         raise BuilderAdapterError("CASE_ID_MISMATCH", "case_id must be rel_space_029")
@@ -66,16 +70,22 @@ def build_rel_space_029_controlled_raw_dossier(
         raise BuilderAdapterError("BLOCKED_BASELINE_UPDATE_RISK", "no_baseline_update must be true")
     if no_full_series_b is not True:
         raise BuilderAdapterError("BLOCKED_FULL_SERIES_B_RISK", "no_full_series_b must be true")
-    if not use_mock_builder:
-        raise BuilderAdapterError(
-            "BLOCKED_BUILDER_ENTRY_UNIMPLEMENTED",
-            "real rel_space_029 dossier builder API is not implemented in layer 1",
-        )
 
     try:
         target_dir = validate_output_dir_policy(output_dir, repo_root=repo_root)
     except ArtifactContractError as exc:
         raise BuilderAdapterError("OUTPUT_DIR_UNSAFE", str(exc)) from exc
+    if not use_mock_builder:
+        try:
+            return build_source_grounded_dossier(
+                case_id=case_id,
+                source_packet_path=source_packet_path,
+                handoff_manifest_path=handoff_manifest_path,
+                output_dir=target_dir,
+            )
+        except SourceGroundedBuilderError as exc:
+            raise BuilderAdapterError(exc.error_code, str(exc)) from exc
+
     packet = _load_source_packet(source_packet_path)
     target_dir.mkdir(parents=True, exist_ok=True)
 

@@ -149,19 +149,116 @@ def run_tests() -> None:
             _write_json(tmp, "bad_bema.json", bad_bema),
         )
 
-        _assert_error(
-            BuilderAdapterError,
-            "BLOCKED_BUILDER_ENTRY_UNIMPLEMENTED",
-            build_rel_space_029_controlled_raw_dossier,
+        real_run_dir = tmp / "real-run"
+        real_exported = _export_packet(real_run_dir)
+        real_packet_path = Path(real_exported["artifact_path"])
+        builder_result = build_rel_space_029_controlled_raw_dossier(
             case_id="rel_space_029",
-            source_packet_path=packet_path,
+            source_packet_path=real_packet_path,
             handoff_manifest_path=HANDOFF,
-            output_dir=tmp / "builder-blocked",
+            output_dir=real_run_dir,
             no_production_default=True,
             no_baseline_update=True,
             no_full_series_b=True,
             repo_root=REPO_ROOT,
         )
+        assert builder_result["status"] == "REAL_BUILDER_OUTPUT_WRITTEN"
+        assert builder_result["mock_builder_output"] is False
+        raw_dossier = Path(builder_result["artifact_path"]).read_text(encoding="utf-8")
+        assert "## spatial_structure" in raw_dossier
+        assert "## historical_layers" in raw_dossier
+        assert "## theme_tracks" in raw_dossier
+        assert "bimah" in raw_dossier
+        assert "Torah reading platform" in raw_dossier
+        assert "opening hours" not in raw_dossier.lower()
+
+        _assert_error(
+            BuilderAdapterError,
+            "CASE_ID_MISMATCH",
+            build_rel_space_029_controlled_raw_dossier,
+            case_id="obj_art_003",
+            source_packet_path=real_packet_path,
+            handoff_manifest_path=HANDOFF,
+            output_dir=tmp / "builder-bad-case",
+            no_production_default=True,
+            no_baseline_update=True,
+            no_full_series_b=True,
+            repo_root=REPO_ROOT,
+        )
+        _assert_error(
+            BuilderAdapterError,
+            "BLOCKED_PRODUCTION_DEFAULT_RISK",
+            build_rel_space_029_controlled_raw_dossier,
+            case_id="rel_space_029",
+            source_packet_path=real_packet_path,
+            handoff_manifest_path=HANDOFF,
+            output_dir=tmp / "builder-prod-risk",
+            no_production_default=False,
+            no_baseline_update=True,
+            no_full_series_b=True,
+            repo_root=REPO_ROOT,
+        )
+
+        audit_result = audit_rel_space_029_controlled_dossier(
+            case_id="rel_space_029",
+            raw_dossier_path=builder_result["artifact_path"],
+            source_packet_path=real_packet_path,
+            handoff_manifest_path=HANDOFF,
+            output_dir=real_run_dir,
+            no_production_default=True,
+            no_baseline_update=True,
+            no_full_series_b=True,
+            repo_root=REPO_ROOT,
+        )
+        assert audit_result["status"] == "CONTROLLED_AUDIT_OUTPUT_WRITTEN"
+        assert audit_result["result"]["mock_audit_output"] is False
+        assert audit_result["result"]["result_enum"] == "PASS_CONTROLLED_REGRESSION"
+        assert audit_result["result"]["quality"]["level"] == "rich"
+        assert audit_result["result"]["term_coverage"]["synagogue"]["passed"] is True
+        assert audit_result["result"]["axis_coverage"]["religion_book"] is True
+        assert audit_result["result"]["section_coverage"]["spatial_structure"] is True
+        assert audit_result["result"]["guard_result"]["passed"] is True
+
+        bad_dossier = real_run_dir / "bad_wrong_context_dossier.md"
+        bad_dossier.write_text(
+            "# bad\n\n## spatial_structure\n\nChristian bema before a church apse.\n\n"
+            "## historical_layers\n\nsynagogue Torah Torah ark bimah orientation.\n\n"
+            "## theme_tracks\n\nsynagogue Torah Torah reading platform orientation.\n",
+            encoding="utf-8",
+        )
+        bad_audit = audit_rel_space_029_controlled_dossier(
+            case_id="rel_space_029",
+            raw_dossier_path=bad_dossier,
+            source_packet_path=real_packet_path,
+            handoff_manifest_path=HANDOFF,
+            output_dir=tmp / "bad-audit",
+            no_production_default=True,
+            no_baseline_update=True,
+            no_full_series_b=True,
+            repo_root=REPO_ROOT,
+        )
+        assert bad_audit["result"]["result_enum"] == "BLOCKED_GUARD_VIOLATION"
+
+        listing_dossier = real_run_dir / "bad_listing_dossier.md"
+        listing_dossier.write_text(raw_dossier + "\nOpening hours and booking details.\n", encoding="utf-8")
+        listing_audit = audit_rel_space_029_controlled_dossier(
+            case_id="rel_space_029",
+            raw_dossier_path=listing_dossier,
+            source_packet_path=real_packet_path,
+            handoff_manifest_path=HANDOFF,
+            output_dir=tmp / "listing-audit",
+            no_production_default=True,
+            no_baseline_update=True,
+            no_full_series_b=True,
+            repo_root=REPO_ROOT,
+        )
+        assert listing_audit["result"]["result_enum"] == "BLOCKED_GUARD_VIOLATION"
+
+        (real_run_dir / "rel_space_029_controlled_manifest_used.json").write_text(
+            json.dumps({"case_id": "rel_space_029", "controlled_builder": True}, indent=2),
+            encoding="utf-8",
+        )
+        validate_real_mode_artifact_contract(real_run_dir)
 
         mock_run_dir = tmp / "mock-run"
         mock_exported = _export_packet(mock_run_dir)
@@ -180,15 +277,15 @@ def run_tests() -> None:
         assert builder_result["mock_builder_output"] is True
         _assert_error(
             AuditAdapterError,
-            "BLOCKED_AUDIT_ENTRY_UNIMPLEMENTED",
+            "BLOCKED_BASELINE_UPDATE_RISK",
             audit_rel_space_029_controlled_dossier,
             case_id="rel_space_029",
             raw_dossier_path=builder_result["artifact_path"],
-            source_packet_path=packet_path,
+            source_packet_path=mock_packet_path,
             handoff_manifest_path=HANDOFF,
             output_dir=tmp / "audit-blocked",
             no_production_default=True,
-            no_baseline_update=True,
+            no_baseline_update=False,
             no_full_series_b=True,
             repo_root=REPO_ROOT,
         )
@@ -223,13 +320,15 @@ def run_tests() -> None:
         assert payload["harness_status"] == "PASS_DRY_VALIDATION_ONLY"
         assert not (dry_dir / "rel_space_029_controlled_raw_dossier.md").exists()
 
-        blocked_dir = tmp / "real-blocked"
-        completed, payload = _runner_json([*_base_args(blocked_dir), "--execute-real-controlled-dry-run"])
-        assert completed.returncode != 0
-        assert payload["error_code"] == "BLOCKED_BUILDER_ENTRY_UNIMPLEMENTED"
-        assert payload["result_enum"] != "PASS_CONTROLLED_REGRESSION"
-        assert (blocked_dir / "rel_space_029_controlled_source_packet.json").exists()
-        assert (blocked_dir / "rel_space_029_controlled_execution_result.json").exists()
+        real_runner_dir = tmp / "runner-real"
+        completed, payload = _runner_json([*_base_args(real_runner_dir), "--execute-real-controlled-dry-run"])
+        assert completed.returncode == 0
+        assert payload["harness_status"] == "PASS_SINGLE_CASE_CONTROLLED_DRY_RUN"
+        assert payload["result_enum"] == "PASS_CONTROLLED_REGRESSION"
+        assert payload["passed"] is True
+        assert payload["mock_builder_output"] is False
+        assert payload["mock_audit_output"] is False
+        validate_real_mode_artifact_contract(real_runner_dir)
 
         completed, payload = _runner_json(
             [
