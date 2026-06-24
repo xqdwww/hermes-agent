@@ -128,7 +128,7 @@ def _complete_research_evidence_packet_text() -> str:
             "  source_anchors: S1 (full_text_verified; peer_reviewed_source; https://example.test/source)",
             "  applicability_boundary: Applies within the source population and measurement context.",
             "  counter_signal_or_failure_condition: Contradictory source passages or failed transfer should downgrade it.",
-            "  evidence_gap: long_horizon_transfer_gap",
+            "  evidence_gap: measurement_context_gap",
             "  decision_use: can_support_decision",
             "  notes: Fixture claim table row for L5 contract tests.",
             "",
@@ -150,6 +150,40 @@ def _complete_research_evidence_packet_text() -> str:
             "scope: acceptance gate plus compact evidence packet; no raw artifact dump and no user-facing advice.",
         ]
     )
+
+
+def _research_decision_l1_l9_stage_fixture(tmp_path: Path) -> list[dict[str, object]]:
+    import tools.task_engine_executors as executors
+
+    stages: list[dict[str, object]] = []
+    bodies = {
+        "L5_deepseek_acceptance": _complete_research_evidence_packet_text(),
+        "intelligence_layer": "claim strength uncertainty applicability evidence gap " * 80,
+        "supplementary_search": "evidence support risk uncertainty applicability " * 80,
+        "structure_mapper": "problem_axes\nclaim strength and applicability axes\nunknowns_for_later_stages\nuncertainty gaps",
+    }
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][:9]:
+        stage_dir = tmp_path / spec.stage_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        outputs = executors.planned_outputs(spec, tmp_path)
+        for output in outputs.values():
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(bodies.get(spec.stage_name, "fresh source"), encoding="utf-8")
+        artifact = executors._primary_output_path(spec, outputs, stage_dir)
+        stages.append({
+            "stage_name": spec.stage_name,
+            "owner": spec.owner,
+            "model": spec.model,
+            "executor_model": spec.model,
+            "artifact_path": str(artifact),
+            "outputs": outputs,
+            "created_in_current_run": True,
+            "legacy_contaminated": False,
+            "valid_for_pipeline": True,
+            "status": "accepted" if spec.stage_name == "L5_deepseek_acceptance" else "real",
+        })
+    return stages
 
 
 COMPLETE_EXTERNAL_CALIBRATION_FIXTURE = (
@@ -1887,6 +1921,290 @@ def test_omlx_empty_content_diagnostic_classifies_error_object():
     assert "prefill_memory_exceeded" in diagnostic["error_summary"]
     assert diagnostic["blocked_reason"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
     assert diagnostic["raw_error_code"] == "prefill_memory_exceeded"
+
+
+def test_evidence_judge_omlx_load_time_memory_ceiling_classified_resource_exhausted(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    calls = []
+
+    class FakeAdmin:
+        def __init__(self, base_url, api_key):
+            calls.append(("admin_init", base_url, bool(api_key)))
+
+        def login(self):
+            return True
+
+        def get_models(self):
+            return [{"id": NEMOTRON120B_ACTUAL_MODEL_DEFAULT, "loaded": False, "status": "visible_not_loaded"}]
+
+        def unload_all(self):
+            calls.append(("unload_all",))
+
+        def load_model(self, model_id):
+            calls.append(("load_model", model_id))
+            return {
+                "error": True,
+                "detail": "Cannot load NVIDIA-Nemotron-3-Super-120B-A12B-5bit: projected memory 121.45GB would exceed the memory ceiling 120.00GB (current: 40.21GB, model: 81.24GB). Free system memory or lower memory_guard_tier.",
+            }
+
+        def unload_model(self, model_id):
+            calls.append(("unload_model", model_id))
+            return {"success": True}
+
+    def fail_chat(*args, **kwargs):
+        raise AssertionError("load-time memory ceiling must not send inference request")
+
+    monkeypatch.setenv("OMLX_API_KEY", "omlx-test-key")
+    monkeypatch.setattr(executors, "_OmlxAdmin", FakeAdmin)
+    monkeypatch.setattr(executors, "_omlx_chat_completion", fail_chat)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    executor = LocalTaskEngineExecutor()
+    prompt = "judge evidence load-time resource exhaustion"
+
+    try:
+        executor.run_omlx_model(stage, NEMOTRON120B, prompt)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("load-time memory ceiling must block")
+
+    diagnostic = executor.last_omlx_diagnostics["evidence_judge"]
+    assert "executor_resource_exhausted" in message
+    assert diagnostic["failure_classification"] == "executor_resource_exhausted"
+    assert diagnostic["executor_failure_classification"] == "executor_resource_exhausted"
+    assert diagnostic["resource_exhaustion_type"] == "omlx_admin_load_memory_ceiling"
+    assert diagnostic["blocked_reason"] == "executor_resource_exhausted"
+    assert diagnostic["prompt_failure_classification"] == "not_prompt_too_large"
+    assert diagnostic["contract_failure_classification"] == "not_contract_violation"
+    assert diagnostic["inference_request_sent"] is False
+    assert diagnostic["inference_response_received"] is False
+    assert diagnostic["projected_memory_gb"] == 121.45
+    assert diagnostic["memory_ceiling_gb"] == 120.0
+    assert diagnostic["current_memory_gb"] == 40.21
+    assert diagnostic["model_footprint_gb"] == 81.24
+    assert calls.count(("load_model", NEMOTRON120B_ACTUAL_MODEL_DEFAULT)) == 2
+
+
+def test_evidence_judge_load_time_memory_ceiling_records_prompt_size(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    class FakeAdmin:
+        def __init__(self, base_url, api_key):
+            pass
+
+        def login(self):
+            return True
+
+        def get_models(self):
+            return [{"id": NEMOTRON120B_ACTUAL_MODEL_DEFAULT, "loaded": False}]
+
+        def unload_all(self):
+            pass
+
+        def load_model(self, model_id):
+            return {
+                "error": True,
+                "detail": "Cannot load model: projected memory 121.81GB would exceed the memory ceiling 120.00GB (current: 40.57GB, model: 81.24GB).",
+            }
+
+        def unload_model(self, model_id):
+            return {"success": True}
+
+    monkeypatch.setenv("OMLX_API_KEY", "omlx-test-key")
+    monkeypatch.setattr(executors, "_OmlxAdmin", FakeAdmin)
+    monkeypatch.setattr(executors.time, "sleep", lambda seconds: None)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    executor = LocalTaskEngineExecutor()
+    prompt = "x" * 1234
+
+    try:
+        executor.run_omlx_model(stage, NEMOTRON120B, prompt)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("load-time memory ceiling must block")
+
+    diagnostic = executor.last_omlx_diagnostics["evidence_judge"]
+    assert diagnostic["prompt_chars"] == 1234
+    assert diagnostic["prompt_char_count"] == 1234
+    assert diagnostic["prompt_estimated_tokens"] == 309
+    assert diagnostic["estimated_token_count"] == 309
+    assert diagnostic["prompt_hash"]
+    assert diagnostic["message_count"] == 1
+    assert diagnostic["inference_request_sent"] is False
+
+
+def test_evidence_judge_resource_exhaustion_fallback_allowed(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = _research_decision_l1_l9_stage_fixture(tmp_path)
+
+    class ResourceExhaustedExecutor(LocalTaskEngineExecutor):
+        def run_omlx_model(self, stage, model, prompt):
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            self.last_omlx_diagnostics[stage.stage_name] = {
+                "stage_name": stage.stage_name,
+                "model": stage.model,
+                "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+                "selected_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+                "failure_classification": "executor_resource_exhausted",
+                "executor_failure_classification": "executor_resource_exhausted",
+                "resource_exhaustion_type": "omlx_admin_load_memory_ceiling",
+                "blocked_reason": "executor_resource_exhausted",
+                "error_summary": "projected memory 121.45GB would exceed the memory ceiling 120.00GB (current: 40.21GB, model: 81.24GB)",
+                "projected_memory_gb": 121.45,
+                "memory_ceiling_gb": 120.0,
+                "model_footprint_gb": 81.24,
+                "current_memory_gb": 40.21,
+                "prompt_chars": len(prompt),
+                "prompt_estimated_tokens": max(1, (len(prompt) + 3) // 4),
+                "admin_load_requested": True,
+                "admin_load_returned": True,
+                "inference_request_sent": False,
+                "inference_response_received": False,
+            }
+            raise RuntimeError("evidence_judge: executor_resource_exhausted: OMLX admin load memory ceiling")
+
+    fallback_content = "\n".join(
+        [
+            "evidence_quality_map",
+            "Fallback executor judged evidence quality without changing the contract.",
+            "strength_by_claim",
+            "claim / strength: low / evidence_basis: fixture / uncertainty_or_gap: bounded.",
+            "applicability_to_user_context",
+            "Applicability remains bounded by fixture evidence.",
+            "uncertainty_and_limits",
+            "The fallback preserves uncertainty.",
+            "evidence_gaps_for_later_stages",
+            "Full-text verification remains open.",
+        ]
+    )
+
+    monkeypatch.setenv("HERMES_EVIDENCE_JUDGE_RESOURCE_FALLBACK", "external_high_capacity")
+    monkeypatch.setattr(executors, "_run_gpt_bridge_calibration", lambda prompt: fallback_content)
+
+    result = executors.run_research_decision_evidence_judge_smoke(
+        {"stages": stages},
+        query="判断证据强度并保留 caveats",
+        base_dir=tmp_path,
+        executor=ResourceExhaustedExecutor(),
+    )
+
+    assert result["status"] == "ok"
+    evidence = result["run"]["stages"][-1]
+    assert evidence["stage_name"] == "evidence_judge"
+    assert evidence["status"] == "real_fallback"
+    assert evidence["executor_model"] in {"GPT Bridge", "ChatGPT App Bridge"}
+    assert evidence["fallback_used"] is True
+    assert evidence["fallback_policy"] == "external_high_capacity"
+    assert evidence["fallback_reason"] == "executor_resource_exhausted"
+    assert evidence["primary_failure_classification"] == "executor_resource_exhausted"
+    assert evidence["primary_failure_context"]["inference_request_sent"] is False
+    diagnostic = json.loads((tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["fallback_used"] is True
+    assert diagnostic["blocked_reason"] == "fallback_used_after_executor_resource_exhausted"
+
+
+def test_evidence_judge_resource_exhaustion_blocks_without_approved_fallback(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stages = _research_decision_l1_l9_stage_fixture(tmp_path)
+
+    class ResourceExhaustedExecutor(LocalTaskEngineExecutor):
+        def run_omlx_model(self, stage, model, prompt):
+            self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
+            self.last_omlx_diagnostics[stage.stage_name] = {
+                "stage_name": stage.stage_name,
+                "model": stage.model,
+                "actual_model": NEMOTRON120B_ACTUAL_MODEL_DEFAULT,
+                "failure_classification": "executor_resource_exhausted",
+                "executor_failure_classification": "executor_resource_exhausted",
+                "resource_exhaustion_type": "omlx_admin_load_memory_ceiling",
+                "blocked_reason": "executor_resource_exhausted",
+                "error_summary": "projected memory 121.47GB would exceed the memory ceiling 120.00GB (current: 40.23GB, model: 81.24GB)",
+                "prompt_chars": len(prompt),
+                "prompt_estimated_tokens": max(1, (len(prompt) + 3) // 4),
+                "admin_load_requested": True,
+                "admin_load_returned": True,
+                "inference_request_sent": False,
+                "inference_response_received": False,
+            }
+            raise RuntimeError("evidence_judge: executor_resource_exhausted: OMLX admin load memory ceiling")
+
+    monkeypatch.delenv("HERMES_EVIDENCE_JUDGE_RESOURCE_FALLBACK", raising=False)
+
+    result = executors.run_research_decision_evidence_judge_smoke(
+        {"stages": stages},
+        query="判断证据强度并保留 caveats",
+        base_dir=tmp_path,
+        executor=ResourceExhaustedExecutor(),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "evidence_judge"
+    error = result["run"]["stages"][-1]["error"]
+    assert "blocked_executor_unavailable" in error
+    assert "executor_resource_exhausted" in error
+    diagnostic = json.loads((tmp_path / "evidence_judge" / "evidence_judge.diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["blocked_reason"] == "blocked_executor_unavailable"
+    assert diagnostic["failure_classification"] == "executor_resource_exhausted"
+    assert diagnostic["fallback_used"] is False
+    assert diagnostic["inference_request_sent"] is False
+
+
+def test_request_time_payload_failure_not_classified_as_load_time_resource_exhausted(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    class FakeAdmin:
+        def __init__(self, base_url, api_key):
+            self.loaded = set()
+
+        def login(self):
+            return True
+
+        def get_models(self):
+            return [{"id": NEMOTRON120B_ACTUAL_MODEL_DEFAULT, "loaded": NEMOTRON120B_ACTUAL_MODEL_DEFAULT in self.loaded}]
+
+        def unload_all(self):
+            self.loaded.clear()
+
+        def load_model(self, model_id):
+            self.loaded.add(model_id)
+            return {"success": True}
+
+        def unload_model(self, model_id):
+            self.loaded.discard(model_id)
+            return {"success": True}
+
+    def fake_chat(model, messages, *, api_key, timeout, max_tokens, chat_template_kwargs=None):
+        raise RuntimeError(
+            'OMLX chat HTTP 400: {"error":{"message":"oMLX prefill memory guard rejected this prompt",'
+            '"code":"prefill_memory_exceeded","omlx_code":"prefill_memory_exceeded"}}'
+        )
+
+    monkeypatch.setenv("OMLX_API_KEY", "omlx-test-key")
+    monkeypatch.setattr(executors, "_OmlxAdmin", FakeAdmin)
+    monkeypatch.setattr(executors, "_omlx_chat_completion", fake_chat)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][9]
+    executor = LocalTaskEngineExecutor()
+    try:
+        executor.run_omlx_model(stage, NEMOTRON120B, "prompt too large at request time")
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("request-time prefill failure must block")
+
+    diagnostic = executor.last_omlx_diagnostics["evidence_judge"]
+    assert "OMLX_PREFILL_MEMORY_GUARD_BLOCKED" in message
+    assert diagnostic["blocked_reason"] == "OMLX_PREFILL_MEMORY_GUARD_BLOCKED"
+    assert diagnostic.get("failure_classification") != "executor_resource_exhausted"
+    assert diagnostic["inference_request_sent"] is True
+
 
 
 def test_evidence_judge_default_token_budget_can_fit_required_sections(monkeypatch):

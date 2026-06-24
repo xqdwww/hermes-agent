@@ -691,6 +691,7 @@ class LocalTaskEngineExecutor:
             "stdout": "",
             "stderr": "",
         }
+        diagnostic_context.update(_omlx_intended_prompt_diagnostic(stage, prompt, actual_model))
         partial_content_path = _omlx_partial_content_path(getattr(self, "_current_stage_base_dir", None), stage)
         if partial_content_path:
             diagnostic_context["partial_content_path"] = str(partial_content_path)
@@ -718,6 +719,8 @@ class LocalTaskEngineExecutor:
             diagnostic_context["admin_load_returned"] = True
             diagnostic_context["observed_model_status"] = _omlx_observed_model_status(admin, actual_model)
             if load_result.get("error") and _is_omlx_memory_guard_error(load_result):
+                diagnostic_context["memory_guard_same_model_retry_attempted"] = True
+                diagnostic_context["first_load_error_summary"] = _redact_secret_text(_safe_omlx_error(load_result))
                 admin.unload_all()
                 time.sleep(5)
                 loaded_after_unload = _loaded_omlx_model_ids(admin)
@@ -728,6 +731,17 @@ class LocalTaskEngineExecutor:
             if load_result.get("error"):
                 diagnostic_context["error_type"] = "admin_load_error"
                 diagnostic_context["error_summary"] = _redact_secret_text(_safe_omlx_error(load_result))
+                if stage.stage_name == "evidence_judge" and _is_omlx_memory_guard_error(load_result) and not bool(diagnostic_context.get("inference_request_sent")):
+                    _annotate_omlx_executor_resource_exhaustion_diagnostic(
+                        diagnostic_context,
+                        stage=stage,
+                        actual_model=actual_model,
+                        load_result=load_result,
+                    )
+                    raise RuntimeError(
+                        f"{stage.stage_name}: executor_resource_exhausted: OMLX admin load memory ceiling: "
+                        f"{_safe_omlx_error(load_result)}"
+                    )
                 if _omlx_status_is_ready(str(diagnostic_context.get("observed_model_status") or "")):
                     diagnostic_context["blocked_reason"] = "inference_not_sent"
                     raise RuntimeError(f"{stage.stage_name}: inference_not_sent: OMLX model is ready but load request returned an error")
@@ -1755,22 +1769,63 @@ def run_research_decision_evidence_judge_smoke(
         _require_fresh_prior_for_evidence_judge(stages, base_dir=base_dir)
         prompt = _evidence_judge_prompt_from_artifacts(stages, query=query, base_dir=base_dir)
         diagnostic_prompt = prompt
+        evidence_judge_record_metadata: dict[str, Any] | None = None
         try:
             content = executor.run_omlx_model(stage, stage.model, prompt)
         except RuntimeError as exc:
-            if not _is_omlx_prefill_memory_text(str(exc)):
+            resource_diagnostic = _evidence_judge_resource_exhaustion_diagnostic(executor, stage)
+            if resource_diagnostic is not None:
+                try:
+                    content, evidence_judge_record_metadata = _run_evidence_judge_resource_exhaustion_fallback(
+                        stage,
+                        executor,
+                        prompt=prompt,
+                        base_dir=base_dir,
+                        diagnostic=resource_diagnostic,
+                        original_error=exc,
+                    )
+                    _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
+                except Exception as fallback_exc:
+                    _annotate_evidence_judge_blocked_executor_unavailable(
+                        executor,
+                        stage,
+                        diagnostic=resource_diagnostic,
+                        reason=str(fallback_exc),
+                    )
+                    diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
+                    raise RuntimeError(f"{fallback_exc}; diagnostic_artifact={diagnostic_path}") from exc
+            elif not _is_omlx_prefill_memory_text(str(exc)):
                 raise
-            original_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
-            original_path = _write_omlx_stage_diagnostic_snapshot(
-                stage,
-                original_diagnostic,
-                base_dir=base_dir,
-                filename=f"{stage.stage_name}.diagnostic.json",
-            )
-            compact_prompt = _evidence_judge_compact_prompt_from_artifacts(stages, query=query, base_dir=base_dir)
-            try:
-                content = executor.run_omlx_model(stage, stage.model, compact_prompt)
-            except Exception as retry_exc:
+            else:
+                original_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
+                original_path = _write_omlx_stage_diagnostic_snapshot(
+                    stage,
+                    original_diagnostic,
+                    base_dir=base_dir,
+                    filename=f"{stage.stage_name}.diagnostic.json",
+                )
+                compact_prompt = _evidence_judge_compact_prompt_from_artifacts(stages, query=query, base_dir=base_dir)
+                try:
+                    content = executor.run_omlx_model(stage, stage.model, compact_prompt)
+                except Exception as retry_exc:
+                    compact_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
+                    _annotate_compact_evidence_judge_diagnostic(
+                        compact_diagnostic,
+                        original_diagnostic=original_diagnostic,
+                        original_prompt=prompt,
+                        compact_prompt=compact_prompt,
+                    )
+                    compact_path = _write_omlx_stage_diagnostic_snapshot(
+                        stage,
+                        compact_diagnostic,
+                        base_dir=base_dir,
+                        filename=f"{stage.stage_name}.compact_retry.diagnostic.json",
+                    )
+                    getattr(executor, "last_omlx_diagnostics", {})[stage.stage_name] = dict(original_diagnostic)
+                    raise RuntimeError(
+                        f"{stage.stage_name}: compact_retry_failed_after_prefill_memory_guard: {retry_exc}; "
+                        f"diagnostic_artifact={original_path}; compact_retry_diagnostic_artifact={compact_path}"
+                    ) from retry_exc
                 compact_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
                 _annotate_compact_evidence_judge_diagnostic(
                     compact_diagnostic,
@@ -1778,31 +1833,13 @@ def run_research_decision_evidence_judge_smoke(
                     original_prompt=prompt,
                     compact_prompt=compact_prompt,
                 )
-                compact_path = _write_omlx_stage_diagnostic_snapshot(
+                _write_omlx_stage_diagnostic_snapshot(
                     stage,
                     compact_diagnostic,
                     base_dir=base_dir,
                     filename=f"{stage.stage_name}.compact_retry.diagnostic.json",
                 )
-                getattr(executor, "last_omlx_diagnostics", {})[stage.stage_name] = dict(original_diagnostic)
-                raise RuntimeError(
-                    f"{stage.stage_name}: compact_retry_failed_after_prefill_memory_guard: {retry_exc}; "
-                    f"diagnostic_artifact={original_path}; compact_retry_diagnostic_artifact={compact_path}"
-                ) from retry_exc
-            compact_diagnostic = dict(getattr(executor, "last_omlx_diagnostics", {}).get(stage.stage_name) or {})
-            _annotate_compact_evidence_judge_diagnostic(
-                compact_diagnostic,
-                original_diagnostic=original_diagnostic,
-                original_prompt=prompt,
-                compact_prompt=compact_prompt,
-            )
-            _write_omlx_stage_diagnostic_snapshot(
-                stage,
-                compact_diagnostic,
-                base_dir=base_dir,
-                filename=f"{stage.stage_name}.compact_retry.diagnostic.json",
-            )
-            diagnostic_prompt = compact_prompt
+                diagnostic_prompt = compact_prompt
         debug_content = content
         leaked = _evidence_judge_forbidden_tokens(content)
         if leaked:
@@ -1858,10 +1895,17 @@ def run_research_decision_evidence_judge_smoke(
             outputs=outputs,
             created=True,
             valid=True,
-            status="real",
-            executor_model=getattr(executor, "last_executor_models", {}).get(stage.stage_name, stage.model),
+            status="real_fallback" if evidence_judge_record_metadata else "real",
+            executor_model=(
+                str(evidence_judge_record_metadata.get("fallback_executor_model"))
+                if evidence_judge_record_metadata
+                else getattr(executor, "last_executor_models", {}).get(stage.stage_name, stage.model)
+            ),
         )
-        stages.append(record.__dict__)
+        record_dict = record.__dict__
+        if evidence_judge_record_metadata:
+            record_dict.update(evidence_judge_record_metadata)
+        stages.append(record_dict)
         run = {
             "mode": ENGINE_RESEARCH_DECISION,
             "execution_mode": "real-smoke-research-decision-evidence",
@@ -2628,13 +2672,38 @@ def run_decision_final_smoke(
             base_dir=base_dir,
             research_packet_path=research_packet_path,
         )
+        evidence_judge_record_metadata: dict[str, Any] | None = None
         try:
             content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, evidence_judge_prompt))
         except Exception as exc:
             diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir)
-            if diagnostic_path:
-                raise RuntimeError(f"{exc}; diagnostic_artifact={diagnostic_path}") from exc
-            raise
+            resource_diagnostic = _evidence_judge_resource_exhaustion_diagnostic(executor, stage)
+            if resource_diagnostic is not None:
+                try:
+                    content, evidence_judge_record_metadata = _run_evidence_judge_resource_exhaustion_fallback(
+                        stage,
+                        executor,
+                        prompt=evidence_judge_prompt,
+                        base_dir=base_dir,
+                        diagnostic=resource_diagnostic,
+                        original_error=exc,
+                    )
+                except Exception as fallback_exc:
+                    _annotate_evidence_judge_blocked_executor_unavailable(
+                        executor,
+                        stage,
+                        diagnostic=resource_diagnostic,
+                        reason=str(fallback_exc),
+                    )
+                    diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir) or diagnostic_path
+                    if diagnostic_path:
+                        raise RuntimeError(f"{fallback_exc}; diagnostic_artifact={diagnostic_path}") from exc
+                    raise RuntimeError(str(fallback_exc)) from exc
+                diagnostic_path = _write_omlx_stage_diagnostic(stage, executor, base_dir=base_dir) or diagnostic_path
+            else:
+                if diagnostic_path:
+                    raise RuntimeError(f"{exc}; diagnostic_artifact={diagnostic_path}") from exc
+                raise
         leaked = _evidence_judge_forbidden_tokens(content)
         if leaked:
             debug_path = _write_invalid_stage_debug(stage, content, base_dir=base_dir)
@@ -2675,7 +2744,20 @@ def run_decision_final_smoke(
                 f"evidence_judge: artifact_quality_error:{quality_error}; "
                 f"invalid_artifact={invalid_path}; diagnostic_artifact={diagnostic_path}"
             )
-        _append_real_stage(stages, stage, content, base_dir=base_dir, executor=executor, status="real")
+        _append_real_stage(
+            stages,
+            stage,
+            content,
+            base_dir=base_dir,
+            executor=executor,
+            status="real_fallback" if evidence_judge_record_metadata else "real",
+            executor_model=(
+                str(evidence_judge_record_metadata.get("fallback_executor_model"))
+                if evidence_judge_record_metadata
+                else None
+            ),
+            record_metadata=evidence_judge_record_metadata,
+        )
 
         stage = specs[4]
         _require_decision_prior(stages, ["intelligence_layer", "supplementary_search", "structure_mapper", "evidence_judge"], base_dir=base_dir, consumer_stage=stage.stage_name)
@@ -2915,6 +2997,7 @@ def _append_real_stage(
     executor: TaskEngineExecutor,
     status: str,
     executor_model: str | None = None,
+    record_metadata: dict[str, Any] | None = None,
 ) -> None:
     artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
     record = executor.make_stage_record(
@@ -2927,7 +3010,10 @@ def _append_real_stage(
         status=status,
         executor_model=executor_model or getattr(executor, "last_executor_models", {}).get(stage.stage_name, stage.model),
     )
-    stages.append(record.__dict__)
+    record_dict = record.__dict__
+    if record_metadata:
+        record_dict.update(record_metadata)
+    stages.append(record_dict)
 
 
 def resolve_agy_model_alias(canonical_model: str) -> str:
@@ -3642,6 +3728,292 @@ def _safe_omlx_error(result: dict[str, Any]) -> str:
 def _is_omlx_memory_guard_error(result: dict[str, Any]) -> bool:
     text = json.dumps(result, ensure_ascii=False, default=str).lower()
     return "memory ceiling" in text or "memory_guard_tier" in text or "projected memory" in text
+
+
+def _omlx_intended_prompt_diagnostic(stage: StageSpec, prompt: str, actual_model: str) -> dict[str, Any]:
+    chars = len(prompt or "")
+    return {
+        "prompt_chars": chars,
+        "prompt_char_count": chars,
+        "prompt_estimated_tokens": max(1, (chars + 3) // 4),
+        "estimated_token_count": max(1, (chars + 3) // 4),
+        "prompt_hash": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest(),
+        "prompt_preview_head": _redact_secret_text((prompt or "")[:240]),
+        "prompt_preview_tail": _redact_secret_text((prompt or "")[-240:]),
+        "message_count": 1,
+        "system_message_chars": 0,
+        "user_message_chars": chars,
+        "max_tokens": _omlx_max_tokens_for_stage(stage),
+        "temperature": 0,
+        "stream": False,
+        "chat_template_kwargs": _omlx_chat_template_kwargs_for_stage(stage, actual_model) or {},
+        "endpoint": f"{_omlx_base_url()}/v1/chat/completions",
+        "compact_mode_used": "compact_evidence_judge_packet" in (prompt or ""),
+        "compact_budget": _extract_compact_budget_marker(prompt),
+    }
+
+
+def _omlx_memory_guard_details(result: Any) -> dict[str, Any]:
+    text = json.dumps(result, ensure_ascii=False, default=str)
+
+    def gb(pattern: str) -> float | None:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    return {
+        "projected_memory_gb": gb(r"projected\s+memory\s+([0-9]+(?:\.[0-9]+)?)\s*gb"),
+        "memory_ceiling_gb": gb(r"memory\s+ceiling\s+([0-9]+(?:\.[0-9]+)?)\s*gb"),
+        "current_memory_gb": gb(r"current:\s*([0-9]+(?:\.[0-9]+)?)\s*gb"),
+        "model_footprint_gb": gb(r"model:\s*([0-9]+(?:\.[0-9]+)?)\s*gb"),
+    }
+
+
+def _annotate_omlx_executor_resource_exhaustion_diagnostic(
+    diagnostic: dict[str, Any],
+    *,
+    stage: StageSpec,
+    actual_model: str,
+    load_result: Any,
+) -> None:
+    details = _omlx_memory_guard_details(load_result)
+    diagnostic.update(
+        {
+            "failure_classification": "executor_resource_exhausted",
+            "executor_failure_classification": "executor_resource_exhausted",
+            "resource_exhaustion_type": "omlx_admin_load_memory_ceiling",
+            "blocked_reason": "executor_resource_exhausted",
+            "selected_executor": stage.model,
+            "selected_model": actual_model,
+            "selected_executor_model": actual_model,
+            "inference_request_sent": False,
+            "inference_response_received": False,
+            "prompt_failure_classification": "not_prompt_too_large",
+            "contract_failure_classification": "not_contract_violation",
+            "resource_exhaustion_details": details,
+            "projected_memory_gb": details.get("projected_memory_gb"),
+            "memory_ceiling_gb": details.get("memory_ceiling_gb"),
+            "model_footprint_gb": details.get("model_footprint_gb"),
+            "current_memory_gb": details.get("current_memory_gb"),
+        }
+    )
+
+
+def _evidence_judge_resource_exhaustion_diagnostic(executor: TaskEngineExecutor, stage: StageSpec) -> dict[str, Any] | None:
+    diagnostics = getattr(executor, "last_omlx_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return None
+    data = diagnostics.get(stage.stage_name)
+    if not isinstance(data, dict):
+        return None
+    if str(data.get("failure_classification") or data.get("executor_failure_classification") or "") == "executor_resource_exhausted":
+        return data
+    if (
+        stage.stage_name == "evidence_judge"
+        and bool(data.get("admin_load_returned"))
+        and not bool(data.get("inference_request_sent"))
+        and _is_omlx_memory_guard_error(data)
+    ):
+        data.setdefault("failure_classification", "executor_resource_exhausted")
+        data.setdefault("executor_failure_classification", "executor_resource_exhausted")
+        data.setdefault("resource_exhaustion_type", "omlx_admin_load_memory_ceiling")
+        data.setdefault("blocked_reason", "executor_resource_exhausted")
+        return data
+    return None
+
+
+def _evidence_judge_resource_fallback_policy() -> str:
+    raw = (
+        os.getenv("HERMES_EVIDENCE_JUDGE_RESOURCE_FALLBACK", "").strip()
+        or _hermes_env_value("HERMES_EVIDENCE_JUDGE_RESOURCE_FALLBACK")
+    ).strip().lower()
+    if raw in {"", "none", "block", "disabled", "false", "0"}:
+        return ""
+    if raw in {"external_high_capacity", "external", "gpt_or_gemini_external", "gpt_bridge_or_gemini"}:
+        return "external_high_capacity"
+    raise RuntimeError(f"evidence_judge: unapproved resource fallback policy: {raw}")
+
+
+def _evidence_judge_external_fallback_prompt(prompt: str, diagnostic: dict[str, Any]) -> str:
+    text = str(prompt or "")
+    text = text.replace(
+        "Canonical model: Nemotron-120B. Do not substitute another model.",
+        "Approved executor fallback: primary Nemotron-120B could not load due executor_resource_exhausted; use the approved external high-capacity executor while preserving the evidence_judge output contract.",
+    )
+    text = text.replace(
+        "Run RESEARCH_DECISION stage 10: evidence_judge using Nemotron-120B only.",
+        "Run RESEARCH_DECISION stage 10: evidence_judge using the approved external high-capacity fallback because primary Nemotron-120B hit executor_resource_exhausted.",
+    )
+    return "\n".join(
+        [
+            "Executor fallback context: primary evidence_judge executor failed before inference.",
+            "failure_classification: executor_resource_exhausted",
+            f"selected_model: {diagnostic.get('selected_model') or diagnostic.get('actual_model') or ''}",
+            f"projected_memory_gb: {diagnostic.get('projected_memory_gb')}",
+            f"memory_ceiling_gb: {diagnostic.get('memory_ceiling_gb')}",
+            "Do not mention fallback metadata in the evidence_judge artifact body.",
+            "Return only the evidence_judge contract sections requested below.",
+            "",
+            text,
+        ]
+    )
+
+
+def _evidence_judge_fallback_quality_error(content: str) -> str:
+    leaked = _evidence_judge_forbidden_tokens(content)
+    if leaked:
+        return "forbidden_tokens:" + ",".join(leaked)
+    return _evidence_judge_artifact_quality_error(content)
+
+
+def _annotate_evidence_judge_blocked_executor_unavailable(
+    executor: TaskEngineExecutor,
+    stage: StageSpec,
+    *,
+    diagnostic: dict[str, Any],
+    reason: str,
+) -> None:
+    diagnostics = getattr(executor, "last_omlx_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return
+    data = diagnostics.get(stage.stage_name)
+    if not isinstance(data, dict):
+        return
+    data.update(
+        {
+            "failure_classification": "executor_resource_exhausted",
+            "executor_failure_classification": "executor_resource_exhausted",
+            "blocked_reason": "blocked_executor_unavailable",
+            "fallback_attempted": False,
+            "fallback_used": False,
+            "fallback_policy": _evidence_judge_resource_fallback_policy(),
+            "fallback_block_reason": _redact_secret_text(reason),
+            "original_failure_context": dict(diagnostic),
+        }
+    )
+
+
+def _run_evidence_judge_resource_exhaustion_fallback(
+    stage: StageSpec,
+    executor: TaskEngineExecutor,
+    *,
+    prompt: str,
+    base_dir: str | Path,
+    diagnostic: dict[str, Any],
+    original_error: Exception,
+) -> tuple[str, dict[str, Any]]:
+    policy = _evidence_judge_resource_fallback_policy()
+    if not policy:
+        raise RuntimeError(
+            "evidence_judge: blocked_executor_unavailable: executor_resource_exhausted and no approved fallback configured"
+        )
+    fallback_prompt = _evidence_judge_external_fallback_prompt(prompt, diagnostic)
+    fallback_reasons = [
+        "PRIMARY_EXECUTOR_RESOURCE_EXHAUSTED",
+        f"PRIMARY_ERROR:{_redact_secret_text(str(original_error))}",
+    ]
+    original_context = {
+        "failure_classification": "executor_resource_exhausted",
+        "selected_executor": diagnostic.get("selected_executor") or stage.model,
+        "selected_model": diagnostic.get("selected_model") or diagnostic.get("actual_model"),
+        "error_summary": diagnostic.get("error_summary"),
+        "projected_memory_gb": diagnostic.get("projected_memory_gb"),
+        "memory_ceiling_gb": diagnostic.get("memory_ceiling_gb"),
+        "model_footprint_gb": diagnostic.get("model_footprint_gb"),
+        "current_memory_gb": diagnostic.get("current_memory_gb"),
+        "prompt_chars": diagnostic.get("prompt_chars"),
+        "prompt_estimated_tokens": diagnostic.get("prompt_estimated_tokens"),
+        "inference_request_sent": diagnostic.get("inference_request_sent", False),
+    }
+
+    try:
+        content = _run_gpt_bridge_calibration(fallback_prompt)
+        executor_model = _gpt_bridge_executor_model()
+        quality_error = _evidence_judge_fallback_quality_error(content)
+        if not quality_error:
+            getattr(executor, "last_executor_models", {})[stage.stage_name] = executor_model
+            metadata = _evidence_judge_fallback_record_metadata(
+                policy=policy,
+                executor_model=executor_model,
+                fallback_reasons=fallback_reasons,
+                original_context=original_context,
+            )
+            _annotate_evidence_judge_fallback_success(executor, stage, metadata)
+            return content, metadata
+        fallback_reasons.append(f"GPT_BRIDGE_INVALID:{quality_error}")
+    except Exception as exc:
+        fallback_reasons.append(f"GPT_BRIDGE_UNAVAILABLE:{_redact_secret_text(str(exc))}")
+
+    gemini_stage = StageSpec(stage.stage_name, GEMINI_PRO_HIGH, GEMINI_PRO_HIGH, stage.required_outputs)
+    try:
+        content = executor.run_agy_gemini(gemini_stage, fallback_prompt, GEMINI_PRO_HIGH)
+    except Exception as exc:
+        raise RuntimeError(
+            "evidence_judge: blocked_executor_unavailable: approved fallback unavailable; "
+            f"fallback_reasons={json.dumps(fallback_reasons, ensure_ascii=False)}; "
+            f"gemini_error={_redact_secret_text(str(exc))}"
+        ) from exc
+    executor_model = getattr(executor, "last_executor_models", {}).get(stage.stage_name, GEMINI_PRO_HIGH)
+    quality_error = _evidence_judge_fallback_quality_error(content)
+    if quality_error:
+        raise RuntimeError(
+            "evidence_judge: approved fallback produced invalid artifact; "
+            f"quality_error={quality_error}; fallback_reasons={json.dumps(fallback_reasons, ensure_ascii=False)}"
+        )
+    metadata = _evidence_judge_fallback_record_metadata(
+        policy=policy,
+        executor_model=executor_model,
+        fallback_reasons=fallback_reasons,
+        original_context=original_context,
+    )
+    _annotate_evidence_judge_fallback_success(executor, stage, metadata)
+    return content, metadata
+
+
+def _evidence_judge_fallback_record_metadata(
+    *,
+    policy: str,
+    executor_model: str,
+    fallback_reasons: list[str],
+    original_context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "fallback_used": True,
+        "fallback_policy": policy,
+        "fallback_reason": "executor_resource_exhausted",
+        "fallback_reasons": list(fallback_reasons),
+        "fallback_executor_model": executor_model,
+        "primary_failure_classification": "executor_resource_exhausted",
+        "primary_failure_context": original_context,
+    }
+
+
+def _annotate_evidence_judge_fallback_success(
+    executor: TaskEngineExecutor,
+    stage: StageSpec,
+    metadata: dict[str, Any],
+) -> None:
+    diagnostics = getattr(executor, "last_omlx_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return
+    data = diagnostics.get(stage.stage_name)
+    if not isinstance(data, dict):
+        return
+    data.update(
+        {
+            "blocked_reason": "fallback_used_after_executor_resource_exhausted",
+            "fallback_attempted": True,
+            "fallback_used": True,
+            "fallback_policy": metadata.get("fallback_policy"),
+            "fallback_executor_model": metadata.get("fallback_executor_model"),
+            "fallback_reasons": metadata.get("fallback_reasons"),
+            "original_failure_context": metadata.get("primary_failure_context"),
+        }
+    )
 
 
 def _redact_secret_text(text: str) -> str:
