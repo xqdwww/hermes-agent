@@ -108,11 +108,28 @@ def _complete_research_evidence_packet_text() -> str:
             "accepted: true",
             "checked_stages: [L1_gemini_search, L2_ddgs_supplement, L2_5_codex_evidence_organizer, L3_r1_synthesis, L4_gemini_audit]",
             "missing_or_invalid_artifacts: []",
+            "critical_defects: []",
+            "noncritical_defects: []",
+            "verification_required: []",
+            "evidence_gaps: [long_horizon_transfer_gap]",
+            "handoff_caveats: []",
             "audit_summary: L4 audit accepted the compact evidence packet.",
             "evidence_packet_ready_for_decision: true",
             "",
             "## evidence_strength",
             "Evidence strength: strong for stable current evidence, medium for mechanism transfer, weak for individual long-horizon forecasts.",
+            "",
+            "## claim_table",
+            "- claim_id: C1",
+            "  claim_text: Verified source-backed claim about current evidence and stable mechanism boundaries.",
+            "  epistemic_tier: evidence_supported",
+            "  evidence_strength: medium",
+            "  source_anchors: S1 (full_text_verified; peer_reviewed_source; https://example.test/source)",
+            "  applicability_boundary: Applies within the source population and measurement context.",
+            "  counter_signal_or_failure_condition: Contradictory source passages or failed transfer should downgrade it.",
+            "  evidence_gap: long_horizon_transfer_gap",
+            "  decision_use: can_support_decision",
+            "  notes: Fixture claim table row for L5 contract tests.",
             "",
             "## controversy",
             "Controversy: applicability depends on context, population differences, measurement choices, and whether mechanisms transfer to the target scenario.",
@@ -2484,12 +2501,49 @@ def test_l4_artifact_missing_blocks_validation(tmp_path: Path):
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return {
+                    "source_candidates": [
+                        {
+                            "candidate": "https://guideline.example.test/adhd-parent-training",
+                            "why_relevant": "ADHD parent training evidence covers active intervention degree and monitoring outcomes.",
+                            "coverage_axis": "intervention evidence",
+                        },
+                        {
+                            "candidate": "https://review.example.test/adhd-treatment-review",
+                            "why_relevant": "ADHD treatment review evidence discusses behavioral support, medication boundaries, and uncertainty.",
+                            "coverage_axis": "comparison evidence",
+                        },
+                        {
+                            "candidate": "https://outcomes.example.test/adhd-long-term",
+                            "why_relevant": "ADHD long-term outcome evidence covers follow-up, functional impact, and evidence gaps.",
+                            "coverage_axis": "outcome evidence",
+                        },
+                    ]
+                }
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
-            return _complete_research_evidence_packet_text()
+            return "Gemini audit body"
 
         def run_ddgs(self, stage, queries):
-            return [{"title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return [
+                {
+                    "query": queries[0],
+                    "title": "ADHD intervention evidence review",
+                    "url": "https://example.test/ddgs-review",
+                    "snippet": "ADHD children intervention evidence reports parent training outcomes, monitoring limits, and active treatment degree.",
+                },
+                {
+                    "query": queries[0],
+                    "title": "ADHD treatment outcomes and uncertainty",
+                    "url": "https://example.test/ddgs-outcomes",
+                    "snippet": "ADHD treatment outcome evidence discusses behavioral intervention, medication boundaries, and uncertainty.",
+                },
+                {
+                    "query": queries[0],
+                    "title": "ADHD family intervention follow-up",
+                    "url": "https://example.test/ddgs-family",
+                    "snippet": "ADHD family intervention evidence covers parent training, school coordination, follow-up, and evidence gaps.",
+                },
+            ]
 
         def run_omlx_model(self, stage, model, prompt):
             self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
@@ -2582,10 +2636,11 @@ def test_l1_l5_smoke_accepts_research_packet_and_stops_before_decision(tmp_path:
     assert l5["legacy_contaminated"] is False
     assert l5["valid_for_pipeline"] is True
     packet = Path(l5["artifact_path"]).read_text(encoding="utf-8")
-    assert "verdict: ACCEPTED" in packet
+    assert "verdict: ACCEPTED_WITH_DEFECTS" in packet
     assert "accepted: true" in packet
     assert "L4_gemini_audit" in packet
-    assert "evidence_packet_ready_for_decision: true" in packet
+    assert "evidence_packet_ready_for_decision: conditional" in packet
+    assert "requires_full_text_verification" in packet
     assert "final_controller_report" not in packet
     assert "final report" not in packet.lower()
     assert "最终建议" not in packet
@@ -2595,12 +2650,49 @@ def test_l5_accepted_research_decision_still_incomplete(tmp_path: Path):
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return {
+                    "source_candidates": [
+                        {
+                            "candidate": "https://guideline.example.test/adhd-parent-training",
+                            "why_relevant": "ADHD parent training evidence covers active intervention degree and monitoring outcomes.",
+                            "coverage_axis": "intervention evidence",
+                        },
+                        {
+                            "candidate": "https://review.example.test/adhd-treatment-review",
+                            "why_relevant": "ADHD treatment review evidence discusses behavioral support, medication boundaries, and uncertainty.",
+                            "coverage_axis": "comparison evidence",
+                        },
+                        {
+                            "candidate": "https://outcomes.example.test/adhd-long-term",
+                            "why_relevant": "ADHD long-term outcome evidence covers follow-up, functional impact, and evidence gaps.",
+                            "coverage_axis": "outcome evidence",
+                        },
+                    ]
+                }
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
             return _complete_research_evidence_packet_text()
 
         def run_ddgs(self, stage, queries):
-            return [{"title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return [
+                {
+                    "query": queries[0],
+                    "title": "ADHD intervention evidence review",
+                    "url": "https://example.test/ddgs-review",
+                    "snippet": "ADHD children intervention evidence reports parent training outcomes, monitoring limits, and active treatment degree.",
+                },
+                {
+                    "query": queries[0],
+                    "title": "ADHD treatment outcomes and uncertainty",
+                    "url": "https://example.test/ddgs-outcomes",
+                    "snippet": "ADHD treatment outcome evidence discusses behavioral intervention, medication boundaries, and uncertainty.",
+                },
+                {
+                    "query": queries[0],
+                    "title": "ADHD family intervention follow-up",
+                    "url": "https://example.test/ddgs-family",
+                    "snippet": "ADHD family intervention evidence covers parent training, school coordination, follow-up, and evidence gaps.",
+                },
+            ]
 
         def run_omlx_model(self, stage, model, prompt):
             self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
@@ -3315,6 +3407,28 @@ def test_l5_acceptance_does_not_treat_domain_rejecting_as_audit_rejection():
             "L3_r1_synthesis": "The Arctic route sovereignty dispute is governed by UNCLOS with bounded inference.",
             "L4_gemini_audit": "2008 Ilulissat Declaration reaffirms commitment to UNCLOS, rejecting new comprehensive treaties. Status: Supported.",
         },
+        "claim_table": [
+            {
+                "claim_id": "C1",
+                "claim_text": "UNCLOS provides a current legal framework for bounded Arctic maritime dispute claims.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "medium",
+                "source_anchors": [
+                    {
+                        "source_id": "S1",
+                        "title": "Ilulissat Declaration",
+                        "url_or_stable_locator": "https://example.test/ilulissat",
+                        "source_type": "legal_source",
+                        "support_type": "full_text_verified",
+                    }
+                ],
+                "applicability_boundary": "Applies to legal-framework claims, not factual control claims.",
+                "counter_signal_or_failure_condition": "Later treaties or contradictory legal sources would downgrade it.",
+                "evidence_gap": "current_state_practice_gap",
+                "decision_use": "can_support_decision",
+                "notes": "domain rejection wording is not an audit rejection.",
+            }
+        ],
         "audit_text": "2008 Ilulissat Declaration reaffirms commitment to UNCLOS, rejecting new comprehensive treaties. Status: Supported.",
         "audit_summary": "L4 audit supported the UNCLOS and Arctic maritime dispute claims.",
     }
@@ -3362,7 +3476,10 @@ def test_l5_research_packet_quality_blocks_acceptance_summary_only():
         ]
     )
 
-    assert executors._research_evidence_packet_quality_error(text) == "acceptance_summary_only"
+    assert executors._research_evidence_packet_quality_error(text) in {
+        "acceptance_summary_only",
+        "missing_claim_table",
+    }
 
 
 def test_l5_research_packet_quality_blocks_raw_metadata():
@@ -3382,6 +3499,369 @@ def test_l5_research_packet_quality_accepts_compact_evidence_packet():
     assert "accepted: true" in text
     assert executors._research_evidence_packet_quality_error(text) == ""
     executors._assert_artifact_quality(CANONICAL_STAGES[ENGINE_RESEARCH][-1], text)
+
+
+def test_research_evidence_packet_quality_blocks_shell_packet_without_claim_table():
+    import tools.task_engine_executors as executors
+
+    shell = "\n".join(
+        [
+            "research_evidence_packet",
+            "verdict: ACCEPTED",
+            "accepted: true",
+            "evidence_packet_ready_for_decision: true",
+            "",
+            "## evidence_strength",
+            "Evidence strength discusses evidence in general terms without any claim-level rows or source anchors.",
+            "",
+            "## controversy",
+            "Controversy remains generic and does not bind any concrete claim to a source or limitation.",
+            "",
+            "## evidence_gap",
+            "Evidence gap is generic and lacks applicability boundaries or verification status.",
+            "",
+            "## evidence_supported",
+            "Evidence supported is a template paragraph only.",
+            "",
+            "## reasonable_inference",
+            "Reasonable inference is a template paragraph only.",
+            "",
+            "## foresight_hypothesis",
+            "Foresight hypothesis is a template paragraph only.",
+        ]
+    )
+
+    assert executors._research_evidence_packet_quality_error(shell).startswith("missing_research_packet_sections:")
+
+
+def test_research_evidence_packet_quality_blocks_top_level_without_claim_rows():
+    import tools.task_engine_executors as executors
+
+    text = _complete_research_evidence_packet_text().replace(
+        "- claim_id: C1",
+        "- missing_claim: C1",
+    )
+
+    assert executors._research_evidence_packet_quality_error(text) == "missing_claim_table"
+
+
+def test_claim_packet_contract_blocks_fake_claim_id_with_empty_template_claim():
+    import tools.task_engine_executors as executors
+
+    result = executors._research_claim_contract_validation(
+        claim_table=[
+            {
+                "claim_id": "C1",
+                "claim_text": "Evidence supported. More research is needed. Decision relevant.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "medium",
+                "source_anchors": [
+                    {
+                        "source_id": "S1",
+                        "title": "Verified source",
+                        "url_or_stable_locator": "https://example.test/source",
+                        "source_type": "peer_reviewed_source",
+                        "support_type": "full_text_verified",
+                    }
+                ],
+                "applicability_boundary": "Applies to the decision.",
+                "counter_signal_or_failure_condition": "Contradictory evidence.",
+                "evidence_gap": "none",
+                "decision_use": "can_support_decision",
+            }
+        ],
+        l4_defect_report={"critical_defects": [], "noncritical_defects": [], "verification_required": [], "evidence_gaps": [], "handoff_caveats": []},
+        l2_5_analysis={"l2_5_stub_detected": False, "insufficient_sources": False},
+    )
+
+    assert result["valid"] is False
+    assert "C1:thin_or_template_claim_text" in result["blocking_errors"]
+
+
+def test_claim_packet_contract_blocks_fake_source_anchor_without_locator_or_support_type():
+    import tools.task_engine_executors as executors
+
+    result = executors._research_claim_contract_validation(
+        claim_table=[
+            {
+                "claim_id": "C1",
+                "claim_text": "A concrete current evidence claim with enough detail to require source grounding.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "medium",
+                "source_anchors": [{"source_id": "S1"}],
+                "applicability_boundary": "Bounded to source population.",
+                "counter_signal_or_failure_condition": "Contradictory source.",
+                "evidence_gap": "transfer_gap",
+                "decision_use": "can_support_decision",
+            }
+        ],
+        l4_defect_report={"critical_defects": [], "noncritical_defects": [], "verification_required": [], "evidence_gaps": [], "handoff_caveats": []},
+        l2_5_analysis={"l2_5_stub_detected": False, "insufficient_sources": False},
+    )
+
+    assert result["valid"] is False
+    assert "C1:source_anchor_missing_locator_or_title" in result["blocking_errors"]
+    assert "C1:source_anchor_missing_support_type" in result["blocking_errors"]
+
+
+def test_claim_packet_contract_blocks_snippet_source_marked_full_text_verified():
+    import tools.task_engine_executors as executors
+
+    result = executors._research_claim_contract_validation(
+        claim_table=[
+            {
+                "claim_id": "C1",
+                "claim_text": "A concrete claim derived from a search result snippet must not be marked full-text verified.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "high",
+                "source_anchors": [
+                    {
+                        "source_id": "S1",
+                        "title": "Search result",
+                        "url_or_stable_locator": "https://example.test/snippet",
+                        "source_type": "search_result_snippet",
+                        "support_type": "full_text_verified",
+                    }
+                ],
+                "applicability_boundary": "Bounded to source population.",
+                "counter_signal_or_failure_condition": "Full text may contradict the snippet.",
+                "evidence_gap": "requires_full_text_verification",
+                "decision_use": "can_support_decision",
+            }
+        ],
+        l4_defect_report={"critical_defects": [], "noncritical_defects": [], "verification_required": [], "evidence_gaps": [], "handoff_caveats": []},
+        l2_5_analysis={"l2_5_stub_detected": False, "insufficient_sources": False},
+    )
+
+    assert result["valid"] is False
+    assert "C1:snippet_source_marked_full_text_verified" in result["blocking_errors"]
+
+
+def test_research_packet_quality_blocks_l4_defects_dropped_from_clean_handoff():
+    import tools.task_engine_executors as executors
+
+    text = _complete_research_evidence_packet_text().replace(
+        "audit_summary: L4 audit accepted the compact evidence packet.",
+        "audit_summary: L4 audit status PASS WITH DEFECTS; DEFECT 1 missed counter-signal evidence.",
+    )
+
+    assert executors._research_evidence_packet_quality_error(text) == "l4_defects_not_propagated"
+
+
+def test_claim_packet_snippet_only_core_claim_degrades_to_conditional_ready():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_EVIDENCE_GROUNDED],
+        "profile_acceptance_requirements": executors._research_profile_acceptance_requirements(
+            [executors.PROFILE_EVIDENCE_GROUNDED]
+        ),
+        "missing_or_invalid_artifacts": [],
+        "critical_defects": [],
+        "l2_5_valid": True,
+        "l2_5_analysis": {"l2_5_valid": True, "l2_5_stub_detected": False, "insufficient_sources": False},
+        "claim_table": [
+            {
+                "claim_id": "C1",
+                "claim_text": "Current evidence suggests a bounded intervention effect.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "low",
+                "source_anchors": [
+                    {
+                        "source_id": "S1",
+                        "title": "Search result source",
+                        "url_or_stable_locator": "https://example.test/snippet",
+                        "source_type": "search_result_snippet",
+                        "support_type": "requires_full_text_verification",
+                    }
+                ],
+                "applicability_boundary": "Preliminary evidence only.",
+                "counter_signal_or_failure_condition": "Full text may not support the snippet.",
+                "evidence_gap": "requires_full_text_verification",
+                "decision_use": "use_with_caution",
+                "notes": "snippet-only fixture",
+            }
+        ],
+        "artifact_summaries": {"L2_5_codex_evidence_organizer": "snippet evidence"},
+        "audit_text": "",
+        "audit_summary": "L4 audit artifact present.",
+    }
+
+    rendered = LocalTaskEngineExecutor().run_controller_acceptance(CANONICAL_STAGES[ENGINE_RESEARCH][-1], packet)
+
+    assert "verdict: ACCEPTED_WITH_DEFECTS" in rendered
+    assert "accepted: true" in rendered
+    assert "verification_required: [C1:evidence_supported_requires_full_text_verification, C1:requires_full_text_verification]" in rendered
+    assert "evidence_packet_ready_for_decision: conditional" in rendered
+    assert "evidence_packet_ready_for_decision: true" not in rendered
+    assert "support_type" not in rendered or "full_text_verified" not in rendered
+
+
+def test_l4_pass_with_defects_propagates_to_conditional_handoff():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "profile_acceptance_requirements": executors._research_profile_acceptance_requirements(
+            [executors.PROFILE_FORESIGHT_MECHANISM]
+        ),
+        "missing_or_invalid_artifacts": [],
+        "critical_defects": [],
+        "l2_5_valid": True,
+        "l2_5_analysis": {"l2_5_valid": True, "l2_5_stub_detected": False, "insufficient_sources": False},
+        "claim_table": [
+            {
+                "claim_id": "C1",
+                "claim_text": "Future interface shift may change the value of current capabilities.",
+                "epistemic_tier": "foresight_hypothesis",
+                "evidence_strength": "low",
+                "source_anchors": [
+                    {
+                        "source_id": "S1",
+                        "title": "Scenario source",
+                        "url_or_stable_locator": "https://example.test/scenario",
+                        "source_type": "source_candidate",
+                        "support_type": "secondary_summary",
+                    }
+                ],
+                "applicability_boundary": "Future scenario only.",
+                "counter_signal_or_failure_condition": "Future interfaces may reverse the mechanism.",
+                "evidence_gap": "future_environment_gap",
+                "decision_use": "use_with_caution",
+                "notes": "foresight fixture",
+            }
+        ],
+        "artifact_summaries": {
+            "L3_r1_synthesis": (
+                "evidence basis plus reasonable inference and foresight hypothesis. "
+                "mechanism_chain input variables to mediating mechanisms to output variables. "
+                "uncertainty_boundary and counterexample_or_failure conditions are explicit."
+            )
+        },
+        "audit_text": "Status: PASS WITH DEFECTS\nDEFECT 1 (Missed Counter-Signal Evidence): missing interface modality counter-signal.",
+        "audit_summary": "PASS WITH DEFECTS",
+    }
+
+    rendered = LocalTaskEngineExecutor().run_controller_acceptance(CANONICAL_STAGES[ENGINE_RESEARCH][-1], packet)
+
+    assert "verdict: ACCEPTED_WITH_DEFECTS" in rendered
+    assert "noncritical_defects:" in rendered
+    assert "l4_pass_with_defects" in rendered
+    assert "missed_counter_signal" in rendered
+    assert "handoff_caveats:" in rendered
+    assert "evidence_packet_ready_for_decision: conditional" in rendered
+
+
+def test_valid_claim_packet_good_is_clean_ready():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "research_packet_profile": [executors.PROFILE_EVIDENCE_GROUNDED],
+        "profile_acceptance_requirements": executors._research_profile_acceptance_requirements(
+            [executors.PROFILE_EVIDENCE_GROUNDED]
+        ),
+        "missing_or_invalid_artifacts": [],
+        "critical_defects": [],
+        "l2_5_valid": True,
+        "l2_5_analysis": {"l2_5_valid": True, "l2_5_stub_detected": False, "insufficient_sources": False},
+        "claim_table": [
+            {
+                "claim_id": "C1",
+                "claim_text": "Full-text verified current evidence supports this bounded claim.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "medium",
+                "source_anchors": [
+                    {
+                        "source_id": "S1",
+                        "title": "Verified source",
+                        "url_or_stable_locator": "https://example.test/full-text",
+                        "source_type": "peer_reviewed_source",
+                        "support_type": "full_text_verified",
+                    }
+                ],
+                "applicability_boundary": "Bounded to source population.",
+                "counter_signal_or_failure_condition": "Contradictory full-text source.",
+                "evidence_gap": "long_horizon_transfer_gap",
+                "decision_use": "can_support_decision",
+                "notes": "valid fixture",
+            }
+        ],
+        "artifact_summaries": {"L2_5_codex_evidence_organizer": "verified evidence"},
+        "audit_text": "Status: Supported.",
+        "audit_summary": "L4 supported the claim.",
+    }
+
+    rendered = LocalTaskEngineExecutor().run_controller_acceptance(CANONICAL_STAGES[ENGINE_RESEARCH][-1], packet)
+
+    assert "verdict: ACCEPTED\n" in rendered
+    assert "accepted: true" in rendered
+    assert "evidence_packet_ready_for_decision: true" in rendered
+    assert "claim_id: C1" in rendered
+
+
+def test_foresight_claim_boundary_blocks_future_as_evidence_supported():
+    import tools.task_engine_executors as executors
+
+    claim_table = [
+        {
+            "claim_id": "C1",
+            "claim_text": "Future AI interfaces will make this capability valuable over the next 10 years.",
+            "epistemic_tier": "evidence_supported",
+            "evidence_strength": "medium",
+            "source_anchors": [{"source_id": "S1", "support_type": "full_text_verified"}],
+        }
+    ]
+
+    result = executors._research_claim_contract_validation(
+        claim_table=claim_table,
+        l4_defect_report={"critical_defects": [], "noncritical_defects": [], "verification_required": [], "evidence_gaps": [], "handoff_caveats": []},
+        l2_5_analysis={"l2_5_stub_detected": False, "insufficient_sources": False},
+    )
+
+    assert result["valid"] is False
+    assert "C1:future_claim_misclassified_as_evidence_supported" in result["blocking_errors"]
+
+
+def test_missing_source_anchor_bad_invalidates_claim_packet():
+    import tools.task_engine_executors as executors
+
+    result = executors._research_claim_contract_validation(
+        claim_table=[
+            {
+                "claim_id": "C1",
+                "claim_text": "Claim without retained source anchor.",
+                "epistemic_tier": "evidence_supported",
+                "evidence_strength": "insufficient",
+                "source_anchors": [],
+            }
+        ],
+        l4_defect_report={"critical_defects": [], "noncritical_defects": [], "verification_required": [], "evidence_gaps": [], "handoff_caveats": []},
+        l2_5_analysis={"l2_5_stub_detected": False, "insufficient_sources": False},
+    )
+
+    assert result["valid"] is False
+    assert "C1:missing_source_anchors" in result["blocking_errors"]
+
+
+def test_decision_handoff_caveats_good_allows_accepted_with_defects():
+    import tools.task_engine_executors as executors
+
+    text = _complete_research_evidence_packet_text().replace(
+        "verdict: ACCEPTED",
+        "verdict: ACCEPTED_WITH_DEFECTS",
+    ).replace(
+        "verification_required: []",
+        "verification_required: [C1:requires_full_text_verification]",
+    ).replace(
+        "handoff_caveats: []",
+        "handoff_caveats: [C1 must be used with caution]",
+    ).replace(
+        "evidence_packet_ready_for_decision: true",
+        "evidence_packet_ready_for_decision: conditional",
+    )
+
+    assert executors._research_evidence_packet_quality_error(text) == ""
+    assert executors._l5_acceptance_text_is_accepted(text) is True
 
 
 def test_foresight_l5_maps_boundary_and_counterexample_synonyms():
