@@ -23,6 +23,8 @@ Use this skill to convert local papers, PDFs, BibTeX files, Zotero exports, Rese
 
 The core objective is synthesis of scholarly literature with claim-level citation grounding. The output must be a high-quality academic review with a research question, review scope, theoretical structure, thematic synthesis, methodological comparison, evidence-strength appraisal, controversy handling, gap analysis, limitations, and traceable citations for key claims.
 
+If the user has not provided papers, the default is `online_literature_acquisition_default`: acquire scholarly sources online first, then verify evidence tiers before making claims. User-provided PDFs or bibliographies are helpful but not required by default.
+
 This skill is not a normal Research final answer, a Decision report, or a source collage. It must not produce:
 
 - A quick concept summary.
@@ -41,6 +43,7 @@ Use this skill when the user asks for any of the following:
 
 - A literature review, academic review, scholarly review, or 文献综述.
 - A review built from a supplied set of papers, PDFs, BibTeX entries, Zotero exports, or research notes.
+- A review where the user has no corpus yet and expects Hermes to find scholarly literature online.
 - A synthesis of a Research evidence packet into an academic literature review.
 - A comparison of theoretical lineages, method evolution, evidence strength, disagreements, or future research gaps in a scholarly field.
 - A state-of-the-field review, scoping review, theoretical review, methodological review, systematic-style review, mini-review, or preliminary academic review.
@@ -83,7 +86,7 @@ Collect and confirm:
 - `output_language`: Chinese, English, bilingual notes, or another user-specified language.
 - `target_length`: target length or document scale.
 - `citation_style`: requested citation format.
-- `source_corpus`: local PDFs, file paths, BibTeX, Zotero export, existing Research evidence packet, or an explicit declaration that the corpus is not ready.
+- `source_corpus`: local PDFs, file paths, BibTeX, Zotero export, existing Research evidence packet, or `online_literature_acquisition_default` when the user has not supplied sources.
 - `expected_source_count`: expected number of papers or user-provided corpus size.
 - `full_text_availability`: full text, partial full text, abstract only, metadata only, or mixed.
 - `date_range`: publication-year scope when relevant.
@@ -115,7 +118,7 @@ Hermes must present an intake form before writing. Divide fields into required, 
 3. `review_type`: One of `narrative_review`, `scoping_review`, `systematic_style_review`, `theoretical_review`, `methodological_review`, `state_of_the_field_review`, `mini_review`, or `preliminary_review`.
 4. `target_length`: Examples include `1500 words`, `3000 words`, `5000 words`, `8000 words`, or `journal-style long review`.
 5. `citation_style`: Examples include APA, MLA, Chicago, Vancouver, GB/T 7714, author-year, or numeric.
-6. `source_corpus`: Literature source, such as local PDF directory, file paths, BibTeX, Zotero export, existing Research evidence packet, or explicit statement that corpus is not ready.
+6. `source_corpus`: Literature source, such as local PDF directory, file paths, BibTeX, Zotero export, existing Research evidence packet, or `online_literature_acquisition_default` if the user has not supplied papers.
 7. `expected_source_count`: Expected source count, such as 5, 10-20, 30-50, or user-provided corpus only.
 8. `full_text_availability`: One of all full text available, partial full text, abstract only, metadata only, or mixed.
 9. `target_audience`: Examples include undergraduate, graduate seminar, journal submission draft, thesis chapter, or internal research memo.
@@ -156,13 +159,13 @@ Hermes must not begin formal review writing unless at least these fields are pre
 - `review_type`
 - `target_length`
 - `citation_style`
-- `source_corpus` or an explicit `corpus_missing` declaration.
+- `source_corpus`, `online_literature_acquisition_default`, or an explicit `corpus_missing` declaration.
 - `expected_source_count`
 - `full_text_availability`
 - `target_audience`
 - `output_language`
 
-If `source_corpus` is missing, Hermes may only return `BLOCKED_NO_SOURCES` or a preliminary planning / source acquisition checklist. It must not generate a formal `literature_review.md`.
+If `source_corpus` is missing, default to `online_literature_acquisition_default` unless the user forbids online acquisition or the environment cannot acquire sources. If neither user-provided sources nor online acquisition is available, Hermes may only return `BLOCKED_NO_SOURCES` or a preliminary planning / source acquisition checklist. It must not generate a formal `literature_review.md`.
 
 ## default_intake_response
 
@@ -177,7 +180,7 @@ Default Chinese first response:
 3. 综述类型：
 4. 目标篇幅：
 5. 引用格式：
-6. 文献来源 / 文件路径：
+6. 文献来源 / 文件路径（没有就写：默认在线检索）：
 7. 预计文献数量：
 8. full text 状态：
 9. 目标读者：
@@ -215,6 +218,87 @@ This skill may be invoked by Hermes as a passive optional skill, but it must not
 
 Hermes may surface the intake form and later call the writer / validator flow manually after the user supplies the required inputs. Research engine runtime behavior must remain unchanged. Do not add automatic Research pipeline invocation, task-engine routing, or Decision integration unless a later explicit task asks for runtime integration.
 
+## online_literature_acquisition_default
+
+Default source policy:
+
+- `auto_online_acquisition_default: true`
+- `source_corpus_required_by_default: false`
+- `source_discovery_not_evidence: true`
+
+User-provided papers, PDFs, BibTeX files, Zotero exports, or Research evidence packets are not required by default. If the user asks for a literature review without supplying papers, Hermes should assume online scholarly source acquisition is needed, then ask for intake fields that constrain the search.
+
+Online acquisition must be quality-first and provenance-heavy:
+
+- Search for scholarly sources through credible academic indexes, publisher pages, repositories, DOI metadata, library exports, or user-approved web search.
+- Prefer full text, accepted manuscripts, publisher pages, stable repository records, DOI pages, and complete bibliographic exports.
+- Treat search snippets, discovery rankings, metadata previews, and model-generated source lists as discovery leads only.
+- Do not cite or synthesize from discovery leads until they are promoted into evidence tiers through source verification.
+- Record acquisition path, retrieval date, source URL or DOI, full-text availability, evidence tier, and source anchors in `provenance.json`.
+- If online acquisition cannot produce enough citable sources, return `BLOCKED_NO_SOURCES`, `BLOCKED_BIBLIOGRAPHY_INCOMPLETE`, or a downgraded `preliminary_review`.
+
+## model_execution_policy
+
+This skill is quality-first by default and must not optimize for token savings, speed, or cheap execution when claim quality is at stake.
+
+Model policy constants:
+
+- `quality_first_default: true`
+- `stability_over_speed: true`
+- `fixed_model_chain_required: true`
+- `executor_model_choice: forbidden`
+- `source_discovery_model: GPT Bridge primary`
+- `final_writer_primary: GPT Bridge primary`
+- `final_writer_fallback: Gemini 3.1 Pro High`
+- `external_calibrator_must_differ_from_writer: true`
+- `deterministic_validator_final_gate: true`
+- `no_9b_executor: true`
+- `minimum_local_executor: 27B+`
+- `forbidden_final_writers`: 9B models, local lightweight executors, 27B local executors, metadata cleanup executors, source discovery executors, external calibrators, and any unlisted model.
+
+Fixed execution chain:
+
+1. Source discovery and acquisition planning use `source_discovery_model: GPT Bridge primary`. If that model is unavailable, use only another high-capability external model explicitly approved for source discovery; do not silently substitute a local lightweight model.
+2. Extraction, synthesis planning, evidence appraisal, and claim drafting use the same quality-first standard. Weak-model drafts are not allowed for scholarly claims.
+3. Final writing uses `final_writer_primary: GPT Bridge primary`.
+4. If GPT Bridge primary is unavailable, final writing may use `final_writer_fallback: Gemini 3.1 Pro High`.
+5. External calibration must use a model different from the final writer. If the writer is GPT Bridge primary, Gemini 3.1 Pro High may calibrate. If the writer is Gemini 3.1 Pro High, calibration must use GPT Bridge primary or another separate high-capability external model; otherwise block with `BLOCKED_EXTERNAL_CALIBRATOR_NOT_SEPARATE`.
+6. The deterministic `academic_literature_review_contract` validator is the final gate. No model output can override validator failures.
+
+9B model ban:
+
+- 9B models must not enter this skill execution chain for source discovery, extraction, synthesis, writing, calibration, validation interpretation, repair, or formatting.
+- If a 9B model is proposed or detected, return `FAIL_FORBIDDEN_9B_EXECUTOR`.
+
+Local lightweight executor limits:
+
+- A local lightweight executor must be at least 27B+.
+- Even at 27B+, local lightweight execution is restricted to formatting, normalization, metadata cleanup, filename cleanup, CSV shape cleanup, BibTeX normalization, and other non-claim support.
+- Local lightweight executors must not create, rewrite, evaluate, calibrate, or repair scholarly claims.
+- If a local executor below 27B is used, return `FAIL_LOCAL_EXECUTOR_BELOW_27B`.
+- If any local lightweight executor is used for claims, return `FAIL_LOCAL_EXECUTOR_USED_FOR_CLAIMS`.
+
+## hardened_execution_lessons
+
+Apply these Codex / Hermes hardened execution lessons whenever this skill is invoked:
+
+| lesson | rule |
+| --- | --- |
+| `passive_boundary` | Keep this as a passive optional skill. Do not turn it into a Research runtime route, Decision route, or automatic task-engine mode. |
+| `intake_first` | Start with Hermes intake before writing; do not draft a review from an underspecified user request. |
+| `git_scope_guard` | When changing this skill or tests, commit only the intended skill/test files and never sweep unrelated dirty worktree files into the change. |
+| `head_stability` | Record and preserve the expected branch / HEAD during implementation or validation work; do not hide branch movement. |
+| `no_acceptance_shell` | Do not treat ad hoc shell success, broad acceptance scripts, or model self-approval as proof that the scholarly contract passed. |
+| `source_discovery_not_evidence` | Discovery results, search snippets, rankings, and metadata are retrieval leads, not scholarly evidence. |
+| `no_fake_repair` | Do not invent missing DOI values, citations, anchors, papers, methods, or findings to repair a package. |
+| `strong_model_or_block` | Use the fixed high-capability model chain for scholarly work; if only weak executors are available, block or downgrade. |
+| `calibration_separation` | Keep external calibration separate from the final writer and report disagreement instead of smoothing it away. |
+| `deterministic_validator_authority` | Treat deterministic validator failure as authoritative until the package is actually repaired and revalidated. |
+| `failure_first` | Prefer explicit failure codes over fluent but unsupported output. |
+| `route_pollution_guard` | Do not modify TaskMode, Research / Decision routing, skill discovery, or task-engine core to make this skill run automatically. |
+| `provenance` | Preserve source paths, URLs, DOIs, evidence tiers, anchors, acquisition dates, model roles, validator results, and downgrade reasons. |
+| `runtime_mutation_guard` | Do not mutate Research engine runtime behavior, Decision routing behavior, or task-engine executor behavior while applying this skill. |
+
 ## input_contract
 
 Accept these fields when available. Missing fields must be inferred conservatively or recorded in `quality_gate_report.md`.
@@ -223,7 +307,7 @@ Accept these fields when available. Missing fields must be inferred conservative
 | --- | --- | --- |
 | `research_question` | required | The question, problem, construct, hypothesis space, or field relationship the review addresses. |
 | `review_type` | required | One of `narrative_review`, `scoping_review`, `systematic_style_review`, `theoretical_review`, `methodological_review`, `state_of_the_field_review`, `mini_review`, or `preliminary_review`. |
-| `corpus` | required unless supplied by paths or packet | The set of scholarly sources to review, including papers, reports, chapters, theses, or structured evidence records. |
+| `corpus` | optional by default | The set of scholarly sources to review, including papers, reports, chapters, theses, or structured evidence records. If omitted, use `online_literature_acquisition_default`. |
 | `source_paths` | optional | Local paths for PDFs, text extracts, markdown notes, CSVs, BibTeX files, Zotero exports, or evidence artifacts. |
 | `bibliography` | optional | BibTeX, CSL JSON, RIS, Zotero export, or citation metadata. |
 | `evidence_packet` | optional | Hermes Research evidence packet with source ids, claim ids, evidence tiers, anchors, defects, and gap records. |
@@ -238,7 +322,7 @@ Accept these fields when available. Missing fields must be inferred conservative
 | `minimum_corpus_size` | optional | Minimum number of usable scholarly sources required for the requested review type. |
 | `full_text_requirement` | optional | Whether strong claims, field claims, or all included papers require full-text verification. |
 
-If `research_question` is missing but the user supplies a corpus and clear topic, draft a narrow research question and record it as an assumption. If neither question nor corpus is clear, return `BLOCKED_NO_SOURCES` or request clarification.
+If `research_question` is missing but the user supplies a corpus and clear topic, draft a narrow research question and record it as an assumption. If neither question nor corpus is clear, use intake-first online acquisition planning. Return `BLOCKED_NO_SOURCES` only when no user corpus is supplied and online acquisition is unavailable or fails to find usable citable sources.
 
 ## evidence_tiers
 
@@ -466,15 +550,22 @@ Run these hard gates before marking the review PASS:
 | `no_fake_doi` | DOI/URL fields are present only when verified from metadata or source files. | Remove or fail. |
 | `no_unsupported_consensus_claim` | Consensus claims require multiple credible sources and evidence-tier support. | Downgrade or fail. |
 | `no_snippet_based_scholarly_claim` | Search snippets are not used to support scholarly claims. | Fail or downgrade to retrieval note. |
+| `source_discovery_not_evidence` | Online discovery leads are promoted to verified evidence tiers before supporting claims. | Fail with `FAIL_SOURCE_DISCOVERY_USED_AS_EVIDENCE`. |
 | `no_overgeneralization_from_single_study` | Single-study findings are not framed as field consensus. | Revise claim strength. |
 | `claim_source_traceability_required` | Key claims map to source ids, citation keys, anchors, evidence tiers, and claim strength. | Fail with `BLOCKED_CITATION_TRACE_MISSING`. |
 | `counter_evidence_required` | Relevant contradictions, null findings, or rival explanations are represented. | Fail unless corpus lacks counter-evidence and this is stated. |
 | `limitations_required` | Review limitations and source limitations are explicit. | Fail or revise. |
 | `evidence_tier_labels_required` | Evidence tiers appear in paper index, claim table, matrix, provenance, and quality report. | Fail. |
 | `output_files_complete` | Required outputs exist or omissions are justified. | Fail. |
+| `fixed_model_chain_required` | The fixed model execution chain is used; executor does not choose models ad hoc. | Fail with `FAIL_MODEL_CHAIN_NOT_FIXED`. |
+| `no_9b_executor` | No 9B model enters any part of this skill execution chain. | Fail with `FAIL_FORBIDDEN_9B_EXECUTOR`. |
+| `local_executor_claim_block` | Local lightweight executors are 27B+ and restricted to non-claim support. | Fail with `FAIL_LOCAL_EXECUTOR_USED_FOR_CLAIMS` or `FAIL_LOCAL_EXECUTOR_BELOW_27B`. |
+| `external_calibrator_separate` | External calibrator is not the same model as the final writer. | Block with `BLOCKED_EXTERNAL_CALIBRATOR_NOT_SEPARATE`. |
+| `deterministic_validator_final_gate` | Deterministic validator is the final gate and cannot be overridden by a model. | Fail with `FAIL_VALIDATOR_NOT_FINAL_GATE`. |
 | `no_patchwork_review` | The review is not a paper-by-paper collage. | Fail with `FAIL_PATCHWORK_REVIEW`. |
 | `cross_source_synthesis_required` | Main theme sections integrate multiple sources or justify exceptions. | Fail with `FAIL_NO_CROSS_SOURCE_SYNTHESIS`. |
 | `academic_quality_score_at_least_80` | Rubric score is 80/100 or higher. | Fail with `FAIL_ACADEMIC_QUALITY_BELOW_THRESHOLD`. |
+| `runtime_mutation_guard` | Skill execution does not mutate Research runtime, routing, TaskMode, or task-engine core. | Fail with `FAIL_RUNTIME_MUTATION_ATTEMPTED`. |
 
 Quality gates must be recorded in `quality_gate_report.md` with pass/fail values and evidence.
 
@@ -521,11 +612,20 @@ Use these outcome labels when the contract cannot be satisfied:
 | failure mode | meaning |
 | --- | --- |
 | `BLOCKED_NO_SOURCES` | No usable citable scholarly sources are available. |
+| `BLOCKED_ONLINE_SOURCE_ACQUISITION_UNAVAILABLE` | The user supplied no corpus and online scholarly acquisition is unavailable or blocked. |
 | `BLOCKED_NO_FULL_TEXT_FOR_STRONG_CLAIMS` | Strong claims are requested but no full-text-verified evidence supports them. |
 | `BLOCKED_CITATION_TRACE_MISSING` | Key claims cannot be traced to citation keys, paper ids, anchors, or evidence tiers. |
 | `BLOCKED_CORPUS_TOO_SMALL_FOR_FIELD_CLAIMS` | Corpus is too small or narrow for field-level claims. |
 | `BLOCKED_CONTRADICTORY_EVIDENCE_UNRESOLVED` | Contradictions are material but cannot be represented or interpreted from available evidence. |
 | `BLOCKED_BIBLIOGRAPHY_INCOMPLETE` | Required citation metadata is too incomplete to produce a responsible bibliography. |
+| `BLOCKED_EXTERNAL_CALIBRATOR_NOT_SEPARATE` | No separate high-capability external calibrator is available for the selected final writer. |
+| `FAIL_SOURCE_DISCOVERY_USED_AS_EVIDENCE` | Search snippets, rankings, metadata previews, or discovery leads were used as scholarly evidence. |
+| `FAIL_MODEL_CHAIN_NOT_FIXED` | Executor selected models ad hoc instead of following the fixed model execution chain. |
+| `FAIL_FORBIDDEN_9B_EXECUTOR` | A 9B model was used or proposed anywhere in the skill execution chain. |
+| `FAIL_LOCAL_EXECUTOR_BELOW_27B` | A local lightweight executor below 27B was used. |
+| `FAIL_LOCAL_EXECUTOR_USED_FOR_CLAIMS` | A local lightweight executor was used to create, revise, appraise, calibrate, or repair scholarly claims. |
+| `FAIL_VALIDATOR_NOT_FINAL_GATE` | A model or manual override bypassed deterministic validator failure. |
+| `FAIL_RUNTIME_MUTATION_ATTEMPTED` | The workflow attempted to modify TaskMode, routing, Research runtime, or task-engine core. |
 | `FAIL_PATCHWORK_REVIEW` | Output is a source collage, citation dump, or paper-by-paper review rather than synthesis. |
 | `FAIL_ANNOTATED_BIBLIOGRAPHY_ONLY` | Output is only an annotated bibliography when a synthesis review was required. |
 | `FAIL_NO_THEORETICAL_STRUCTURE` | Review lacks conceptual or theoretical framing. |
@@ -584,15 +684,17 @@ Integration rules:
 Use this workflow:
 
 1. Confirm the review question, review type, target audience, citation style, and required scope.
-2. Inventory sources and assign `paper_id`, `citation_key`, source path, metadata, and evidence tier.
-3. Extract source records using `extraction_schema`.
-4. Reject or downgrade claims that exceed evidence tier limits.
-5. Build concept definitions, theoretical map, method taxonomy, theme clusters, evidence-strength map, debate map, and gap map.
-6. Draft `literature_review.md` around synthesis functions, not source order.
-7. Generate `claim_citation_table.md`, `evidence_matrix.csv`, `paper_index.md`, `method_taxonomy.md`, `debate_map.md`, `gap_and_future_work.md`, `bibliography.bib` when possible, and `provenance.json`.
-8. Run `quality_gates` and score `academic_review_rubric`.
-9. If score is below 80, patchwork risk is high, or traceability fails, return the appropriate failure mode instead of PASS.
-10. Final response must summarize score, output type, evidence strength, risks, and output paths.
+2. If the user supplied no corpus, use `online_literature_acquisition_default` to find scholarly sources; treat discovery results as leads, not evidence.
+3. Inventory sources and assign `paper_id`, `citation_key`, source path or URL, metadata, evidence tier, acquisition path, and source anchors.
+4. Extract source records using `extraction_schema`.
+5. Reject or downgrade claims that exceed evidence tier limits.
+6. Build concept definitions, theoretical map, method taxonomy, theme clusters, evidence-strength map, debate map, and gap map.
+7. Draft `literature_review.md` around synthesis functions, not source order, using the fixed writer policy.
+8. Run external calibration with a model different from the final writer and preserve disagreement.
+9. Generate `claim_citation_table.md`, `evidence_matrix.csv`, `paper_index.md`, `method_taxonomy.md`, `debate_map.md`, `gap_and_future_work.md`, `bibliography.bib` when possible, and `provenance.json`.
+10. Run `quality_gates`, score `academic_review_rubric`, and run the deterministic package validator as the final gate.
+11. If score is below 80, patchwork risk is high, traceability fails, model policy is violated, or validator fails, return the appropriate failure mode instead of PASS.
+12. Final response must summarize score, output type, evidence strength, risks, model-policy compliance, validator status, and output paths.
 
 ## acceptance_tests
 
