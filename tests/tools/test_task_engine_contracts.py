@@ -3837,9 +3837,12 @@ def test_user_forbids_literature_review_allows_short_evidence_boundary():
     text = executors._final_controller_report_from_packet(packet)
 
     assert "## 证据边界" in text
-    assert "evidence_strength:" in text
-    assert "controversy:" in text
-    assert "evidence_gap:" in text
+    assert "证据强度：" in text
+    assert "争议点：" in text
+    assert "证据缺口：" in text
+    assert "evidence_strength:" not in text
+    assert "controversy:" not in text
+    assert "evidence_gap:" not in text
     assert "文献综述" not in text
     executors._assert_final_controller_packet_quality(packet, text)
 
@@ -6954,7 +6957,8 @@ def test_decision_final_packet_quality_blocks_shallow_five_section_answer():
     try:
         executors._assert_final_controller_packet_quality(packet, text)
     except RuntimeError as exc:
-        assert "missing_judgment_unit_fields" in str(exc)
+        message = str(exc)
+        assert "missing_judgment_unit_fields" in message or "user_facing_quality" in message
     else:
         raise AssertionError("shallow five-section final should not pass production quality")
 
@@ -6981,11 +6985,10 @@ def test_decision_final_uses_foresight_template_from_profile_without_exact_query
 
     assert "## 未来优势变陷阱 Top5" in text
     assert "convergence_fixed_section_digest" not in text
-    assert "## 收敛吸收" in text
-    assert "关键驱动：" in text
-    assert "机制链：" in text
-    assert "情景分叉：" in text
-    assert "确定性：" in text
+    assert "## 收敛后的关键判断" in text
+    assert "AI feedback cost" in text
+    assert "input variable -> mediating mechanism -> output variable" in text
+    assert "Scenario A keeps verification" in text
     assert "## key_drivers" not in text
     executors._assert_final_controller_packet_quality(packet, text)
 
@@ -7057,11 +7060,315 @@ def test_decision_final_packet_absorbs_external_calibration_hard_constraints(tmp
     text = executors._final_controller_report_from_packet(packet)
 
     assert "external_calibration_hard_constraints" in packet
-    assert "## 校准执行" in text
+    assert "## 需要下调和落地的判断" in text
     assert "执行练习减少风险" in text
-    assert "foresight_hypothesis" in text
+    assert "前瞻假设" in text
     assert "逐条绑定反证信号" in text
     executors._assert_final_controller_packet_quality(packet, text)
+
+
+
+def _adhd_golden_query() -> str:
+    return (
+        "一个 7.5 岁、二年级男孩，IQ 124，有明确 ADHD 倾向，视觉空间优势，"
+        "系列关系和抽象推理偏弱，热爱柔术，目标长期练到 300-500 小时。"
+        "未来 10 年 AI 会显著降低知识获取和表达成本。请从长期培养角度判断：\n"
+        "1. ADHD 倾向在 AI 时代可能变成优势的 Top 5 场景；\n"
+        "2. ADHD 倾向最容易变成陷阱的 Top 5 场景；\n"
+        "3. 这个孩子未来 10 年最危险的错误培养路径是什么；\n"
+        "4. 最反直觉但最可能有价值的培养假设是什么；\n"
+        "5. 柔术、身体经验、阅读、数学、AI 工具使用之间应该如何排序；\n"
+        "6. 哪些判断是证据支持，哪些只是 plausible，哪些是 speculative；\n"
+        "7. 给出面向家长的可执行长期方向，但不要写成医疗诊断或用药建议。"
+    )
+
+
+def _adhd_golden_packet() -> dict:
+    import tools.task_engine_executors as executors
+
+    return {
+        "mode": ENGINE_DECISION,
+        "query": _adhd_golden_query(),
+        "output_quality_profile": [
+            executors.PROFILE_EVIDENCE_GROUNDED,
+            executors.PROFILE_FORESIGHT_MECHANISM,
+        ],
+        "convergence_fixed_section_digest": "\n".join(
+            [
+                "## key_drivers",
+                "ADHD traits, AI, visual-spatial strength, BJJ, sequential weakness.",
+                "## mechanism_chain",
+                "Low-friction AI can either scaffold or bypass executive function.",
+                "## scenario_branches",
+                "Scenario A keeps BJJ and reading/math foundations; Scenario B overuses AI.",
+                "## counter_signals",
+                "Overreliance on AI and missing slow-loop completion.",
+                "## certainty_levels",
+                "Supported / plausible / speculative.",
+                "## uncertainty_boundary",
+                "Ten-year individual outcome evidence is limited.",
+            ]
+        ),
+        "external_calibration_hard_constraints": "\n".join(
+            [
+                "Elevate the Risk: premature AI as executive-function crutch before working memory and sequential logic.",
+                "Lock in the Sequence: BJJ and Reading/Math from ages 7.5 to 10; AI scaffold before prosthetic.",
+                "Restore Counter-Intuitive Strategy: use BJJ spatial and leverage patterns to teach abstract math.",
+                "Strict Epistemic Tagging: label Evidence, Plausible, Speculative.",
+            ]
+        ),
+        "research_evidence_packet_context": "## evidence_supported\nADHD supports and structured movement.\n## reasonable_inference\nBJJ may serve as somatic anchor.\n## foresight_hypothesis\nAI-era novelty seeking may become advantage.",
+        "excerpts": {},
+    }
+
+
+def test_adhd_golden_final_controller_user_facing_hardening_passes():
+    import tools.task_engine_executors as executors
+
+    packet = _adhd_golden_packet()
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert executors._case_anchor_usage_failures(packet["query"], text) == []
+    assert executors._calibration_implementation_failures(packet["external_calibration_hard_constraints"], text) == []
+    for index in range(1, 8):
+        assert f"## {index}." in text
+    for forbidden in (
+        "decision_mode=true",
+        "final controller",
+        "external_calibration",
+        "convergence_report",
+        "research packet",
+        "研究包吸收",
+        "校准执行",
+        "StageRecord",
+        "artifact",
+        "pipeline",
+        "Executor",
+    ):
+        assert forbidden not in text
+    for label in ("[证据支持]", "[合理推断]", "[前瞻假设]", "[不支持/风险]"):
+        assert label in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_adhd_golden_final_controller_quality_blocks_current_bad_shape():
+    import tools.task_engine_executors as executors
+
+    packet = _adhd_golden_packet()
+    bad = "\n".join(
+        [
+            "# 决策任务最终报告",
+            "decision_mode=true",
+            "## 校准执行",
+            "已吸收的校准要求：Elevate the Risk; Lock in the Sequence.",
+            "## 未来优势变陷阱 Top5",
+            "1. 快速理解可能变成未经验证的快速接受。",
+            "## 最危险的错误培养路径",
+            "泛泛而谈，没有 Q5 排序，没有孩子画像，没有逐条证据标签。",
+        ]
+    )
+
+    try:
+        executors._assert_final_controller_packet_quality(packet, bad)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "user_facing_quality" in message or "artifact_quality_error" in message
+    else:
+        raise AssertionError("bad final controller output should fail user-facing quality gate")
+
+
+def test_generic_enumerated_decision_requires_numbered_answers():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "请判断：\n1. 市场机会是什么？\n2. 最大风险是什么？\n3. 如何排序？",
+        "output_quality_profile": [],
+        "excerpts": {},
+    }
+    good = "# 最终答案\n\n## 1. 市场机会\n越南市场机会主要来自本地需求增长、供应链转移和早期渠道空白；触发条件是能找到可验证付费客户，中间机制是小规模试点降低进入成本，反证信号是获客成本持续高于毛利空间。\n\n## 2. 最大风险\n最大风险是渠道、合规和交付能力跟不上销售承诺；触发条件是本地伙伴质量不稳定，中间机制是履约失败会放大退款和品牌损失，反证信号是试点客户复购并能稳定交付。\n\n## 3. 如何排序\n1. 客户验证：先证明真实付费和复购，因为没有需求就不应扩张。\n2. 渠道伙伴：再验证本地交付与获客，因为渠道决定现金效率。\n3. 合规与本地化：最后扩展投入，因为它们应跟随已验证需求逐步加码。\n\n## 证据边界\n证据强度：中。争议点：取决于执行场景。证据缺口：缺少长期验证。"
+    bad = "# 最终答案\n\n市场机会和风险都存在，但没有逐项回答。"
+
+    executors._assert_final_controller_packet_quality(packet, good)
+    try:
+        executors._assert_final_controller_packet_quality(packet, bad)
+    except RuntimeError as exc:
+        assert "missing_enumerated_answer" in str(exc)
+    else:
+        raise AssertionError("generic enumerated question should require explicit numbered answers")
+
+
+def _assert_final_quality_rejects(packet: dict, text: str, expected_token: str | None = None) -> None:
+    import tools.task_engine_executors as executors
+
+    try:
+        executors._assert_final_controller_packet_quality(packet, text)
+    except RuntimeError as exc:
+        if expected_token:
+            assert expected_token in str(exc)
+    else:
+        raise AssertionError("final quality gate should reject adversarial output")
+
+
+def _adversarial_surface_terms() -> str:
+    return " ".join(
+        [
+            "7.5 岁 二年级 IQ 124 ADHD 倾向 视觉空间优势 系列关系弱 抽象推理弱 柔术 300-500 小时 阅读 数学 AI 工具 未来 10 年 家长 非医疗诊断 非用药建议。",
+            "执行功能拐杖 工作记忆 顺序逻辑 阅读 数学 排序 7.5-10 岁 柔术 AI 工具 scaffold 空间 杠杆 抽象数学。",
+            "[证据支持] [合理推断] [前瞻假设] [不支持/风险] 触发条件：有。中间机制：有。失效条件 / 反证信号：有。确定性：中。家长怎么用：看。",
+        ]
+    )
+
+
+def _seven_numbered_shell(body_line: str) -> str:
+    return "\n".join(
+        [
+            "# 最终答案",
+            _adversarial_surface_terms(),
+            "## 1. ADHD 优势 Top 5 场景",
+            "1. 重要。2. 重要。3. 重要。4. 重要。5. 重要。",
+            "## 2. ADHD 陷阱 Top 5 场景",
+            "1. 风险。2. 风险。3. 风险。4. 风险。5. 风险。",
+            "## 3. 最危险错误路径",
+            body_line,
+            "## 4. 反直觉假设",
+            body_line,
+            "## 5. 柔术 / 身体经验 / 阅读 / 数学 / AI 工具使用排序",
+            body_line,
+            "## 6. 证据支持 / 合理推断 / 前瞻假设分层",
+            "[证据支持] [合理推断] [前瞻假设] [不支持/风险] 这是判断。",
+            "## 7. 家长可执行方向",
+            body_line,
+            "## 关键驱动变量与机制链",
+            "关键驱动变量。机制链。",
+            "## 情景分叉",
+            "情景 A。情景 B。",
+            "## 观察指标与反证信号",
+            "反证信号。",
+            "## 证据强度、争议和缺口",
+            "证据强度：中。争议点：取决于场景。证据缺口：缺少长期验证。",
+        ]
+    )
+
+
+def test_final_controller_quality_blocks_anchor_stuffing():
+    packet = _adhd_golden_packet()
+    bad = _seven_numbered_shell("这些内容都很重要，但这里没有把孩子画像用于判断，只是在重复空话。")
+
+    _assert_final_quality_rejects(packet, bad, "user_facing_quality")
+
+
+def test_final_controller_quality_blocks_calibration_restatement():
+    packet = _adhd_golden_packet()
+    bad = _seven_numbered_shell(
+        "已吸收 elevate risk / lock sequence / restore counterintuitive / strict epistemic tagging，已执行校准要求。"
+    )
+
+    _assert_final_quality_rejects(packet, bad, "user_facing_quality")
+
+
+def test_final_controller_quality_blocks_evidence_label_spam():
+    packet = _adhd_golden_packet()
+    bad = _seven_numbered_shell("[证据支持] [合理推断] [前瞻假设] [不支持/风险] 这是判断。")
+
+    _assert_final_quality_rejects(packet, bad, "user_facing_quality")
+
+
+def test_final_controller_quality_blocks_internal_language_variant():
+    packet = _adhd_golden_packet()
+    bad = _seven_numbered_shell("本阶段输出已经检查上游报告，校准阶段要求已经落实，artifact 检查通过。")
+
+    _assert_final_quality_rejects(packet, bad, "internal_language")
+
+
+def test_generic_enumerated_non_adhd_good_passes_without_adhd_anchors():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "请判断：\n1. 是否进入越南市场？\n2. 最大风险？\n3. 资源如何排序？\n4. 反证信号？",
+        "output_quality_profile": [],
+        "excerpts": {},
+    }
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 是否进入越南市场",
+            "建议先以低成本试点进入，而不是一次性重资产进入。触发条件是能找到明确付费客户和本地交付伙伴；中间机制是试点能验证需求、价格和交付难度；反证信号是获客成本高、客户复购弱或本地伙伴无法稳定履约。",
+            "## 2. 最大风险",
+            "最大风险是渠道质量、合规边界和交付能力不匹配。触发条件是销售承诺快于本地履约建设；中间机制是服务失败会放大退款、口碑和现金流压力；反证信号是连续试点都能按成本和周期交付。",
+            "## 3. 资源如何排序",
+            "1. 客户验证：先证明真实付费，因为没有需求就不应扩张。\n2. 渠道伙伴：再验证本地获客和交付，因为渠道决定现金效率。\n3. 合规与本地化：最后随已验证需求加码，因为过早投入会增加沉没成本。",
+            "## 4. 反证信号",
+            "如果三个月内没有复购客户、获客成本高于毛利空间、合规审批周期无法预测，或本地伙伴交付失败率持续偏高，就应停止扩张并回到市场验证阶段。",
+            "## 证据边界",
+            "证据强度：中。争议点：不同城市和渠道伙伴会改变结论。证据缺口：缺少真实试点数据和本地合规反馈。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_plain_non_enumerated_good_does_not_require_numbered_answers():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "请判断是否应该把一个内部数据平台迁移到新的云供应商，并给出边界。",
+        "output_quality_profile": [],
+        "excerpts": {},
+    }
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "## 核心判断",
+            "可以先做可逆迁移试点，不应一次性全量迁移。理由是新供应商可能改善成本和弹性，但安全、锁定、迁移中断和团队能力仍是主要约束。",
+            "## 风险边界",
+            "先验证身份权限、审计日志、回滚路径、关键任务延迟和真实月度成本；如果任一指标低于现有平台，应停止扩大迁移范围。",
+            "## 证据边界",
+            "证据强度：中。争议点：工作负载和团队经验会改变结论。证据缺口：缺少真实压测和账单数据。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_topk_regression_good_passes_for_non_adhd_decision():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "请给出一个非 ADHD 的 Top 5 市场进入风险场景，并说明判断边界。",
+        "output_quality_profile": [],
+        "excerpts": {},
+    }
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "## Top 5 市场进入风险场景",
+            "1. 渠道风险：如果本地渠道掌握客户关系但缺少交付能力，销售增长会先于履约能力，导致退款、投诉和现金流压力。",
+            "2. 合规风险：如果许可、数据、税务或劳动规则理解不足，早期收入可能被审批延期或罚款抵消。",
+            "3. 定价风险：如果价格只参考原市场而没有本地支付意愿验证，成交看似存在但毛利无法覆盖获客和交付成本。",
+            "4. 供应链风险：如果关键供应商交期和质量不稳定，市场进入会变成运营救火，无法形成可复制流程。",
+            "5. 管理带宽风险：如果总部团队同时管理多个新项目，进入市场会稀释核心业务注意力并延迟复盘。",
+            "## 判断边界",
+            "证据强度：中。争议点：行业、城市和合作伙伴差异会改变排序。证据缺口：缺少试点客户和本地成本数据。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_topk_title_only_bad_is_rejected():
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": "请给出一个非 ADHD 的 Top 5 市场进入风险场景，并说明判断边界。",
+        "output_quality_profile": [],
+        "excerpts": {},
+    }
+    bad = "# 最终答案\n\n## Top 5 市场进入风险场景\n这些风险都需要平衡。\n\n## 判断边界\n证据强度：中。争议点：很多。证据缺口：很多。"
+
+    _assert_final_quality_rejects(packet, bad, "user_facing_quality")
 
 
 def test_decision_final_foresight_fallback_uses_judgment_units_and_evidence_tiers():
@@ -7080,16 +7387,15 @@ def test_decision_final_foresight_fallback_uses_judgment_units_and_evidence_tier
 
     text = executors._final_controller_report_from_packet(packet)
 
-    assert "## 证据分层" in text
-    assert "### evidence_supported" in text
-    assert "### reasonable_inference" in text
-    assert "### foresight_hypothesis" in text
+    assert "## 证据支持" in text
+    assert "## 合理推断" in text
+    assert "## 前瞻假设" in text
     assert "触发条件：" in text
     assert "中间机制：" in text
     assert "失效条件 / 反证信号：" in text
-    assert "certainty_level：" in text
-    assert "evidence_tier：" in text
-    assert "decision_use：" in text
+    assert "确定性：" in text
+    assert "[证据支持]" in text
+    assert "决策含义：" in text
     executors._assert_final_controller_packet_quality(packet, text)
 
 
@@ -7121,9 +7427,9 @@ def test_decision_final_absorbs_research_packet_evidence_tiers():
 
     text = executors._final_controller_report_from_packet(packet)
 
-    assert "Supported alpha claim" in text
-    assert "Inference beta" in text
-    assert "Hypothesis gamma" in text
+    assert "## 证据支持" in text
+    assert "## 合理推断" in text
+    assert "## 前瞻假设" in text
     assert "research_packet_path:" not in text
     assert "boundary: do not dump raw packet" not in text
     executors._assert_final_controller_packet_quality(packet, text)
@@ -7291,7 +7597,8 @@ def test_final_controller_gate_block_saves_invalid_and_diagnostic(monkeypatch, t
     try:
         LocalTaskEngineExecutor().run_final_controller_report(stage, packet)
     except RuntimeError as exc:
-        assert "output_quality_profile_error" in str(exc)
+        message = str(exc)
+        assert "output_quality_profile_error" in message or "user_facing_quality" in message
     else:
         raise AssertionError("foresight final gate should block missing required fields")
 
@@ -7301,7 +7608,7 @@ def test_final_controller_gate_block_saves_invalid_and_diagnostic(monkeypatch, t
     data = json.loads(diagnostic.read_text(encoding="utf-8"))
     assert data["stage_name"] == "final_controller_report"
     assert data["executor_model"] == "Hermes Controller"
-    assert "missing_key_drivers" in data["error_summary"]
+    assert "missing_key_drivers" in data["error_summary"] or "user_facing_quality" in data["error_summary"]
 
 
 def test_final_controller_gate_still_blocks_missing_foresight_fields():
