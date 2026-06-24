@@ -60,6 +60,161 @@ Do not use this skill when:
 
 If the corpus cannot support academic claims, return an appropriate blocked or downgraded outcome instead of pretending that a review is complete.
 
+## hermes_invocation_protocol
+
+When Hermes receives a user request to write an academic literature review, literature review, scholarly review, or 文献综述, Hermes must first enter intake mode.
+
+If the user has not provided complete inputs, Hermes must not directly write `literature_review.md`, summarize papers, or start a full review draft. The first response must be a structured intake form that collects the minimum academic review parameters and source availability needed for claim-level citation grounding.
+
+Hermes may proceed to writing and validation only after the intake form satisfies `minimum_required_fields`. If the intake shows that sources are missing or too weak, Hermes must return a blocked or downgraded planning outcome rather than inventing an academic review.
+
+## two_step_execution_rule
+
+Use a two-step execution flow for Hermes-facing requests.
+
+### Step 1: intake_and_scope_confirmation
+
+Collect and confirm:
+
+- `topic_or_title`: research topic or provisional title.
+- `research_question`: the central research question.
+- `review_type`: one supported review type.
+- `target_audience`: intended reader or submission context.
+- `output_language`: Chinese, English, bilingual notes, or another user-specified language.
+- `target_length`: target length or document scale.
+- `citation_style`: requested citation format.
+- `source_corpus`: local PDFs, file paths, BibTeX, Zotero export, existing Research evidence packet, or an explicit declaration that the corpus is not ready.
+- `expected_source_count`: expected number of papers or user-provided corpus size.
+- `full_text_availability`: full text, partial full text, abstract only, metadata only, or mixed.
+- `date_range`: publication-year scope when relevant.
+- `inclusion_criteria`: source inclusion logic.
+- `exclusion_criteria`: source exclusion logic.
+- `required_sections`: user-required sections.
+- `output_package_requirement`: whether the user wants the full output package or a narrower artifact set.
+
+### Step 2: write_and_validate
+
+Only after Step 1 satisfies `minimum_required_fields`, proceed to:
+
+- Extract paper-level evidence.
+- Build `evidence_matrix.csv`.
+- Synthesize literature by theme, theory, method, debate, and gap.
+- Write `literature_review.md`.
+- Produce `claim_citation_table.md`.
+- Run the deterministic `academic_literature_review_contract` validator when an output package is produced.
+- Return `quality_gate_report.md` with score, failure codes, caveats, and revision requirements.
+
+## intake_form
+
+Hermes must present an intake form before writing. Divide fields into required, recommended, and optional.
+
+### Required fields
+
+1. `topic_or_title`: The topic or provisional title.
+2. `research_question`: The core research question. Without a research question, do not directly write the review.
+3. `review_type`: One of `narrative_review`, `scoping_review`, `systematic_style_review`, `theoretical_review`, `methodological_review`, `state_of_the_field_review`, `mini_review`, or `preliminary_review`.
+4. `target_length`: Examples include `1500 words`, `3000 words`, `5000 words`, `8000 words`, or `journal-style long review`.
+5. `citation_style`: Examples include APA, MLA, Chicago, Vancouver, GB/T 7714, author-year, or numeric.
+6. `source_corpus`: Literature source, such as local PDF directory, file paths, BibTeX, Zotero export, existing Research evidence packet, or explicit statement that corpus is not ready.
+7. `expected_source_count`: Expected source count, such as 5, 10-20, 30-50, or user-provided corpus only.
+8. `full_text_availability`: One of all full text available, partial full text, abstract only, metadata only, or mixed.
+9. `target_audience`: Examples include undergraduate, graduate seminar, journal submission draft, thesis chapter, or internal research memo.
+10. `output_language`: Examples include Chinese, English, or bilingual notes.
+
+### Recommended fields
+
+11. `discipline_or_field`: Discipline or field.
+12. `date_range`: Publication-year range.
+13. `inclusion_criteria`: Inclusion criteria.
+14. `exclusion_criteria`: Exclusion criteria.
+15. `key_theories_or_frameworks`: Theories or frameworks to cover.
+16. `key_methods_or_study_designs`: Methods or study designs to compare.
+17. `must_cover_themes`: Required themes.
+18. `known_debates_or_contradictions`: Known debates or contradictions.
+19. `required_sections`: User-specified sections.
+20. `quality_threshold`: Default is 80/100.
+
+### Optional fields
+
+21. `preferred_journals_or_venues`
+22. `geographic_scope`
+23. `population_or_sample_scope`
+24. `methodological_preference`
+25. `whether_to_include_tables`
+26. `whether_to_include_gap_map`
+27. `whether_to_include_method_taxonomy`
+28. `whether_to_include_debate_map`
+29. `whether_to_generate_bibliography_bib`
+30. `final_output_format`
+
+## minimum_required_fields
+
+Hermes must not begin formal review writing unless at least these fields are present:
+
+- `topic_or_title`
+- `research_question`
+- `review_type`
+- `target_length`
+- `citation_style`
+- `source_corpus` or an explicit `corpus_missing` declaration.
+- `expected_source_count`
+- `full_text_availability`
+- `target_audience`
+- `output_language`
+
+If `source_corpus` is missing, Hermes may only return `BLOCKED_NO_SOURCES` or a preliminary planning / source acquisition checklist. It must not generate a formal `literature_review.md`.
+
+## default_intake_response
+
+Default Chinese first response:
+
+```text
+请先填写下面信息，我再开始写文献综述：
+
+必填：
+1. 题目 / 暂定题目：
+2. 核心研究问题：
+3. 综述类型：
+4. 目标篇幅：
+5. 引用格式：
+6. 文献来源 / 文件路径：
+7. 预计文献数量：
+8. full text 状态：
+9. 目标读者：
+10. 输出语言：
+
+建议填写：
+11. 学科领域：
+12. 文献年份范围：
+13. 纳入标准：
+14. 排除标准：
+15. 必须覆盖的理论 / 框架：
+16. 必须比较的方法：
+17. 必须覆盖的主题：
+18. 已知争议：
+19. 指定章节：
+20. 质量门槛：
+
+可选：
+21. 是否要 evidence_matrix.csv：
+22. 是否要 debate_map.md：
+23. 是否要 method_taxonomy.md：
+24. 是否要 bibliography.bib：
+25. 最终格式：
+```
+
+## no_direct_write_without_intake
+
+If the user only says "write a literature review", "帮我写文献综述", or gives an equivalent underspecified request without source corpus and key parameters, Hermes must return the intake form first. This is a no direct write without intake rule: 不得直接写正式文献综述正文、不得生成 `literature_review.md`、不得 present a source summary as the final review.
+
+Failure code: `FAIL_DIRECT_WRITE_WITHOUT_INTAKE`.
+
+## hermes_runtime_boundary
+
+This skill may be invoked by Hermes as a passive optional skill, but it must not modify Research/Decision routing and must not create a new TaskMode.
+
+Hermes may surface the intake form and later call the writer / validator flow manually after the user supplies the required inputs. Research engine runtime behavior must remain unchanged. Do not add automatic Research pipeline invocation, task-engine routing, or Decision integration unless a later explicit task asks for runtime integration.
+
 ## input_contract
 
 Accept these fields when available. Missing fields must be inferred conservatively or recorded in `quality_gate_report.md`.
