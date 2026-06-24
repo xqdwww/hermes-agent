@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import http.client
 import os
+import subprocess
 from pathlib import Path
 
 from tools.task_engine_contracts import (
@@ -7851,6 +7852,191 @@ def test_topk_title_only_bad_is_rejected():
     _assert_final_quality_rejects(packet, bad, "user_facing_quality")
 
 
+def _research_decision_quality_packet(query: str, *, profiles: list[str] | None = None) -> dict:
+    return {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": query,
+        "output_quality_profile": profiles or [],
+        "excerpts": {},
+    }
+
+
+def test_final_controller_domain_anchor_blocks_wrong_domain_arctic_ai_law_bad():
+    query = (
+        "未来 10 年，如果北极航道商业化程度上升，一个依赖中欧海运的制造企业是否应该把北极航道纳入战略备选？请判断：\n"
+        "1. 最可能被高估的机会；\n"
+        "2. 最可能被低估的风险；\n"
+        "3. 哪些前提一旦变化会改变结论；\n"
+        "4. 需要监控哪些指标；\n"
+        "5. 不要把长期情景推演写成确定预测。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 最可能被高估的机会",
+            "AI 法律检索和合同起草会让初级律师的文本生产机会被高估，企业法务流程岗位可能获得更多自动化收益。",
+            "## 2. 最可能被低估的风险",
+            "法律职业的责任边界、律师牌照、客户信任和诉讼谈判场景仍会限制自动化替代。",
+            "## 3. 哪些前提一旦变化会改变结论",
+            "如果法律服务组织重新分配授权，或者客户接受机器生成法律意见，职业结构反转概率才会上升。",
+            "## 4. 需要监控哪些指标",
+            "监控律所招聘、法务自动化预算、合同审查系统采用率和法律职业晋升速度。",
+            "## 5. 不要把长期情景推演写成确定预测",
+            "这些只是长期法律职业情景，不应写成确定预测。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "user_facing_quality")
+
+
+def test_final_controller_domain_anchor_blocks_travel_template_like_bad():
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。目标不是做每日行程，而是判断路线设计原则："
+        "自然景观、驾驶强度、亲子体验、老人舒适度、住宿稳定性、天气和安全冗余之间如何排序。请给出：\n"
+        "1. 路线设计优先级；\n"
+        "2. 最容易犯的 5 个规划错误；\n"
+        "3. 哪些信息必须临近出发再核验；\n"
+        "4. 什么情况下应该缩短路线；\n"
+        "5. 不要编造当前路况、营业时间或政策。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 路线设计优先级",
+            "路线要平衡体验、效率和风险，先看整体目标，再安排每日节奏。",
+            "## 2. 最容易犯的 5 个规划错误",
+            "1. 安排太满。2. 预算不足。3. 没有备选。4. 信息过时。5. 缺少复盘。",
+            "## 3. 哪些信息必须临近出发再核验",
+            "天气、交通、住宿和开放状态都要核验。",
+            "## 4. 什么情况下应该缩短路线",
+            "如果风险增加或体验下降，就应该缩短路线。",
+            "## 5. 不要编造当前路况、营业时间或政策",
+            "不编造实时信息，临近出发再查。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "user_facing_quality")
+
+
+def test_final_controller_quality_blocks_raw_intermediate_dump_for_research_decision():
+    query = "请判断一个金融因子系统下一步应该优先工程化哪些 gate。"
+    bad = "\n".join(
+        [
+            "# final_controller_report",
+            "research_evidence_packet",
+            "convergence_report",
+            "external_calibration",
+            "StageRecord artifact pipeline executor decision_mode=true",
+            "evidence_strength: medium",
+            "controversy: raw dump",
+            "evidence_gap: raw dump",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "internal_language")
+
+
+def test_final_controller_domain_anchor_finance_top3_good_passes():
+    query = (
+        "我有一个 A 股日线/周线 swing trading 因子系统，当前候选信号包括 trend-following、repair/rebound、hot momentum、"
+        "volume-price confirmation。目标不是预测明天涨跌，而是决定下一阶段应该优先工程化哪类 gate，避免过拟合和回撤扩大。请判断：\n"
+        "1. 最该优先工程化的 Top 3 gate；\n"
+        "2. 哪些信号最容易在回测中虚高；\n"
+        "3. 应该如何设计 walk-forward / out-of-sample 验证；\n"
+        "4. 哪些结论是证据支持，哪些只是合理推断，哪些是 speculative；\n"
+        "5. 给出下一步工程路线，但不要写成投资建议。"
+    )
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 最该优先工程化的 Top 3 gate",
+            "1. [合理推断] regime / trend filter gate：针对 A 股日线/周线 swing trading 因子系统，先限制 trend-following、repair/rebound、hot momentum 在不同市场状态下的适用范围，避免把震荡期噪音当趋势。触发条件是分市场状态后的收益/回撤差异稳定；反证信号是 walk-forward 后失效。",
+            "2. [合理推断] volume-price confirmation gate：针对候选信号加入成交量、价格确认和流动性过滤，减少单日冲高或薄流动性造成的回测虚高。触发条件是确认后换手和滑点可控；反证信号是交易成本吞掉收益。",
+            "3. [合理推断] drawdown / exposure cap gate：针对不是预测明天涨跌、而是避免过拟合和回撤扩大的目标，优先限制连续亏损、行业集中和极端热度暴露。触发条件是 OOS 回撤下降且收益不过度坍塌；反证信号是只在样本内改善。",
+            "## 2. 哪些信号最容易在回测中虚高",
+            "hot momentum 最容易虚高，因为它可能捕捉短期拥挤和涨停后幸存者偏差；repair/rebound 容易在选股池和停牌/流动性处理上虚高；volume-price confirmation 如果没有真实成交约束，也会高估可交易性。",
+            "## 3. 应该如何设计 walk-forward / out-of-sample 验证",
+            "按时间滚动切分训练、验证和 out-of-sample；固定因子定义后只允许在下一窗口验证，不允许回看调参；同时报告换手、滑点、容量、最大回撤和行业/市值暴露。",
+            "## 4. 哪些结论是证据支持，哪些只是合理推断，哪些是 speculative",
+            "1. [证据支持] walk-forward / out-of-sample 比单次全样本回测更能暴露过拟合；触发条件是规则冻结后跨窗口验证，反证信号是样本外收益消失。确定性：中高。决策含义：作为工程 gate 的底线。",
+            "2. [合理推断] hot momentum、repair/rebound、volume-price confirmation 的虚高风险不同，应分 gate 处理；触发条件是交易成本和流动性约束进入验证，反证信号是加入约束后排序不变。确定性：中。",
+            "3. [前瞻假设] 下一阶段最优 gate 会随市场微结构和拥挤度变化；触发条件是候选信号表现跨年度迁移，反证信号是稳定性不足。确定性：低到中。",
+            "## 5. 下一步工程路线，但不要写成投资建议",
+            "先冻结候选信号定义，再做 walk-forward/OOS、交易成本、流动性和回撤 gate；通过后再小规模纸面跟踪。该路线只用于工程验证和风险控制，不构成投资建议。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中，工程验证原则较稳，但具体因子有效性必须样本外验证。争议点：市场状态、交易成本和拥挤度会改变排序。证据缺口：缺少真实交易成本、容量、滑点和跨年度样本外表现。",
+        ]
+    )
+
+    import tools.task_engine_executors as executors
+
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_final_controller_domain_anchor_geopolitics_arctic_good_passes():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "未来 10 年，如果北极航道商业化程度上升，一个依赖中欧海运的制造企业是否应该把北极航道纳入战略备选？请判断：\n"
+        "1. 最可能被高估的机会；\n"
+        "2. 最可能被低估的风险；\n"
+        "3. 哪些前提一旦变化会改变结论；\n"
+        "4. 需要监控哪些指标；\n"
+        "5. 不要把长期情景推演写成确定预测。"
+    )
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "围绕未来 10 年、如果北极航道商业化程度上升、依赖中欧海运的制造企业是否应该把北极航道纳入战略备选来判断，因为法律主权争议、保险、港口与救援能力、地缘风险、季节性和成本不确定性会共同改变结论。",
+            "## 1. 最可能被高估的机会",
+            "[合理推断] 这个最可能被高估的机会，是把北极航道商业化程度上升直接等同于中欧海运成本大幅下降。对依赖中欧海运的制造企业，机会只在季节窗口、保险可得、港口和救援能力足够、地缘风险可控时才成立。",
+            "## 2. 最可能被低估的风险",
+            "[合理推断] 这个最可能被低估的风险，是法律主权争议、保险定价、救援能力不足、季节性窗口短和地缘摩擦叠加后的可靠性风险；这些风险会让单次低成本航线变成供应链不确定性。",
+            "## 3. 哪些前提一旦变化会改变结论",
+            "哪些前提一旦变化会改变结论：如果法律主权争议缓和、保险费率稳定下降、港口补给和救援能力成熟、季节性延长且地缘风险没有升高，北极航道才更适合进入战略备选；任一前提反向变化都应下调。",
+            "## 4. 需要监控哪些指标",
+            "需要监控哪些指标：可航季长度、冰情、保险费率、港口与救援能力、法律主权争议、制裁或地缘事件、实际班轮频率和相对苏伊士/铁路的全成本。",
+            "## 5. 不要把长期情景推演写成确定预测",
+            "[前瞻假设] 不要把长期情景推演写成确定预测；未来 10 年只能把北极航道作为低权重战略备选和监控项。触发条件是商业化指标连续改善，反证信号是保险、救援或地缘风险抬升。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中低，方向性风险框架可用，但未来 10 年商业化程度不能确定。争议点：法律主权争议、保险、港口与救援能力、地缘风险、季节性和成本不确定性会改变排序。证据缺口：缺少实时运价、保险报价、可航季、救援能力和企业自身供应链数据。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_final_controller_domain_anchor_plain_non_enumerated_good_passes():
+    import tools.task_engine_executors as executors
+
+    packet = _research_decision_quality_packet("一个本地 AI agent 系统是否应该采用多执行器 fallback 架构？请给出可靠性边界。")
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "## 核心判断",
+            "[合理推断] 本地 AI agent 系统可以采用多执行器 fallback 架构，但应先定义任务分级、失败恢复、审计日志和成本边界。触发条件是单一执行器不可用会阻断关键工作；反证信号是多执行器带来的状态不一致和维护成本超过收益。",
+            "## 证据边界",
+            "[证据支持] 可靠系统需要消除单点失败并保留恢复路径。 [合理推断] fallback 应按任务类型分层。 [前瞻假设] 工具状态变化会改变最优排序。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中，可靠性原则较稳，但本地 AI agent 系统的具体执行器状态要实测。争议点：多执行器会提高恢复能力，也会增加一致性和维护成本。证据缺口：缺少真实失败率、延迟、成本、恢复日志和任务分级数据。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_final_controller_no_case_specific_literals_added_to_production_diff():
+    result = subprocess.run(
+        ["git", "diff", "--unified=0", "--", "tools/task_engine_executors.py"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    added_lines = "\n".join(line for line in result.stdout.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    for forbidden in ("Arctic", "北极", "新疆", "A股", "ADHD", "BJJ", "柔术", "IQ 124", "300-500"):
+        assert forbidden not in added_lines
+
+
 def test_decision_final_foresight_fallback_uses_judgment_units_and_evidence_tiers():
     import tools.task_engine_executors as executors
 
@@ -7934,11 +8120,15 @@ def test_research_decision_foresight_final_uses_generic_packet_synthesis_without
 
     text = executors._final_controller_report_from_packet(packet)
 
-    assert "局部/场景性结构反转可能成立，职业整体反转证据不足。" in text
-    assert "### evidence_supported" in text
-    assert "### reasonable_inference" in text
-    assert "### foresight_hypothesis" in text
-    assert "source_consumption_check：research_evidence_packet=yes; convergence_report=yes; external_calibration=yes" in text
+    assert "# 研究决策最终报告" in text
+    assert "## 证据分层" in text
+    assert "[证据支持]" in text
+    assert "[合理推断]" in text
+    assert "[前瞻假设]" in text
+    assert "source_consumption_check" not in text
+    assert "research_evidence_packet" not in text
+    assert "convergence_report" not in text
+    assert "external_calibration" not in text
     assert "ADHD" not in text
     assert "孩子" not in text
     assert "柔术" not in text
@@ -7995,15 +8185,18 @@ def test_research_decision_non_foresight_final_uses_generic_packet_synthesis_wit
     text = executors._final_controller_report_from_packet(packet)
 
     assert "越南北部电动车电池回收" in text
-    assert "### evidence_supported" in text
-    assert "### reasonable_inference" in text
-    assert "### foresight_hypothesis" in text
+    assert "## 证据分层" in text
+    assert "[证据支持]" in text
+    assert "[合理推断]" in text
+    assert "[前瞻假设]" in text
     assert "触发条件：" in text
     assert "中间机制：" in text
-    assert "失效条件或反证信号：" in text
-    assert "certainty_level：" in text
-    assert "evidence_tier：" in text
-    assert "decision_use：" in text
+    assert "失效条件 / 反证信号：" in text
+    assert "确定性：" in text
+    assert "决策含义：" in text
+    assert "research_evidence_packet" not in text
+    assert "convergence_report" not in text
+    assert "external_calibration" not in text
     assert "ADHD" not in text
     assert "家长训练" not in text
     assert "柔术" not in text

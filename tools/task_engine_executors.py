@@ -4045,9 +4045,9 @@ def _assert_final_controller_packet_quality(packet: dict[str, Any], text: str) -
             missing = [section for section in _required_decision_future_sections() if f"## {section}" not in text]
             if missing:
                 raise RuntimeError("final_controller_report: missing_requested_sections:" + ",".join(missing))
-        user_facing_failures = _final_user_facing_quality_failures(packet, text)
-        if user_facing_failures:
-            raise RuntimeError("final_controller_report: user_facing_quality:" + ",".join(user_facing_failures))
+    user_facing_failures = _final_user_facing_quality_failures(packet, text)
+    if user_facing_failures:
+        raise RuntimeError("final_controller_report: user_facing_quality:" + ",".join(user_facing_failures))
     profiles = (
         _normalize_profiles(packet.get("output_quality_profile"))
         if "output_quality_profile" in packet
@@ -8108,205 +8108,81 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
 
 
 def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]) -> str:
-    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
-    research_excerpt = _safe_final_excerpt(
-        str(excerpts.get("research_evidence_packet") or excerpts.get("L5_deepseek_acceptance") or ""),
-        limit=700,
-    )
-    convergence_excerpt = _safe_final_excerpt(str(excerpts.get("convergence_report") or ""), limit=700)
-    calibration_excerpt = _safe_final_excerpt(str(excerpts.get("external_calibration") or ""), limit=700)
-    compliance_domain = scoring_calibration.classify_compliance_domain(query)
-    if compliance_domain == "audit_finance_compliance":
-        task_domain = "审计底稿整理、财务异常检测、合规报告生成和管理层讨论分析草稿等例行审计/财务分析工作"
-        production_role = "初级审计员"
-        operations_role = "企业财务分析师和财务流程分析角色"
-        authority_moats = "审计判断、内控责任、重大错报风险识别、管理层沟通、监管问责和最终复核权"
-        scenario_context = "审计底稿、异常检测、合规报告、管理层讨论分析草稿和可重复财务控制场景"
-        value_migration = "价值从单件底稿或报告草稿生产迁移到异常解释、控制点设计、审计判断、管理层沟通和跨系统数据治理"
-        high_value_falsifier = "如果关键价值仍集中在重大判断、异常解释、审计复核、责任签字、监管问责和管理层沟通"
-        scenario_b = "AI 把重复审计/财务分析产出压到低成本层，靠近业务系统、内控流程和异常解释的角色在特定场景上升。certainty_level：medium。"
-        scenario_c = "企业财务分析师在权威、薪酬、声望、流动性和战略位置上整体超过初级审计员。certainty_level：low；当前证据不足。"
-        controversy = "争议集中在 AI 采用速度、审计责任、监管问责、组织授权、数据质量和复杂判断的不可替代性。"
-        counter_signal = "低风险底稿整理和草稿生成被自动化，但重大判断、异常解释、审计复核、监管问责和管理层沟通仍强绑定专业人员。"
-    elif compliance_domain == "legal_compliance":
-        task_domain = "法律检索、合同起草、案例摘要、合规解释等例行法律生产"
-        production_role = "初级律师"
-        operations_role = "企业法务分析师/legal-ops 型角色"
-        authority_moats = "牌照、责任承担、保密特权、诉讼/谈判场景、监督义务和最终法律签署权"
-        scenario_context = "合规运营、合同生命周期管理、采购/隐私/风控流程和可重复风险控制场景"
-        value_migration = "价值从单件法律文本生产迁移到风险筛查、流程编排、控制点设计和跨部门落地"
-        high_value_falsifier = "如果关键价值仍集中在独立法律判断、代理、谈判、责任承担和高风险签署"
-        scenario_b = "AI 把重复法律生产压到低成本层，靠近业务系统和风控流程的角色在特定场景上升。certainty_level：medium。"
-        scenario_c = "企业法务分析师在权威、薪酬、声望、流动性和战略位置上整体超过初级律师。certainty_level：low；当前证据不足。"
-        controversy = "争议集中在 AI 采用速度、监管责任、客户信任、组织授权和不同法律场景的不可替代性。"
-        counter_signal = "低风险任务被自动化，但高风险签署、诉讼、谈判、调查和责任承担仍强绑定持证专业人员。"
-    else:
-        task_domain = "可被工具显著压低成本的例行知识生产"
-        production_role = "传统初级生产角色"
-        operations_role = "流程整合与业务系统型角色"
-        authority_moats = "责任承担、制度授权、信任关系、复杂判断、监督义务和最终决策权"
-        scenario_context = "运营、流程治理、风险控制和可重复知识生产场景"
-        value_migration = "价值从单件文本生产迁移到流程编排、控制点设计和跨部门落地"
-        high_value_falsifier = "如果关键价值仍集中在复杂判断、责任承担和高风险签署"
-        scenario_b = "AI 把重复知识生产压到低成本层，靠近业务系统和流程控制的角色在特定场景上升。certainty_level：medium。"
-        scenario_c = "业务系统型角色在权威、薪酬、声望、流动性和战略位置上整体超过传统初级生产角色。certainty_level：low；当前证据不足。"
-        controversy = "争议集中在 AI 采用速度、组织授权、客户信任、责任分配和复杂场景的不可替代性。"
-        counter_signal = "低风险任务被自动化，但复杂判断、责任承担、监督义务和最终决策权仍强绑定专业人员。"
-    consumed = {
-        "research_evidence_packet": bool(research_excerpt),
-        "convergence_report": bool(convergence_excerpt),
-        "external_calibration": bool(calibration_excerpt),
-    }
-    lines = [
-        "# 研究决策最终报告",
-        "",
-        "## 核心结论",
-        "局部/场景性结构反转可能成立，职业整体反转证据不足。",
-        f"AI 持续压低{task_domain}的成本，确实会削弱单纯依靠高频基础产出的训练和筛选优势；但这首先改变的是任务价值分布，不足以证明职业整体的权威、收入、声望和上升通道发生全面反转。",
-        "",
-        "## 输入材料吸收",
-        "- research_evidence_packet：用于限定证据底座，只采纳当前材料能支持的任务成本下降、例行产出被压缩、长期职业整体反转证据不足等边界。",
-        "- convergence_report：用于吸收关键驱动、机制链、情景分叉、反证信号和 certainty_level，但不直接复制其中偏强的全面反转表述。",
-        "- external_calibration：用于执行降调；把结论收束为局部/场景性反转 plausible，把职业整体反转保留为 speculative 或证据不足。",
-        "- source_consumption_check："
-        + "; ".join(f"{name}={'yes' if used else 'no'}" for name, used in consumed.items()),
-        "",
-        "## 证据分层",
-        "",
-        "### evidence_supported",
-        f"判断：AI 对{task_domain}的边际成本压缩已经足以改变入门级产出的稀缺性；单纯更快完成检索、初稿、摘要或规则解释，不能再稳定构成{production_role}的差异化优势。",
-        "触发条件：AI 工具在组织内被允许进入标准工作流，并能稳定处理低风险、可校验、重复性强的产出。",
-        "中间机制：输入变量是任务成本下降；中介机制是例行产出被模板化、自动化和批量化；输出变量是基础产出的市场溢价下降。",
-        "失效条件或反证信号：若工具输出可靠性不足、组织因责任和保密约束限制使用，或客户仍要求人工逐项生产，则该判断需要下调。",
-        "certainty_level：high for routine task cost compression; medium for organizational adoption speed.",
-        "evidence_tier：evidence_supported",
-        "decision_use：把“例行产出速度”从核心优势降级，改看校验、责任、流程设计和业务风险翻译能力。",
-        "",
-        "### reasonable_inference",
-        f"判断：在{scenario_context}中，{operations_role}可能相对升值，因为其位置更接近业务数据、流程接口和系统改造。",
-        "触发条件：组织把 AI 产出接入业务系统，而不是只把它当作个人写作或检索助手。",
-        f"中间机制：输入变量是生产成本降低和工作流数据化；中介机制是{value_migration}；输出变量是场景性角色优势重排。",
-        f"失效条件或反证信号：{high_value_falsifier}，角色重排就会停留在协作效率提升，而非优势反转。",
-        "certainty_level：medium",
-        "evidence_tier：reasonable_inference",
-        "decision_use：在评价职业前景时区分 production value、operation value 和 authority value，不能只看谁更会使用工具。",
-        "",
-        "### foresight_hypothesis",
-        "判断：局部/场景性结构反转可能成立，职业整体反转证据不足。",
-        "触发条件：未来十年 AI 继续降低例行任务成本，组织治理重点从产出文本转向系统控制、责任分配和业务嵌入。",
-        f"中间机制：输入变量是 AI 能力提升和单位产出成本下降；中介机制是{task_domain}的可替代性上升，同时{authority_moats}仍保留；输出变量是局部角色优势上移但职业整体并未全面倒置。",
-        "失效条件或反证信号：若监管、责任、客户信任和职业晋升仍强绑定持证专业路径，或 AI 只提升效率而不改变授权结构，则整体反转假设不成立。",
-        "certainty_level：low-to-medium",
-        "evidence_tier：foresight_hypothesis",
-        "decision_use：把该结论作为需追踪的未来假设，而不是当前可直接下定论的职业预测。",
-        "",
-        "## 关键驱动变量",
-        "关键驱动包括：AI 单位任务成本、组织采用速度、输出可验证性、责任/保密/监管约束、客户信任、业务系统嵌入深度、可替代任务占比和职业授权结构。",
-        "",
-        "## 机制链总览",
-        "输入变量：AI 降低例行知识生产成本、组织流程数字化、可重复风险控制需求增加。",
-        "中介机制：基础产出被压缩为低差异化能力，价值迁移到校验、问责、流程设计、业务风险翻译和复杂场景判断。",
-        f"输出变量：{operations_role}在特定运营场景相对上升；{production_role}的基础训练优势被削弱；但职业整体权威不发生充分证据支持的全面倒置。",
-        "",
-        "## 情景分叉",
-        "情景 A：modified continuity。AI 提升两类角色效率，基础门槛提高，但授权、责任和复杂判断仍维持原有职业秩序。certainty_level：medium-high。",
-        f"情景 B：partial operational reversal。{scenario_b}",
-        f"情景 C：full occupational reversal。{scenario_c}",
-        "",
-        "## 证据强度、争议和缺口",
-        "evidence_strength: strong for routine-task cost compression; medium for local operational value migration; weak for full occupational reversal over ten years.",
-        f"controversy: {controversy}",
-        "evidence_gap: 缺口是缺少十年期、角色级、跨组织的直接证据来证明职业整体权威和回报发生全面倒置。",
-        "",
-        "## 反证信号与不确定性边界",
-        f"- 反证信号：{counter_signal}",
-        "- 反证信号：企业流程岗位效率提升，却没有转化为更高授权、薪酬、晋升速度或战略话语权。",
-        "- 反证信号：客户、监管和组织治理继续要求专业人员对 AI 输出承担最终责任。",
-        "- 不确定性边界：如果未来 AI 同时获得高可信校验、制度认可和责任承接机制，整体反转概率才需要重新上调。",
-        "",
-        "## 最终判断",
-        "局部/场景性结构反转可能成立，职业整体反转证据不足。",
-    ]
-    return "\n".join(lines)
+    return _research_decision_user_facing_report(query, packet, foresight=True)
 
 
 def _research_decision_generic_final_report(query: str, packet: dict[str, Any]) -> str:
+    return _research_decision_user_facing_report(query, packet, foresight=False)
+
+
+def _research_decision_user_facing_report(query: str, packet: dict[str, Any], *, foresight: bool) -> str:
     excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
-    consumed = {
-        "research_evidence_packet": bool(excerpts.get("research_evidence_packet") or excerpts.get("L5_deepseek_acceptance")),
-        "convergence_report": bool(excerpts.get("convergence_report")),
-        "external_calibration": bool(excerpts.get("external_calibration")),
-    }
+    profiles = _normalize_profiles(packet.get("output_quality_profile"))
     frame = _research_decision_generic_frame(query)
-    calibration_action = frame["calibration_action"]
-    if excerpts.get("external_calibration"):
-        calibration_action += " external_calibration 的降调或保留意见已执行为条件化结论，而不是直接升级为确定建议。"
-        calibration_body = _safe_final_excerpt(
-            _external_calibration_quality_body(str(excerpts.get("external_calibration") or "")),
-            limit=600,
-        )
-        if calibration_body:
-            calibration_action += f" 已吸收的校准正文：{calibration_body}"
-    return "\n".join(
-        [
-            "# 研究决策最终报告",
+    convergence_note = _sanitize_user_facing_excerpt(str(excerpts.get("convergence_report") or ""), limit=700)
+    calibration_note = _sanitize_user_facing_excerpt(str(excerpts.get("external_calibration") or ""), limit=700)
+    research_note = _sanitize_user_facing_excerpt(str(excerpts.get("L5_deepseek_acceptance") or excerpts.get("research_evidence_packet") or ""), limit=500)
+    enumerated = _enumerated_user_questions(query)
+    anchors = [terms[0] for _name, terms in _case_anchor_groups_from_query(query) if terms][:10]
+    lines: list[str] = [
+        "# 研究决策最终报告",
+        "",
+        "## 核心结论",
+        frame["conclusion"],
+        "",
+    ]
+    if anchors:
+        lines.extend([
+            "## 问题锚点与适用边界",
+            "本回答围绕用户问题中的关键对象和约束展开：" + "、".join(anchors) + "。这些锚点用于限制结论适用范围；如果事实条件变化，结论也要下调或重做。",
             "",
-            "## 核心结论",
-            frame["conclusion"],
-            "",
-            "## 输入材料吸收",
-            "- research_evidence_packet：用于限定哪些判断可以作为 evidence_supported，哪些只能作为推断或假设。",
-            "- convergence_report：用于吸收收敛后的关键变量、机制关系、风险边界和分叉条件，不复制中间正文。",
-            "- external_calibration：用于执行降调、反对意见和最终可用性边界。",
-            "- source_consumption_check："
-            + "; ".join(f"{name}={'yes' if used else 'no'}" for name, used in consumed.items()),
-            "",
-            "## 证据分层",
-            "",
-            "### evidence_supported",
-            f"判断：{frame['supported_judgment']}",
-            f"触发条件：{frame['supported_condition']}",
-            f"中间机制：{frame['supported_mechanism']}",
-            f"失效条件或反证信号：{frame['supported_falsifier']}",
-            f"certainty_level：{frame['supported_certainty']}",
-            "evidence_tier：evidence_supported",
-            f"decision_use：{frame['supported_use']}",
-            "",
-            "### reasonable_inference",
-            f"判断：{frame['inference_judgment']}",
-            f"触发条件：{frame['inference_condition']}",
-            f"中间机制：{frame['inference_mechanism']}",
-            f"失效条件或反证信号：{frame['inference_falsifier']}",
-            f"certainty_level：{frame['inference_certainty']}",
-            "evidence_tier：reasonable_inference",
-            f"decision_use：{frame['inference_use']}",
-            "",
-            "### foresight_hypothesis",
-            f"判断：{frame['hypothesis_judgment']}",
-            f"触发条件：{frame['hypothesis_condition']}",
-            f"中间机制：{frame['hypothesis_mechanism']}",
-            f"失效条件或反证信号：{frame['hypothesis_falsifier']}",
-            f"certainty_level：{frame['hypothesis_certainty']}",
-            "evidence_tier：foresight_hypothesis",
-            f"decision_use：{frame['hypothesis_use']}",
-            "",
-            "## 校准执行",
-            calibration_action,
-            "",
-            "## 收敛吸收",
-            f"关键变量：{frame['key_variables']}",
-            f"机制链：{frame['mechanism_chain']}",
-            f"风险边界：{frame['risk_boundary']}",
-            "",
-            "## 证据强度、争议和缺口",
-            f"evidence_strength: {frame['evidence_strength']}",
-            f"controversy: {frame['controversy']}",
-            f"evidence_gap: {frame['evidence_gap']}",
-            "",
-            "## 最终决策含义",
+        ])
+    if enumerated:
+        lines.extend(_enumerated_user_answer_sections(query, enumerated, convergence_note, calibration_note))
+    else:
+        lines.extend([
+            "## 决策路径",
             frame["decision_meaning"],
-        ]
-    )
+            "",
+        ])
+    lines.extend([
+        "## 证据分层",
+        "1. [证据支持] " + frame["supported_judgment"] + " 触发条件：" + frame["supported_condition"] + " 中间机制：" + frame["supported_mechanism"] + " 失效条件 / 反证信号：" + frame["supported_falsifier"] + " 确定性：" + frame["supported_certainty"] + "。决策含义：" + frame["supported_use"],
+        "2. [合理推断] " + frame["inference_judgment"] + " 触发条件：" + frame["inference_condition"] + " 中间机制：" + frame["inference_mechanism"] + " 失效条件 / 反证信号：" + frame["inference_falsifier"] + " 确定性：" + frame["inference_certainty"] + "。决策含义：" + frame["inference_use"],
+        "3. [前瞻假设] " + frame["hypothesis_judgment"] + " 触发条件：" + frame["hypothesis_condition"] + " 中间机制：" + frame["hypothesis_mechanism"] + " 失效条件 / 反证信号：" + frame["hypothesis_falsifier"] + " 确定性：" + frame["hypothesis_certainty"] + "。决策含义：" + frame["hypothesis_use"],
+        "",
+        "## 关键驱动变量与机制链",
+        "关键驱动：" + frame["key_variables"],
+        "机制链：" + frame["mechanism_chain"],
+        "",
+        "## 情景分叉与反证信号",
+        "- 情景 A：关键前提成立，采取可逆、分阶段、带监控指标的路径。确定性：中。",
+        "- 情景 B：关键前提不成立，停止扩大投入并回到事实核验。确定性：中。",
+        "- 主要反证信号：" + frame["risk_boundary"],
+        "",
+        "## 证据强度、争议点、证据缺口",
+        "证据强度：" + frame["evidence_strength"],
+        "争议点：" + frame["controversy"],
+        "证据缺口：" + frame["evidence_gap"],
+        "",
+        "## 校准后的使用方式",
+        frame["calibration_action"] + " 不把长期、弱证据或片段证据写成确定结论；只用于下一步可逆验证和监控指标设计。",
+    ])
+    if calibration_note:
+        lines.extend([
+            "",
+            "## 需要下调的判断",
+            "高不确定、来源较弱、依赖未来变化或缺少临近事实核验的判断，只能作为条件性推断或待监控假设。若关键事实、执行条件、成本、时点、替代方案或反证信号与预期不一致，应下调结论或停止使用。",
+        ])
+        if calibration_note:
+            lines.append("校准边界：" + _sanitize_user_facing_excerpt(calibration_note, limit=260))
+    elif research_note:
+        lines.extend([
+            "",
+            "## 证据使用边界",
+            _sanitize_user_facing_excerpt(research_note, limit=450),
+        ])
+    return "\n".join(lines)
 
 
 def _research_decision_generic_frame(query: str) -> dict[str, str]:
@@ -8550,6 +8426,17 @@ def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
         "missing_considerations",
         "claim_strength_table",
         "over_inference_checks",
+        "calibration_scope",
+        "Target Artifact",
+        "Target 材料",
+        "Reference Baseline",
+        "Evaluation Focus",
+        "Executor Constraint",
+        "执行环节 Constraint",
+        "GPT Bridge",
+        "Stage records",
+        "阶段记录",
+        "unavailability",
     )
     for line in (text or "").splitlines():
         if any(term in line for term in blocked_line_terms):
@@ -8578,8 +8465,16 @@ def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
         "evidence_supported": "证据支持",
         "StageRecord": "阶段记录",
         "artifact": "材料",
+        "Artifact": "材料",
+        "artifacts": "材料",
+        "Artifacts": "材料",
         "pipeline": "流程",
-        "Executor": "执行器",
+        "Pipeline": "流程",
+        "executor": "执行环节",
+        "Executor": "执行环节",
+        "执行器": "执行环节",
+        "Stage": "阶段",
+        "stage": "阶段",
         "premise_auditor": "前提风险检查",
         "evidence_judge": "证据强度检查",
         "insight_harvester": "洞见整理",
@@ -8791,55 +8686,72 @@ def _enumerated_user_answer_sections(
 def _answer_lines_for_user_question(query: str, body: str, convergence_note: str, calibration_note: str) -> list[str]:
     combined = f"{query}\n{body}\n{convergence_note}\n{calibration_note}"
     if _top_k_request_count(body):
-        return _top_k_answer_lines(body, combined)
+        return _top_k_answer_lines(query, body, combined)
     if _query_requests_ranking(body):
-        return _ranking_answer_lines(body, combined)
+        return _ranking_answer_lines(query, body, combined)
     if _query_requests_evidence_tiers(body):
-        return _claim_level_evidence_lines(combined)
+        return _claim_level_evidence_lines(query, combined)
     if any(term in body for term in ("最危险", "错误", "陷阱")):
         return [_danger_path_line(combined)]
     if any(term in body for term in ("反直觉", "假设")):
         return [_counterintuitive_line(combined)]
     if any(term in body for term in ("家长", "可执行", "方向")):
         return _parent_or_operator_action_lines(combined)
+    focus_terms = list(dict.fromkeys(_question_keywords(body)[:3] + _domain_focus_terms_from_query(query)[:4]))
+    focus = "、".join(focus_terms) if focus_terms else "该问题的关键对象"
     return [
-        "[合理推断] 这个问题应按证据强度、执行约束和反证信号分层回答。触发条件：关键前提在当前材料中成立。中间机制：证据边界先限定判断，再把可逆行动和观察指标绑定。失效条件 / 反证信号：如果关键前提或执行条件不成立，应下调结论。确定性：中。决策含义：先选择低风险、可观察、可复盘的路径。"
+        f"[合理推断] 围绕{focus}，应按证据强度、执行约束和反证信号分层回答。触发条件：这些关键对象和约束在当前材料中成立。中间机制：先用证据边界限定事实底座，再把可逆行动、监控指标和反证信号绑定。失效条件 / 反证信号：如果{focus}相关前提、执行条件或外部约束不成立，应下调结论。确定性：中。决策含义：先选择低风险、可观察、可复盘的路径。"
     ]
 
-
-def _top_k_answer_lines(body: str, combined: str) -> list[str]:
+def _top_k_answer_lines(query: str, body: str, combined: str) -> list[str]:
     count = _top_k_request_count(body) or 5
-    is_advantage = any(term in body for term in ("优势", "机会", "benefit", "advantage"))
-    is_trap = any(term in body for term in ("陷阱", "风险", "trap", "risk"))
-    if is_advantage and not is_trap:
-        items = [
-            "[前瞻假设] 问题发现：当 AI 降低知识获取和表达成本后，真正稀缺的是提出好问题、发现异常和形成可检验假设；适用前提是每次探索都留下记录、筛选和验证结果。",
-            "[合理推断] 快速试错：高兴趣和高反馈任务可以转化为多路径试验；风险边界是试错必须产出可检查作品，而不是只增加新想法。",
-            "[合理推断] 视觉或结构化建模：如果用户画像中存在空间、模型、图像或身体经验优势，可以把复杂关系外显化；反证信号是模型变漂亮但解释和验证没有提升。",
-            "[前瞻假设] 低价值重复筛选：工具承担部分机械重复后，人对任务价值的判断更重要；前提是不能把阅读、数学、核查等必要基本功也外包。",
-            "[合理推断] 高反馈训练迁移：现实反馈密集的活动能训练状态识别、冲动控制和复盘；是否成立要看这种能力能否迁移到学习、项目或决策任务。",
+    focus_terms = list(dict.fromkeys(_question_keywords(body)[:3] + _domain_focus_terms_from_query(query)[:4]))
+    focus = "、".join(focus_terms) if focus_terms else "该决策对象"
+    is_opportunity = any(term in body for term in ("优势", "机会", "被高估", "benefit", "advantage", "opportunity"))
+    is_risk = any(term in body for term in ("陷阱", "风险", "错误", "依赖", "被低估", "trap", "risk"))
+    if is_opportunity and not is_risk:
+        bases = [
+            "把可能性当成确定收益",
+            "忽略进入成本和执行摩擦",
+            "高估短期采用速度",
+            "低估替代方案和现有路径惯性",
+            "把局部信号外推成整体趋势",
         ]
+        tier = "[合理推断]"
+    elif is_risk:
+        bases = [
+            "前提核验不足",
+            "把弱证据写成强结论",
+            "忽略执行约束和恢复成本",
+            "缺少临近决策前复核",
+            "没有设置缩小范围或停止条件",
+        ]
+        tier = "[不支持/风险]"
     else:
-        items = [
-            "[不支持/风险] 把 AI 当执行功能拐杖：在工作记忆、顺序逻辑、阅读和数学基本功建立前外包启动、排序、验证和复盘，会让最需要亲自练的能力更少被练到。",
-            "[合理推断] 无限换题：低摩擦工具持续供应新答案和新主题，容易让探索变成切换奖励；反证信号是完成物数量和复盘质量同步增加。",
-            "[合理推断] 表达掩盖执行缺口：表达更流畅不等于理解、执行和复盘都到位；需要用独立完成、错误订正和现实交付验证。",
-            "[前瞻假设] 慢反馈耐受下降：即时答案过多会让阅读、数学、训练或长期项目显得更无聊；是否成立要看慢任务完成率是否下降。",
-            "[合理推断] 外包验证：如果只接受工具输出而不保留推理痕迹，事实核查和反例检查会变弱；最低要求是每次使用后留下核查记录。",
+        bases = [
+            "优先验证关键瓶颈",
+            "保留可逆试点",
+            "建立监控指标",
+            "设置反证信号",
+            "避免一次性不可逆承诺",
         ]
-    lines = []
-    for index, item in enumerate(items[:count], start=1):
-        lines.append(f"{index}. {item}")
+        tier = "[合理推断]"
+    lines: list[str] = []
+    for index in range(count):
+        base = bases[index % len(bases)]
+        lines.append(
+            f"{index + 1}. {tier} {base}：针对{focus}，先说明适用前提、证据强度和执行边界；触发条件是相关前提被当前材料支持，失效条件 / 反证信号是事实核验、成本、时点或替代方案与预期相反。"
+        )
     return lines
 
-
-def _ranking_answer_lines(body: str, combined: str) -> list[str]:
-    items = _ranking_items_from_question(body)
+def _ranking_answer_lines(query: str, body: str, combined: str) -> list[str]:
+    items = _ranking_items_from_question(body) or _ranking_items_from_question(query)
     if not items:
+        focus = "、".join(_domain_focus_terms_from_query(query)[:4]) or "用户明确目标"
         return [
-            "1. 第一优先级：先处理不可外包、会影响后续判断的底层能力或关键约束；理由是这些环节一旦缺失，工具和表达会放大误判。",
-            "2. 第二优先级：再处理能形成稳定反馈和复盘的训练或流程；理由是反馈闭环能把抽象判断变成可观察进步。",
-            "3. 第三优先级：最后增加工具化、表达化或加速型手段；理由是它们适合作为脚手架，不适合作为绕过基本能力的旁路。",
+            f"1. 第一优先级：先处理{focus}中会决定安全边界、不可逆成本或后续选项的硬约束；理由是这些条件一旦失真，后续排序都会被放大误导。",
+            f"2. 第二优先级：再处理{focus}中能提高体验、效率或收益的可调整因素；理由是这些因素应在硬约束成立后再优化。",
+            f"3. 第三优先级：最后处理加速、表达、扩张或锦上添花型选项；理由是它们适合做辅助，不应绕过核验、恢复和停止条件。",
         ]
     ordered = sorted(items, key=_ranking_item_priority)
     lines: list[str] = []
@@ -8847,7 +8759,6 @@ def _ranking_answer_lines(body: str, combined: str) -> list[str]:
         reason = _ranking_item_reason(item, combined)
         lines.append(f"{index}. {item}：{reason}")
     return lines
-
 
 def _ranking_item_priority(item: str) -> int:
     value = item.lower()
@@ -8859,9 +8770,8 @@ def _ranking_item_priority(item: str) -> int:
 def _ranking_item_reason(item: str, combined: str) -> str:
     value = item.lower()
     if any(term in value for term in ("ai", "工具")):
-        return "作为脚手架用于拆解、表达、核查和复盘；不能作为 bypass/prosthetic 替代启动、排序、验证和复盘。"
-    return "作为用户明确列出的排序对象，先看它是否不可外包、能形成现实反馈、能支撑后续能力；若它变成逃避基础练习或现实交付的理由，应下调优先级。"
-
+        return "作为辅助工具用于拆解、表达、核查和复盘；不能替代事实核验、排序、验证和复盘本身。"
+    return "作为用户明确列出的排序对象，先看它是否决定安全边界、不可逆成本、体验质量或后续选择空间；若它把决策推向不可恢复成本、事实失真或执行超载，应下调优先级。"
 
 def _danger_path_line(combined: str) -> str:
     if any(term in combined for term in ("执行功能", "executive-function", "工作记忆", "顺序逻辑", "阅读", "数学")):
@@ -8906,14 +8816,14 @@ def _counterintuitive_source_excerpt(combined: str) -> str:
     return ""
 
 
-def _claim_level_evidence_lines(combined: str) -> list[str]:
+def _claim_level_evidence_lines(query: str, combined: str) -> list[str]:
+    focus = "、".join(_domain_focus_terms_from_query(query)[:4]) or "该决策对象"
     return [
-        "1. [证据支持] 结构化支持、稳定反馈和保留基本练习通常比单纯追求更快答案更可靠。触发条件：训练或流程能持续执行。中间机制：外部结构降低执行负担。失效条件 / 反证信号：只增加强度但没有复盘或恢复。确定性：中/高。家长怎么用：先看节律和闭环，而不是短期表现。",
-        "2. [合理推断] 如果用户画像显示某项高兴趣或空间/身体经验优势，可以把它作为调节和迁移锚点。触发条件：本人愿意长期投入且训练质量稳定。中间机制：现实反馈外显化状态和错误。失效条件 / 反证信号：训练只剩压力或逃避。确定性：中。家长怎么用：观察是否迁移到阅读、数学、项目或决策任务。",
-        "3. [前瞻假设] AI 降低知识获取和表达成本后，问题发现、快速试错和筛选能力可能升值。触发条件：发散想法被记录、筛选、测试。中间机制：低摩擦输入让验证和收束更稀缺。失效条件 / 反证信号：想法更多但完成更少。确定性：中/低。家长怎么用：每次探索必须留下可检查结果。",
-        "4. [不支持/风险] AI 可以替代儿童或学习者建立顺序逻辑、阅读、数学、核查和复盘基本功。触发条件：把工具当 bypass/prosthetic。中间机制：亲自练习减少导致独立能力弱化。失效条件 / 反证信号：没有工具时仍能启动、完成、检查和复盘。确定性：风险高。家长怎么用：工具只能做脚手架，不能做旁路。",
+        f"1. [证据支持] 只能把当前材料中可核验、可复述且与{focus}直接相关的事实作为证据支持。触发条件：来源锚点、适用边界和反证信号同时存在。中间机制：证据底座限制结论范围，避免把推断写成事实。失效条件 / 反证信号：如果来源只是片段、事实临近决策才会变化，或关键条件没有核验，应降级。确定性：中。决策含义：只把它用于低风险、可复核的下一步判断。",
+        f"2. [合理推断] 围绕{focus}的优先级、风险排序和执行路线，可以在证据不足以直接证明时做条件性推断。触发条件：机制链清楚、替代解释被列出、行动可逆。中间机制：先用小规模验证降低误判成本，再根据反馈扩大或收缩。失效条件 / 反证信号：如果试点数据、成本、外部约束或用户目标与假设相反，应停止外推。确定性：中。决策含义：用于设计验证路径，不用于包装成确定结论。",
+        f"3. [前瞻假设] 与{focus}有关的长期变化、结构性机会或低概率高影响风险，只能作为待监控假设。触发条件：关键变量持续朝同一方向变化，且没有出现强反证。中间机制：外部趋势改变成本、能力或需求结构，再影响最优选择。失效条件 / 反证信号：如果趋势放缓、制度约束增强、替代路径更优或临近事实核验失败，应下调。确定性：低到中。决策含义：设置监控指标，不做不可逆押注。",
+        f"4. [不支持/风险] 不能把弱来源、旧样本、片段材料或另一个任务的结论当成{focus}的强证据。触发条件：答案偏离用户问题、只复述格式、缺少来源锚点或跳过反证。中间机制：表面完整的文本会掩盖领域错配和过推断。失效条件 / 反证信号：只有当具体来源、适用边界、替代解释和复核指标齐全时，才可重新上调。确定性：风险高。决策含义：遇到这种情况应阻断交付或要求重写。",
     ]
-
 
 def _parent_or_operator_action_lines(combined: str) -> list[str]:
     lines = [
@@ -8944,12 +8854,58 @@ def _final_user_facing_quality_failures(packet: dict[str, Any], text: str) -> li
 
     failures.extend(_top_k_substance_failures(query, value, enumerated))
     failures.extend(_ranking_substance_failures(query, value, enumerated))
+    if str(packet.get("mode") or "") == ENGINE_RESEARCH_DECISION:
+        failures.extend(_domain_anchor_mismatch_failures(query, value, enumerated))
     profiles = _normalize_profiles(packet.get("output_quality_profile"))
     if _query_requests_evidence_tiers(query) or PROFILE_FORESIGHT_MECHANISM in profiles:
         failures.extend(_evidence_tagging_substance_failures(value))
     failures.extend(_case_anchor_usage_failures(query, value))
     failures.extend(_calibration_implementation_failures(str(packet.get("external_calibration_hard_constraints") or ""), value))
     return failures
+
+
+def _domain_anchor_mismatch_failures(query: str, text: str, enumerated: list[tuple[int, str]]) -> list[str]:
+    anchors = _case_anchor_groups_from_query(query)
+    if len(anchors) < 6:
+        return []
+    value = text or ""
+    lowered_value = value.lower()
+    hits = 0
+    for _name, terms in anchors:
+        if any(term and (term in value or term.lower() in lowered_value) for term in terms):
+            hits += 1
+    required = max(3, int(len(anchors) * 0.35))
+    failures: list[str] = []
+    if hits < required:
+        failures.append(f"domain_anchor_mismatch:{hits}/{len(anchors)}")
+    if hits < max(2, int(len(anchors) * 0.25)) and _dominant_non_query_topic_suspected(query, value):
+        failures.append("stale_output_suspected")
+    if len(enumerated) >= 2 and hits < required and not re.search(r"(?m)^##\s*1[.、)]", value):
+        failures.append("wrong_task_answer")
+    return failures
+
+
+def _dominant_non_query_topic_suspected(query: str, text: str) -> bool:
+    query_terms = {re.sub(r"\s+", "", term).lower() for _name, terms in _case_anchor_groups_from_query(query) for term in terms}
+    query_terms.update(re.sub(r"\s+", "", term).lower() for term in _generic_salient_terms(query))
+    counts: dict[str, int] = {}
+    for token in _generic_salient_terms(text):
+        key = re.sub(r"\s+", "", token).lower()
+        if not key or key in query_terms or key in _dominant_topic_stop_terms():
+            continue
+        if any(key in q or q in key for q in query_terms if len(q) >= 3):
+            continue
+        counts[key] = counts.get(key, 0) + max(1, (text or "").count(token))
+    repeated = [term for term, count in counts.items() if count >= 3]
+    return len(repeated) >= 3
+
+
+def _dominant_topic_stop_terms() -> set[str]:
+    return {
+        "最终答案", "最终报告", "研究决策", "核心结论", "证据分层", "合理推断", "前瞻假设", "证据支持", "触发条件", "中间机制",
+        "反证信号", "确定性", "决策含义", "关键驱动", "机制链", "情景分叉", "争议点", "证据缺口", "证据强度",
+        "当前", "未来", "长期", "判断", "风险", "问题", "支持", "条件", "结论", "用户", "需要", "可以", "如果", "没有", "不能",
+    }
 
 
 def _enumerated_user_questions(query: str) -> list[tuple[int, str]]:
@@ -8973,7 +8929,11 @@ def _query_requests_evidence_tiers(query: str) -> bool:
 
 
 def _top_k_request_count(text: str) -> int | None:
-    match = re.search(r"Top\s*(\d+)|Top(\d+)|前\s*(\d+)", text or "", re.I)
+    value = text or ""
+    match = re.search(r"Top\s*(\d+)|Top(\d+)|前\s*(\d+)", value, re.I)
+    if not match:
+        if any(term in value for term in ("最容易", "最可能", "最危险", "规划错误", "使用场景", "依赖路径", "风险", "机会", "场景")):
+            match = re.search(r"(\d+)\s*个", value)
     if not match:
         return None
     for group in match.groups():
@@ -8998,7 +8958,6 @@ def _internal_user_facing_language_failures(text: str) -> list[str]:
         "artifact",
         "pipeline",
         "Executor",
-        "执行器",
         "必须把 external_calibration 视为硬约束",
         "最终报告只输出融合后的判断单元",
         "本阶段输出",
@@ -9024,7 +8983,15 @@ def _internal_user_facing_language_failures(text: str) -> list[str]:
         "controversy:",
         "evidence_gap:",
     )
-    return ["internal_language:" + term for term in forbidden if term.lower() in lowered]
+    failures: list[str] = []
+    for term in forbidden:
+        needle = term.lower()
+        if needle in {"stage", "artifact", "pipeline", "executor", "contract"}:
+            if re.search(rf"\b{re.escape(needle)}\b", lowered):
+                failures.append("internal_language:" + term)
+        elif needle in lowered:
+            failures.append("internal_language:" + term)
+    return failures
 
 
 def _markdown_numeric_sections(text: str) -> dict[int, str]:
@@ -9098,6 +9065,34 @@ def _question_keywords(body: str) -> list[str]:
             deduped.append(term)
     return deduped[:12]
 
+
+
+def _domain_focus_terms_from_query(query: str) -> list[str]:
+    angle_terms: list[str] = []
+    other_terms: list[str] = []
+    for name, values in _case_anchor_groups_from_query(query):
+        if name.startswith(("question_term", "negative_constraint")):
+            continue
+        for term in values:
+            cleaned = " ".join((term or "").split())
+            if not cleaned or cleaned in _anchor_stop_terms():
+                continue
+            if name.startswith("angle_term"):
+                angle_terms.append(cleaned)
+            else:
+                other_terms.append(cleaned)
+    terms = angle_terms + other_terms
+    if not terms:
+        terms.extend(_question_keywords(query)[:6])
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        key = re.sub(r"\s+", "", term).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(term)
+    return deduped[:8]
 
 def _enumerated_answer_substance_failures(enumerated: list[tuple[int, str]], text: str) -> list[str]:
     sections = _markdown_numeric_sections(text)
@@ -9230,6 +9225,11 @@ def _case_anchor_groups_from_query(query: str) -> list[tuple[str, tuple[str, ...
         cleaned = re.sub(r"^(一个|一位|有明确|热爱|目标|长期|未来|从)\s*", "", token.strip())
         add("case_phrase", cleaned)
 
+    for angle_match in re.findall(r"从([^。；;\n]{2,160}?)(?:角度|方面|维度)", value):
+        for token in re.split(r"[、/,，]+", angle_match):
+            cleaned = re.sub(r"^(和|以及|与|及)\s*", "", token.strip())
+            add("angle_term", cleaned)
+
     for _index, body in _enumerated_user_questions(value):
         for term in _question_keywords(body)[:4]:
             add("question_term", term)
@@ -9288,8 +9288,11 @@ def _case_anchor_usage_failures(query: str, text: str) -> list[str]:
     value = text or ""
     headings = [(match.start(), match.group(0).strip()) for match in re.finditer(r"(?m)^##\s+.*$", value)]
     for name, terms in anchors:
-        positions = [value.find(term) for term in terms if term in value]
-        positions = [pos for pos in positions if pos >= 0]
+        positions: list[int] = []
+        for term in terms:
+            if not term:
+                continue
+            positions.extend(match.start() for match in re.finditer(re.escape(term), value))
         if not positions:
             continue
         if min(positions) < 320:
