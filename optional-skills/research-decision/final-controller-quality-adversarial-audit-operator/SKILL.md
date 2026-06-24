@@ -40,7 +40,13 @@ Do not use this skill to rubber-stamp a generated PASS label, to skip raw diff r
 ## core audit memory
 
 - 不要相信自评分: self-scores, generated summaries, and gate JSON are audit targets, not audit evidence.
+- Do not trust final_quality_gate_after.json valid=true.
+- Do not trust PASS_HARDENING_COMPLETE.
+- Do not trust self-scored PASS reports.
+- Treat those as objects to audit, not evidence of quality.
 - production 不能知道 golden case: diagnostic cases may live in tests or fixtures, but production final-controller logic must remain generic and input-driven.
+
+`final_quality_gate_after.json valid=true`, `PASS_HARDENING_COMPLETE`, and self-scored PASS reports can be read only as audit materials. They cannot be used as the basis for commit, tag, or PASS decisions. A final-controller change may enter commit review only when raw final text, raw source diff, mutation tests, generic non-golden cases, broad selector results, and manual/adversarial audit all pass together.
 
 This is the golden-case policy for this skill: a fixture can prove generic behavior, but it must not create a production branch, prompt template, or generated-answer shortcut.
 

@@ -108,6 +108,45 @@ Never:
 6. After completion, audit artifacts directly. Do not rely on console text or a single PASS label.
 7. Write a closeout report with matrices, failure notes, git cleanliness, and commit or tag recommendation.
 
+## S08 external_calibration transient failure lesson
+
+S08 external_calibration transient failure is the reference lesson for guarded validation resume behavior. In that run, `external_calibration` saw GPT Bridge / AGY transient failure. Treat this class of failure as a wait-and-triage event first, not as an immediate permanent validation failure.
+
+Resume is allowed only when all of these are true:
+
+- Failure context has been saved: sample id, run id, stage name, raw error, timestamp, command, executor metadata, output root, branch, HEAD, and git status.
+- StageRecord files and execution logs remain preserved; do not overwrite them to make the run look cleaner.
+- The executor failure is transient availability or readiness failure, not a stage contract violation.
+- HEAD has not moved from the expected validation commit.
+- Tracked source, test, or skill scope is clean or matches the task's explicit allowed diff.
+- No success artifact has been fabricated, edited, or backfilled.
+
+After resume, verify:
+
+- `external_calibration` eventually completed under the approved engine route.
+- `calibration_report.md` exists and belongs to the resumed run.
+- StageRecords are continuous enough to explain the original failure and resumed completion.
+- Final closeout preserves the original transient failure record.
+- The original failure is not erased from reports, summaries, or handoff notes.
+
+Return `BLOCKED_EXECUTOR_NOT_READY`, `BLOCKED_STAGE_CONTRACT_VIOLATION`, or `BLOCKED_INCOMPLETE_ARTIFACTS` instead of continuing resume when the executor remains unavailable, authentication fails, the requested model is unavailable, a contract violation occurs, or a required StageRecord is missing.
+
+## Failure taxonomy
+
+| failure type | detection signs | allowed action | prohibited action | final status label |
+| --- | --- | --- | --- | --- |
+| `transient_external_executor_failure` | External stage returns short-lived readiness, timeout, unavailable, or handoff errors while local contract remains intact. | Save failure context, run approved readiness triage, resume the same sample under the same route after recovery, then verify artifacts. | Hide the first failure, change executor policy silently, or mark PASS without resumed artifacts. | `PASS_WITH_TRANSIENT_NOTE` after verified resume; otherwise `BLOCKED_EXECUTOR_NOT_READY`. |
+| `bridge_not_ready` | GPT Bridge is refused, settling, unauthenticated, or timing out before the stage can run. | Wait or restart only through the approved bridge procedure, record readiness results, then resume if recovered. | Kill active stages or classify as engine failure without readiness evidence. | `BLOCKED_EXECUTOR_NOT_READY` until recovered. |
+| `agy_not_ready` | AGY alias, cwd, auth, service availability, or model readiness check fails. | Record exact AGY error, refresh approved environment/auth path, rerun readiness, and resume only after recovery. | Bypass AGY, switch model policy, or use a different executor silently. | `BLOCKED_EXECUTOR_NOT_READY` or `PASS_WITH_TRANSIENT_NOTE`. |
+| `blocked_executor_unavailable` | Auth failure, unavailable model, repeated readiness failure, or durable service outage. | Stop validation and report blocker with raw failure context. | Keep rerunning indefinitely or fabricate executor output. | `BLOCKED_EXECUTOR_NOT_READY`. |
+| `stage_contract_violation` | Stage output schema, required fields, status semantics, or artifact contract is invalid. | Stop and report raw contract violation with affected files. | Patch artifacts to satisfy the contract. | `BLOCKED_STAGE_CONTRACT_VIOLATION`. |
+| `missing_artifact` | Required report, validation JSON, summary, log, or StageRecord is absent after claimed completion. | Inspect run root and logs; rerun or resume only through the approved path if allowed. | Declare PASS from terminal text alone. | `BLOCKED_INCOMPLETE_ARTIFACTS`. |
+| `incomplete_stage_count` | Stage count is below the expected validation contract or StageRecords are inconsistent. | Treat run as incomplete and preserve artifacts for review. | Infer skipped stages from final text. | `BLOCKED_INCOMPLETE_ARTIFACTS`. |
+| `dirty_scope` | Tracked source, test, or skill diff exists outside the allowed task scope, or staged diff is present without approval. | Stop for scope review and list dirty files. | Continue validation, commit, or tag with unknown tracked diff. | `DIRTY_SCOPE_REVIEW_REQUIRED`. |
+| `head_moved` | HEAD differs from the expected validation commit or artifacts span multiple commits. | Stop, record observed HEAD and branch, and ask for explicit direction. | Mix artifacts across commits or keep running as if source identity were unchanged. | `DIRTY_SCOPE_REVIEW_REQUIRED`. |
+| `outputs_only_untracked` | Full status shows untracked `outputs/**` while tracked and staged diffs are empty. | Continue audit if the task allows output artifacts; state that outputs are uncommitted. | Commit `outputs/**` by default or call the source tree dirty. | `NOT_COMMITTED_OUTPUTS_ONLY`; not a failure. |
+| `final_report_generic_quality_risk` | Pipeline contract passes but final text is generic, process-shaped, weakly calibrated, or less useful than convergence/calibration artifacts. | Preserve structural PASS, record quality risk, and route to final-controller quality hardening. | Treat it as pipeline failure or blindly expand samples to avoid product-quality repair. | `PASS_WITH_QUALITY_HARDENING_RECOMMENDED`. |
+
 ## artifact audit checklist
 
 For each completed run unit, verify:
