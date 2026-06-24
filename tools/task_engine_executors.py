@@ -952,12 +952,52 @@ class LocalTaskEngineExecutor:
         l2_5_analysis = packet.get("l2_5_analysis") if isinstance(packet.get("l2_5_analysis"), dict) else {}
         profile_requirements = [str(item) for item in (packet.get("profile_acceptance_requirements") or [])]
         audit_summary = str(packet.get("audit_summary") or "L4 audit artifact present.")
+        claim_table = packet.get("claim_table") if isinstance(packet.get("claim_table"), list) else []
+        l4_defect_report = packet.get("l4_defect_report") if isinstance(packet.get("l4_defect_report"), dict) else _l4_defect_report_from_audit(str(packet.get("audit_text") or ""))
+        claim_contract_validation = (
+            packet.get("claim_contract_validation")
+            if isinstance(packet.get("claim_contract_validation"), dict)
+            else _research_claim_contract_validation(
+                claim_table=claim_table,
+                l4_defect_report=l4_defect_report,
+                l2_5_analysis=l2_5_analysis,
+            )
+        )
+        noncritical_defects = sorted(set(str(item) for item in (packet.get("noncritical_defects") or [])))
+        noncritical_defects = sorted(set(noncritical_defects + [str(item) for item in (l4_defect_report.get("noncritical_defects") or [])]))
+        verification_required = sorted(set(str(item) for item in (packet.get("verification_required") or [])))
+        verification_required = sorted(
+            set(
+                verification_required
+                + [str(item) for item in (l4_defect_report.get("verification_required") or [])]
+                + [str(item) for item in (claim_contract_validation.get("verification_required") or [])]
+            )
+        )
+        evidence_gaps = sorted(set(str(item) for item in (packet.get("evidence_gaps") or [])))
+        evidence_gaps = sorted(
+            set(
+                evidence_gaps
+                + [str(item) for item in (l4_defect_report.get("evidence_gaps") or [])]
+                + [str(item) for item in (claim_contract_validation.get("evidence_gaps") or [])]
+            )
+        )
+        handoff_caveats = sorted(set(str(item) for item in (packet.get("handoff_caveats") or [])))
+        handoff_caveats = sorted(
+            set(
+                handoff_caveats
+                + [str(item) for item in (l4_defect_report.get("handoff_caveats") or [])]
+                + [str(item) for item in (claim_contract_validation.get("handoff_caveats") or [])]
+            )
+        )
+        missing.extend(str(item) for item in (claim_contract_validation.get("blocking_errors") or []))
+        missing = sorted(set(str(item) for item in missing))
         rejected = missing or _audit_text_rejects(str(packet.get("audit_text") or ""))
-        verdict = "REJECTED" if rejected else "ACCEPTED"
+        conditional = bool(critical_defects or noncritical_defects or verification_required or handoff_caveats)
+        verdict = "REJECTED" if rejected else ("ACCEPTED_WITH_DEFECTS" if conditional else "ACCEPTED")
         accepted = "false" if rejected else "true"
         if rejected:
             ready = "false"
-        elif critical_defects and PROFILE_FORESIGHT_MECHANISM in profiles:
+        elif conditional:
             ready = "conditional"
         else:
             ready = "true"
@@ -972,12 +1012,27 @@ class LocalTaskEngineExecutor:
             f"l2_5_stub_detected: {str(bool(l2_5_analysis.get('l2_5_stub_detected'))).lower()}",
             f"insufficient_sources: {str(bool(l2_5_analysis.get('insufficient_sources'))).lower()}",
             "critical_defects: [" + ", ".join(critical_defects) + "]",
+            "noncritical_defects: [" + ", ".join(noncritical_defects) + "]",
+            "verification_required: [" + ", ".join(verification_required) + "]",
+            "evidence_gaps: [" + ", ".join(evidence_gaps) + "]",
+            "handoff_caveats: [" + " | ".join(handoff_caveats) + "]",
             "missing_or_invalid_artifacts: [" + ", ".join(missing) + "]",
             f"audit_summary: {audit_summary}",
             f"evidence_packet_ready_for_decision: {ready}",
             "",
         ]
-        lines.extend(_compact_research_evidence_sections(packet, accepted=not rejected))
+        packet_for_sections = dict(packet)
+        packet_for_sections.update(
+            {
+                "claim_table": claim_table,
+                "noncritical_defects": noncritical_defects,
+                "verification_required": verification_required,
+                "evidence_gaps": evidence_gaps,
+                "handoff_caveats": handoff_caveats,
+                "claim_contract_validation": claim_contract_validation,
+            }
+        )
+        lines.extend(_compact_research_evidence_sections(packet_for_sections, accepted=not rejected))
         lines.extend([
             "",
             "scope: acceptance gate only; no new research, no search, no synthesis, no user-facing advice or decision output.",
@@ -4796,11 +4851,26 @@ def _research_acceptance_packet_from_artifacts(stages: list[dict[str, Any]], *, 
         artifact_summaries[name] = "\n".join(snippets)[:2000]
     profiles = _task_engine_profiles_from_query(query)
     l2_5_analysis = analyze_l2_5_evidence_organizer(base)
-    critical_defects = set(l4_critical_defects_from_audit(audit_text))
+    l4_defect_report = _l4_defect_report_from_audit(audit_text)
+    claim_table = _research_claim_table_from_l2_5(base, profiles=profiles, audit_text=audit_text)
+    claim_contract_validation = _research_claim_contract_validation(
+        claim_table=claim_table,
+        l4_defect_report=l4_defect_report,
+        l2_5_analysis=l2_5_analysis,
+    )
+    critical_defects = set(l4_defect_report.get("critical_defects") or [])
     critical_defects.update(str(issue) for issue in l2_5_analysis.get("issues") or [])
+    noncritical_defects = set(str(item) for item in (l4_defect_report.get("noncritical_defects") or []))
+    verification_required = set(str(item) for item in (l4_defect_report.get("verification_required") or []))
+    verification_required.update(str(item) for item in (claim_contract_validation.get("verification_required") or []))
+    evidence_gaps = set(str(item) for item in (l4_defect_report.get("evidence_gaps") or []))
+    evidence_gaps.update(str(item) for item in (claim_contract_validation.get("evidence_gaps") or []))
+    handoff_caveats = set(str(item) for item in (l4_defect_report.get("handoff_caveats") or []))
+    handoff_caveats.update(str(item) for item in (claim_contract_validation.get("handoff_caveats") or []))
     if not l2_5_analysis.get("l2_5_valid", False):
         if PROFILE_EVIDENCE_GROUNDED in profiles:
             missing.extend(str(item) for item in l2_5_analysis.get("missing_or_invalid_artifacts") or [])
+    missing.extend(str(item) for item in (claim_contract_validation.get("blocking_errors") or []))
     if PROFILE_FORESIGHT_MECHANISM in profiles:
         artifact_summaries["_foresight_requirement_map"] = _foresight_requirement_map_text(
             "\n".join(str(value or "") for value in artifact_summaries.values())
@@ -4813,12 +4883,99 @@ def _research_acceptance_packet_from_artifacts(stages: list[dict[str, Any]], *, 
         "checked_stages": [stage.get("stage_name") for stage in stages],
         "missing_or_invalid_artifacts": missing,
         "critical_defects": sorted(critical_defects),
+        "noncritical_defects": sorted(noncritical_defects),
+        "verification_required": sorted(verification_required),
+        "evidence_gaps": sorted(evidence_gaps),
+        "handoff_caveats": sorted(handoff_caveats),
         "l2_5_valid": bool(l2_5_analysis.get("l2_5_valid")),
         "l2_5_analysis": l2_5_analysis,
+        "claim_table": claim_table,
+        "claim_contract_validation": claim_contract_validation,
+        "l4_defect_report": l4_defect_report,
         "artifact_summaries": artifact_summaries,
         "audit_text": audit_text,
         "audit_summary": _audit_summary(audit_text),
     }
+
+
+def _l4_defect_report_from_audit(audit_text: str) -> dict[str, list[str]]:
+    value = audit_text or ""
+    lowered = value.lower()
+    critical: set[str] = set()
+    noncritical: set[str] = set()
+    verification_required: set[str] = set()
+    evidence_gaps: set[str] = set()
+    caveats: set[str] = set()
+
+    l2_5_missing = (
+        "l2.5" in lowered
+        and (
+            "extraction missing" in lowered
+            or "stubbed out" in lowered
+            or "handoff_protocol" in lowered
+            or "unsupported by structured evidence" in lowered
+            or "no actual claims" in lowered
+            or "no actual structured data extraction" in lowered
+        )
+    )
+    if l2_5_missing:
+        critical.add("l2_5_extraction_missing")
+        caveats.add("L2.5 structured source/evidence/claim extraction is missing or stubbed.")
+    if "critical" in lowered and "supplementary_search_cross_topic_contamination" in lowered:
+        critical.add("supplementary_search_cross_topic_contamination")
+        caveats.add("Supplementary search may contain cross-topic contamination.")
+
+    pass_with_defects = "pass with defects" in lowered or "pass_with_defects" in lowered
+    explicit_defect_lines = [
+        _compact_single_line(line.strip("-* \t"), limit=220)
+        for line in value.splitlines()
+        if re.search(r"\bDEFECT\b|\bDefect\b|缺陷|问题", line)
+    ]
+    if pass_with_defects:
+        noncritical.add("l4_pass_with_defects")
+        caveats.add("L4 audit passed with defects; DECISION handoff must preserve those caveats.")
+    for line in explicit_defect_lines[:8]:
+        normalized = _defect_slug(line)
+        if normalized:
+            noncritical.add(normalized)
+        caveats.add(line)
+
+    if "full-text verification gap" in lowered or "requires full-text verification" in lowered:
+        verification_required.add("full_text_verification_required")
+        evidence_gaps.add("source_passages_not_full_text_verified")
+    if "overstated evidence strength" in lowered:
+        noncritical.add("overstated_evidence_strength")
+        caveats.add("L4 found at least one claim with overstated evidence strength.")
+    if "missed counter-signal" in lowered or "counter-signal" in lowered:
+        noncritical.add("missed_or_required_counter_signal")
+        evidence_gaps.add("counter_signal_must_be_preserved")
+    if "missing assumption" in lowered or "assumption" in lowered:
+        noncritical.add("missing_assumption_boundary")
+        evidence_gaps.add("assumptions_must_be_explicit")
+
+    return {
+        "critical_defects": sorted(critical),
+        "noncritical_defects": sorted(noncritical),
+        "verification_required": sorted(verification_required),
+        "evidence_gaps": sorted(evidence_gaps),
+        "handoff_caveats": sorted(caveats),
+    }
+
+
+def _defect_slug(text: str) -> str:
+    lowered = (text or "").lower()
+    if "missed counter" in lowered or "counter-signal" in lowered:
+        return "missed_counter_signal_evidence"
+    if "overstated evidence" in lowered:
+        return "overstated_evidence_strength"
+    if "missing assumption" in lowered:
+        return "missing_assumption_boundary"
+    if "full-text" in lowered or "verification" in lowered:
+        return "source_verification_gap"
+    if "l2.5" in lowered or "l2_5" in lowered:
+        return "l2_5_audit_defect"
+    cleaned = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
+    return cleaned[:80]
 
 
 def _audit_summary(audit_text: str) -> str:
@@ -5396,6 +5553,396 @@ def analyze_l2_5_evidence_organizer(base_dir: str | Path) -> dict[str, Any]:
     }
 
 
+def _research_claim_table_from_l2_5(
+    base_dir: str | Path,
+    *,
+    profiles: list[str] | None = None,
+    audit_text: str = "",
+) -> list[dict[str, Any]]:
+    stage_dir = Path(base_dir) / "L2_5_codex_evidence_organizer"
+    source_rows = _read_csv_dicts(stage_dir / "sources.csv")
+    evidence_rows = _read_csv_dicts(stage_dir / "evidence.csv")
+    claim_entries = _read_l2_5_claim_entries(stage_dir / "claims.md")
+    gaps_text = (stage_dir / "gaps.md").read_text(encoding="utf-8", errors="replace") if (stage_dir / "gaps.md").exists() else ""
+    source_by_id = {str(row.get("source_id") or "").strip(): row for row in source_rows}
+    evidence_by_claim: dict[str, list[dict[str, str]]] = {}
+    for row in evidence_rows:
+        claim_id = str(row.get("claim_id") or "").strip()
+        if claim_id:
+            evidence_by_claim.setdefault(claim_id, []).append(row)
+    claims: list[dict[str, Any]] = []
+    for entry in claim_entries[:12]:
+        claim_id = entry["claim_id"]
+        related_evidence = list(evidence_by_claim.get(claim_id) or [])
+        if not related_evidence and entry.get("source_id"):
+            related_evidence = [
+                {
+                    "claim_id": claim_id,
+                    "source_id": entry["source_id"],
+                    "evidence_text": entry["claim_text"],
+                    "strength_or_limit": source_by_id.get(entry["source_id"], {}).get("limitation_or_note", ""),
+                    "support_type": "secondary_summary",
+                }
+            ]
+        anchors = [
+            _source_anchor_from_rows(source_by_id.get(str(row.get("source_id") or "").strip(), {}), row)
+            for row in related_evidence
+            if str(row.get("source_id") or "").strip()
+        ]
+        anchors = [anchor for anchor in anchors if anchor.get("source_id")]
+        tier = _epistemic_tier_for_claim(entry["claim_text"], profiles=profiles or [])
+        evidence_strength = _evidence_strength_for_anchors(anchors, tier=tier)
+        decision_use = _decision_use_for_claim(tier, evidence_strength, anchors)
+        claims.append(
+            {
+                "claim_id": claim_id,
+                "claim_text": entry["claim_text"],
+                "epistemic_tier": tier,
+                "evidence_strength": evidence_strength,
+                "source_anchors": anchors,
+                "applicability_boundary": _claim_applicability_boundary(entry["claim_text"], anchors),
+                "counter_signal_or_failure_condition": _claim_counter_signal(entry["claim_text"], audit_text),
+                "evidence_gap": _claim_evidence_gap(anchors, gaps_text),
+                "decision_use": decision_use,
+                "notes": "Generated from current-run L2.5 source/evidence/claims artifacts; no full-text verification is inferred unless explicitly present.",
+            }
+        )
+    return claims
+
+
+def _read_l2_5_claim_entries(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    entries: list[dict[str, str]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = re.match(r"\s*-\s*(C\d+)\s*:\s*(.*?)\s*(?:\[source_id:\s*(S\d+)\])?\s*$", line)
+        if not match:
+            continue
+        entries.append(
+            {
+                "claim_id": match.group(1),
+                "claim_text": _compact_single_line(match.group(2), limit=420),
+                "source_id": match.group(3) or "",
+            }
+        )
+    return entries
+
+
+def _source_anchor_from_rows(source_row: dict[str, str], evidence_row: dict[str, str]) -> dict[str, str]:
+    source_id = str(evidence_row.get("source_id") or source_row.get("source_id") or "").strip()
+    limitation = str(evidence_row.get("strength_or_limit") or source_row.get("limitation_or_note") or "").strip()
+    support_type = _claim_support_type(str(evidence_row.get("support_type") or ""), limitation)
+    return {
+        "source_id": source_id,
+        "title": _compact_single_line(str(source_row.get("title_or_source_name") or source_id), limit=180),
+        "url_or_stable_locator": _compact_single_line(str(source_row.get("url_or_path_or_domain") or ""), limit=220),
+        "source_type": _source_type_from_row(source_row),
+        "support_type": support_type,
+        "evidence_excerpt": _compact_single_line(str(evidence_row.get("evidence_text") or source_row.get("relevance_to_question") or ""), limit=260),
+        "limitation": _compact_single_line(limitation or "source support has not been independently verified at L5", limit=220),
+    }
+
+
+def _source_type_from_row(row: dict[str, str]) -> str:
+    origin = str(row.get("origin_stage") or "").strip()
+    locator = str(row.get("url_or_path_or_domain") or "").strip()
+    if origin == "L2_ddgs_supplement":
+        return "search_result_snippet"
+    if origin == "L1_gemini_search":
+        return "source_candidate"
+    if locator.startswith("http"):
+        return "web_source"
+    return "artifact_or_source_candidate"
+
+
+def _claim_support_type(raw_support_type: str, limitation: str) -> str:
+    value = f"{raw_support_type} {limitation}".lower()
+    if "full_text_verified" in value or "full text verified" in value:
+        return "full_text_verified"
+    if "fresh_search_snippet" in value or "snippet" in value or "search result" in value:
+        return "requires_full_text_verification"
+    if "summary" in value or "candidate" in value:
+        return "secondary_summary"
+    return "requires_full_text_verification" if "verification" in value else "secondary_summary"
+
+
+def _epistemic_tier_for_claim(claim_text: str, *, profiles: list[str]) -> str:
+    value = claim_text or ""
+    lowered = value.lower()
+    future_terms = ("future", "foresight", "10-year", "10 year", "ai era", "未来", "长期", "前瞻", "will ", "could ", "may ")
+    risk_terms = ("contradicted", "unsupported", "risk", "风险", "不支持", "反证")
+    if any(term in lowered or term in value for term in risk_terms):
+        return "unsupported_or_risk"
+    if PROFILE_FORESIGHT_MECHANISM in profiles and any(term in lowered or term in value for term in future_terms):
+        return "foresight_hypothesis"
+    if any(term in lowered for term in ("mechanism", "may", "could", "likely", "plausible", "inference")) or any(
+        term in value for term in ("机制", "可能", "合理推断")
+    ):
+        return "reasonable_inference"
+    return "evidence_supported"
+
+
+def _evidence_strength_for_anchors(anchors: list[dict[str, str]], *, tier: str) -> str:
+    if not anchors:
+        return "insufficient"
+    support_types = {str(anchor.get("support_type") or "") for anchor in anchors}
+    if tier == "foresight_hypothesis":
+        return "low"
+    if "full_text_verified" in support_types and len(anchors) >= 2:
+        return "high"
+    if "full_text_verified" in support_types:
+        return "medium"
+    if support_types <= {"requires_full_text_verification", "snippet_only"}:
+        return "low"
+    if "secondary_summary" in support_types:
+        return "low"
+    return "insufficient"
+
+
+def _decision_use_for_claim(tier: str, evidence_strength: str, anchors: list[dict[str, str]]) -> str:
+    support_types = {str(anchor.get("support_type") or "") for anchor in anchors}
+    if tier == "unsupported_or_risk" or evidence_strength == "insufficient":
+        return "do_not_use_as_fact"
+    if tier == "foresight_hypothesis" or "requires_full_text_verification" in support_types or evidence_strength == "low":
+        return "use_with_caution"
+    return "can_support_decision"
+
+
+def _claim_applicability_boundary(claim_text: str, anchors: list[dict[str, str]]) -> str:
+    if not anchors:
+        return "No source anchor was retained; use only as an unverified synthesis candidate."
+    if any(anchor.get("support_type") == "requires_full_text_verification" for anchor in anchors):
+        return "Applies only as preliminary evidence until source passages are full-text verified and population/context fit is checked."
+    return "Applies within the source population, measurement context, and intervention/domain described by the retained anchors."
+
+
+def _claim_counter_signal(claim_text: str, audit_text: str) -> str:
+    lowered = (audit_text or "").lower()
+    if "ai interfaces become more abstract-textual" in lowered:
+        return "Counter-signal: future AI interfaces may become more abstract-textual rather than spatial-visual."
+    if "overstated evidence strength" in lowered:
+        return "Counter-signal: source verification or stronger counterevidence may downgrade this claim."
+    return "Counter-signal: contradictory evidence, failed transfer to the target context, or missing source verification should downgrade this claim."
+
+
+def _claim_evidence_gap(anchors: list[dict[str, str]], gaps_text: str) -> str:
+    if not anchors:
+        return "missing_source_anchor"
+    if any(anchor.get("support_type") == "requires_full_text_verification" for anchor in anchors):
+        return "requires_full_text_verification"
+    match = re.search(r"G\d+:\s*([^\n]+)", gaps_text or "")
+    return _compact_single_line(match.group(1), limit=220) if match else "no explicit gap captured"
+
+
+def _research_claim_contract_validation(
+    *,
+    claim_table: list[dict[str, Any]],
+    l4_defect_report: dict[str, list[str]],
+    l2_5_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    blocking: set[str] = set()
+    warnings: set[str] = set()
+    verification_required: set[str] = set()
+    evidence_gaps: set[str] = set()
+    caveats: set[str] = set()
+    if not claim_table:
+        blocking.add("missing_claim_table")
+    for idx, claim in enumerate(claim_table, start=1):
+        claim_id = str(claim.get("claim_id") or "").strip()
+        tier = str(claim.get("epistemic_tier") or "").strip()
+        strength = str(claim.get("evidence_strength") or "").strip()
+        anchors = claim.get("source_anchors") if isinstance(claim.get("source_anchors"), list) else []
+        text = str(claim.get("claim_text") or "")
+        if not claim_id:
+            blocking.add(f"claim_{idx}_missing_claim_id")
+        if not _claim_text_has_substance(text):
+            blocking.add(f"{claim_id or idx}:thin_or_template_claim_text")
+        if tier not in {"evidence_supported", "reasonable_inference", "foresight_hypothesis", "unsupported_or_risk"}:
+            blocking.add(f"{claim_id or idx}:invalid_epistemic_tier")
+        if strength not in {"high", "medium", "low", "insufficient"}:
+            blocking.add(f"{claim_id or idx}:invalid_evidence_strength")
+        if not anchors:
+            blocking.add(f"{claim_id or idx}:missing_source_anchors")
+        support_types = {str(anchor.get("support_type") or "") for anchor in anchors}
+        weak_anchor_only = True
+        for anchor_index, anchor in enumerate(anchors, start=1):
+            anchor_errors = _source_anchor_contract_errors(anchor)
+            for error in anchor_errors:
+                blocking.add(f"{claim_id or idx}:{error}")
+            support_type = str(anchor.get("support_type") or "")
+            if support_type not in {"requires_full_text_verification", "snippet_only", "search_result_snippet"}:
+                weak_anchor_only = False
+            if _anchor_is_snippet_material(anchor) and support_type == "full_text_verified":
+                blocking.add(f"{claim_id or idx}:snippet_source_marked_full_text_verified")
+            if _anchor_is_snippet_material(anchor):
+                verification_required.add(f"{claim_id}:requires_full_text_verification")
+        if anchors and weak_anchor_only and strength in {"high", "medium"}:
+            blocking.add(f"{claim_id or idx}:weak_source_anchor_with_overstated_strength")
+        if anchors and weak_anchor_only and str(claim.get("decision_use") or "") not in {"use_with_caution", "do_not_use_as_fact"}:
+            blocking.add(f"{claim_id or idx}:weak_source_anchor_with_overstated_decision_use")
+        if tier == "evidence_supported" and not anchors:
+            blocking.add(f"{claim_id or idx}:evidence_supported_without_source_anchor")
+        if tier == "evidence_supported" and support_types and support_types <= {"requires_full_text_verification", "snippet_only"}:
+            verification_required.add(f"{claim_id}:evidence_supported_requires_full_text_verification")
+            caveats.add(f"{claim_id} is only snippet/search-result supported; do not treat as high-confidence fact.")
+        if tier == "evidence_supported" and _claim_text_is_future_facing(text):
+            blocking.add(f"{claim_id or idx}:future_claim_misclassified_as_evidence_supported")
+        if "requires_full_text_verification" in support_types:
+            verification_required.add(f"{claim_id}:requires_full_text_verification")
+        if str(claim.get("evidence_gap") or ""):
+            evidence_gaps.add(str(claim.get("evidence_gap")))
+    has_l4_defects = bool((l4_defect_report.get("critical_defects") or []) or (l4_defect_report.get("noncritical_defects") or []))
+    if has_l4_defects and not (
+        l4_defect_report.get("critical_defects")
+        or l4_defect_report.get("noncritical_defects")
+        or l4_defect_report.get("handoff_caveats")
+    ):
+        blocking.add("l4_defects_not_propagated")
+    if l2_5_analysis.get("insufficient_sources"):
+        warnings.add("l2_5_insufficient_sources")
+        caveats.add("L2.5 reports insufficient source/evidence/claim coverage.")
+    if l2_5_analysis.get("l2_5_stub_detected"):
+        blocking.add("l2_5_stub_detected")
+    return {
+        "valid": not blocking,
+        "blocking_errors": sorted(blocking),
+        "warnings": sorted(warnings),
+        "verification_required": sorted(verification_required),
+        "evidence_gaps": sorted(evidence_gaps),
+        "handoff_caveats": sorted(caveats),
+    }
+
+
+def _claim_text_has_substance(text: str) -> bool:
+    value = _compact_single_line(text, limit=500)
+    lowered = value.lower()
+    if len(value) < 50:
+        return False
+    generic_phrases = (
+        "this claim requires evidence",
+        "evidence-supported material is limited to accepted research",
+        "evidence supported material is limited to accepted research",
+        "claim supported by sources",
+        "requirements satisfied",
+        "decision relevant",
+        "more research is needed",
+        "tbd",
+        "n/a",
+        "not applicable",
+    )
+    if any(phrase in lowered for phrase in generic_phrases):
+        return False
+    category_only = re.sub(r"[\s:/,_-]+", " ", lowered).strip()
+    if category_only in {
+        "evidence supported",
+        "reasonable inference",
+        "foresight hypothesis",
+        "unsupported or risk",
+    }:
+        return False
+    relationship_terms = (
+        "improves",
+        "reduces",
+        "increases",
+        "supports",
+        "provides",
+        "suggests",
+        "predicts",
+        "indicates",
+        "affects",
+        "changes",
+        "change",
+        "depends",
+        "requires",
+        "prevents",
+        "raises",
+        "lowers",
+        "maps",
+        "explains",
+        "because",
+        "through",
+        "via",
+        "机制",
+        "影响",
+        "支持",
+        "降低",
+        "提高",
+        "导致",
+        "依赖",
+        "通过",
+        "说明",
+    )
+    has_relation = any(term in lowered or term in value for term in relationship_terms)
+    meaningful_tokens = re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}|[\u4e00-\u9fff]{2,}", value)
+    return has_relation and len(set(token.lower() for token in meaningful_tokens)) >= 5
+
+
+def _source_anchor_contract_errors(anchor: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    source_id = str(anchor.get("source_id") or "").strip()
+    title = str(anchor.get("title") or anchor.get("title_or_source_name") or "").strip()
+    locator = str(
+        anchor.get("url_or_stable_locator")
+        or anchor.get("url")
+        or anchor.get("stable_locator")
+        or anchor.get("url_or_path_or_domain")
+        or ""
+    ).strip()
+    source_type = str(anchor.get("source_type") or "").strip()
+    support_type = str(anchor.get("support_type") or "").strip()
+    allowed_support_types = {
+        "full_text_verified",
+        "snippet_only",
+        "secondary_summary",
+        "requires_full_text_verification",
+        "search_result_snippet",
+    }
+    if not source_id:
+        errors.append("source_anchor_missing_source_id")
+    if not title and not locator:
+        errors.append("source_anchor_missing_locator_or_title")
+    if not source_type:
+        errors.append("source_anchor_missing_source_type")
+    if not support_type:
+        errors.append("source_anchor_missing_support_type")
+    elif support_type not in allowed_support_types:
+        errors.append("source_anchor_invalid_support_type")
+    return errors
+
+
+def _anchor_is_snippet_material(anchor: dict[str, Any]) -> bool:
+    combined = " ".join(
+        str(anchor.get(key) or "")
+        for key in (
+            "source_type",
+            "support_type",
+            "notes",
+            "limitation",
+            "strength_or_limit",
+            "origin_stage",
+        )
+    ).lower()
+    return any(
+        marker in combined
+        for marker in (
+            "fresh_search_snippet",
+            "search_result_snippet",
+            "snippet_only",
+            "snippet",
+            "search result",
+            "l2.5 fresh search",
+        )
+    )
+
+
+def _claim_text_is_future_facing(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(
+        term in lowered or term in (text or "")
+        for term in ("future", "foresight", "10-year", "10 year", "ai era", "未来", "长期", "前瞻")
+    )
+
+
 def _is_l2_5_handoff_only_text(text: str) -> bool:
     lowered = (text or "").lower()
     if not text.strip():
@@ -5449,24 +5996,7 @@ def _has_l2_5_domain_content(filename: str, text: str) -> bool:
 
 
 def l4_critical_defects_from_audit(audit_text: str) -> list[str]:
-    lowered = (audit_text or "").lower()
-    defects: list[str] = []
-    l2_5_missing = (
-        "l2.5" in lowered
-        and (
-            "extraction missing" in lowered
-            or "stubbed out" in lowered
-            or "handoff_protocol" in lowered
-            or "unsupported by structured evidence" in lowered
-            or "no actual claims" in lowered
-            or "no actual structured data extraction" in lowered
-        )
-    )
-    if l2_5_missing:
-        defects.append("l2_5_extraction_missing")
-    if "critical" in lowered and "supplementary_search_cross_topic_contamination" in lowered:
-        defects.append("supplementary_search_cross_topic_contamination")
-    return sorted(set(defects))
+    return list(_l4_defect_report_from_audit(audit_text).get("critical_defects") or [])
 
 
 def detect_supplementary_search_topic_contamination(query: str, text: str) -> dict[str, Any]:
@@ -5522,6 +6052,7 @@ def _research_profile_acceptance_requirements(profiles: list[str]) -> list[str]:
 
 RESEARCH_PACKET_FIXED_HEADINGS = (
     "evidence_strength",
+    "claim_table",
     "controversy",
     "evidence_gap",
     "evidence_supported",
@@ -5542,6 +6073,10 @@ def _compact_research_evidence_sections(packet: dict[str, Any], *, accepted: boo
     else:
         status = "Accepted compact packet for DECISION handoff; each section is synthesized from L1-L4 materials without raw artifact dumps."
 
+    claim_table = packet.get("claim_table") if isinstance(packet.get("claim_table"), list) else []
+    verification_required = [str(item) for item in (packet.get("verification_required") or [])]
+    handoff_caveats = [str(item) for item in (packet.get("handoff_caveats") or [])]
+    evidence_gaps = [str(item) for item in (packet.get("evidence_gaps") or [])]
     foresight_note = (
         "For foresight_mechanism tasks, future-facing claims below are bounded hypotheses, not settled medical facts."
         if PROFILE_FORESIGHT_MECHANISM in profiles
@@ -5550,15 +6085,19 @@ def _compact_research_evidence_sections(packet: dict[str, Any], *, accepted: boo
     sections = {
         "evidence_strength": (
             f"{status} Stronger support comes from convergent L1-L4 material and L4 audit-accepted claims. "
-            f"Use as high/medium/low evidence, not as raw citation text. Compact basis: {_section_basis(l1_l2 or all_material)}"
+            "Use claim-level evidence_strength values below; snippet-only or unverified source support stays low/conditional. "
+            f"Verification required: {_list_inline(verification_required) or 'none'}. Compact basis: {_section_basis(l1_l2 or all_material)}"
+        ),
+        "claim_table": (
+            _claim_table_markdown(claim_table)
         ),
         "controversy": (
             "Controversy remains where L1-L4 materials depend on context, population differences, tool quality, or disputed translation "
-            f"from current evidence to the user scenario. Compact basis: {_section_basis(l4 or all_material)}"
+            f"from current evidence to the user scenario. Handoff caveats: {_list_inline(handoff_caveats) or 'none'}. Compact basis: {_section_basis(l4 or all_material)}"
         ),
         "evidence_gap": (
             "Direct gaps include missing long-horizon, individual-level, and future-AI-environment evidence; DECISION must preserve these "
-            f"as uncertainty boundaries. Compact basis: {_section_basis(l4 or all_material)}"
+            f"as uncertainty boundaries. Structured gaps: {_list_inline(evidence_gaps) or 'none captured'}. Compact basis: {_section_basis(l4 or all_material)}"
         ),
         "evidence_supported": (
             "Evidence-supported material is limited to claims grounded in current research artifacts, audit-accepted synthesis, and stable "
@@ -5577,6 +6116,44 @@ def _compact_research_evidence_sections(packet: dict[str, Any], *, accepted: boo
     for heading in RESEARCH_PACKET_FIXED_HEADINGS:
         lines.extend([f"## {heading}", sections[heading], ""])
     return lines[:-1]
+
+
+def _claim_table_markdown(claim_table: list[dict[str, Any]]) -> str:
+    if not claim_table:
+        return "No claim table was retained; this packet is not decision-ready until claim_id/source anchor/evidence strength rows are generated."
+    lines: list[str] = []
+    for claim in claim_table[:12]:
+        anchors = claim.get("source_anchors") if isinstance(claim.get("source_anchors"), list) else []
+        anchor_bits = []
+        for anchor in anchors[:4]:
+            anchor_bits.append(
+                "{source_id} ({support_type}; {source_type}; {locator})".format(
+                    source_id=str(anchor.get("source_id") or "missing_source_id"),
+                    support_type=str(anchor.get("support_type") or "unknown_support"),
+                    source_type=str(anchor.get("source_type") or "unknown_source_type"),
+                    locator=_compact_single_line(str(anchor.get("url_or_stable_locator") or anchor.get("title") or ""), limit=120),
+                )
+            )
+        lines.extend(
+            [
+                f"- claim_id: {claim.get('claim_id')}",
+                f"  claim_text: {_compact_single_line(str(claim.get('claim_text') or ''), limit=360)}",
+                f"  epistemic_tier: {claim.get('epistemic_tier')}",
+                f"  evidence_strength: {claim.get('evidence_strength')}",
+                "  source_anchors: " + (_list_inline(anchor_bits) or "missing"),
+                f"  applicability_boundary: {_compact_single_line(str(claim.get('applicability_boundary') or ''), limit=260)}",
+                f"  counter_signal_or_failure_condition: {_compact_single_line(str(claim.get('counter_signal_or_failure_condition') or ''), limit=260)}",
+                f"  evidence_gap: {_compact_single_line(str(claim.get('evidence_gap') or ''), limit=220)}",
+                f"  decision_use: {claim.get('decision_use')}",
+                f"  notes: {_compact_single_line(str(claim.get('notes') or ''), limit=220)}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _list_inline(values: list[str] | tuple[str, ...] | set[str]) -> str:
+    cleaned = [_compact_single_line(str(value), limit=180) for value in values if str(value or "").strip()]
+    return "; ".join(cleaned[:8])
 
 
 def _compact_material_excerpt(summaries: dict[str, Any], names: tuple[str, ...], *, limit: int = 360) -> str:
@@ -5639,6 +6216,41 @@ def _research_evidence_packet_quality_error(text: str) -> str:
         body = _markdown_section_body(value, heading)
         if len(body) < 60:
             return f"thin_research_packet_section:{heading}"
+    claim_table_body = _markdown_section_body(value, "claim_table")
+    claim_ids = re.findall(r"\bclaim_id\s*:\s*([A-Za-z0-9_.:-]+)", claim_table_body)
+    if not claim_ids:
+        return "missing_claim_table"
+    if "source_anchors:" not in claim_table_body:
+        return "claim_table_missing_source_anchors"
+    if "evidence_strength:" not in claim_table_body or "epistemic_tier:" not in claim_table_body:
+        return "claim_table_missing_strength_or_tier"
+    ready_value = _packet_scalar_value(value, "evidence_packet_ready_for_decision")
+    audit_summary = _packet_scalar_value(value, "audit_summary")
+    audit_reports_defects = any(
+        marker in audit_summary
+        for marker in (
+            "pass with defects",
+            "pass_with_defects",
+            "defect",
+            "verification_required",
+            "caveat",
+            "requires_full_text_verification",
+        )
+    )
+    if (
+        audit_reports_defects
+        and _packet_scalar_value(value, "verdict") in {"accepted", "clean accepted"}
+        and ready_value == "true"
+        and not _packet_list_field_has_items(value, "critical_defects")
+        and not _packet_list_field_has_items(value, "noncritical_defects")
+        and not _packet_list_field_has_items(value, "verification_required")
+        and not _packet_list_field_has_items(value, "handoff_caveats")
+    ):
+        return "l4_defects_not_propagated"
+    if "requires_full_text_verification" in lowered and ready_value == "true":
+        return "unconditional_ready_with_verification_required"
+    if re.search(r"epistemic_tier:\s*evidence_supported[\s\S]{0,220}(future|foresight|10-year|10 year|未来|长期|前瞻)", claim_table_body, flags=re.IGNORECASE):
+        return "future_claim_misclassified_as_evidence_supported"
     section_text = "\n".join(_markdown_section_body(value, heading).lower() for heading in RESEARCH_PACKET_FIXED_HEADINGS)
     if not section_text.strip():
         return "acceptance_summary_only"
@@ -5669,6 +6281,28 @@ def _research_evidence_packet_quality_error(text: str) -> str:
     if any(term in section_text for term in acceptance_only_terms) and not any(term in section_text for term in substantive_terms):
         return "acceptance_summary_only"
     return ""
+
+
+def _packet_scalar_value(text: str, key: str) -> str:
+    prefix = key.lower() + ":"
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith(prefix):
+            return line.split(":", 1)[1].strip().lower()
+    return ""
+
+
+def _packet_list_field_has_items(text: str, key: str) -> bool:
+    raw_value = _packet_scalar_value(text, key)
+    if not raw_value:
+        return False
+    normalized = raw_value.strip()
+    if normalized in {"[]", "none", "null", "n/a", "not applicable"}:
+        return False
+    if normalized.startswith("[") and normalized.endswith("]"):
+        inner = normalized[1:-1].strip()
+        return bool(inner)
+    return True
 
 
 def _markdown_section_body(text: str, heading: str) -> str:
@@ -5848,10 +6482,11 @@ def _convergence_foresight_template_lines(profiles: list[str]) -> list[str]:
 
 def _l5_acceptance_text_is_accepted(text: str) -> bool:
     lowered = (text or "").lower()
+    ready_value = _packet_scalar_value(text, "evidence_packet_ready_for_decision")
     return (
         "verdict: accepted" in lowered
         and "accepted: true" in lowered
-        and "evidence_packet_ready_for_decision: true" in lowered
+        and ready_value in {"true", "conditional"}
     )
 
 

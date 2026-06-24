@@ -508,7 +508,15 @@ def _validate_l5_acceptance_artifact(errors: list[str], artifact: Path) -> None:
         errors.append("L5_deepseek_acceptance:verdict_not_accepted")
     if "accepted: true" not in lowered:
         errors.append("L5_deepseek_acceptance:accepted_not_true")
-    if "evidence_packet_ready_for_decision: true" not in lowered:
+    ready_value = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("evidence_packet_ready_for_decision:"):
+            ready_value = line.split(":", 1)[1].strip().lower()
+            break
+    ready_true = ready_value == "true"
+    ready_conditional = ready_value == "conditional"
+    if not (ready_true or ready_conditional):
         errors.append("L5_deepseek_acceptance:evidence_packet_not_ready")
     for stage_name in required_stages:
         if stage_name not in text:
@@ -520,6 +528,7 @@ def _validate_l5_acceptance_artifact(errors: list[str], artifact: Path) -> None:
             errors.append(f"L5_deepseek_acceptance:raw_metadata:{token}")
     required_sections = (
         "evidence_strength",
+        "claim_table",
         "controversy",
         "evidence_gap",
         "evidence_supported",
@@ -541,6 +550,15 @@ def _validate_l5_acceptance_artifact(errors: list[str], artifact: Path) -> None:
         for term in ("evidence", "证据", "inference", "推断", "hypothesis", "假设", "gap", "缺口", "controvers", "争议")
     ):
         errors.append("L5_deepseek_acceptance:acceptance_summary_only")
+    claim_table_body = _markdown_section_body(text, "claim_table")
+    if "claim_id:" not in claim_table_body:
+        errors.append("L5_deepseek_acceptance:missing_claim_table")
+    if "source_anchors:" not in claim_table_body:
+        errors.append("L5_deepseek_acceptance:claim_table_missing_source_anchors")
+    if "requires_full_text_verification" in lowered and ready_true:
+        errors.append("L5_deepseek_acceptance:unconditional_ready_with_verification_required")
+    if ready_conditional and "handoff_caveats:" not in lowered:
+        errors.append("L5_deepseek_acceptance:conditional_ready_missing_handoff_caveats")
 
 
 def _markdown_section_body(text: str, heading: str) -> str:
