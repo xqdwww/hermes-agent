@@ -101,6 +101,66 @@ ADHD 儿童最新的研究进展和治疗方案；
 """
 
 
+def _rich_l1_source_candidates() -> dict:
+    return {
+        "source_candidates": [
+            {
+                "candidate": "https://current-evidence.example.test/review",
+                "evidence_type": "review",
+                "coverage_axis": "authoritative_guideline_or_consensus",
+                "why_relevant": "Summarizes stable current evidence and limitations for bounded decision use.",
+            },
+            {
+                "candidate": "https://mechanism.example.test/study",
+                "evidence_type": "mechanism study",
+                "coverage_axis": "mechanism_or_theory",
+                "why_relevant": "Explains plausible mechanisms and transfer boundaries.",
+            },
+            {
+                "candidate": "https://practice.example.test/report",
+                "evidence_type": "practice report",
+                "coverage_axis": "intervention_or_practice",
+                "why_relevant": "Connects evidence to practical decision constraints.",
+            },
+            {
+                "candidate": "https://counterevidence.example.test/signals",
+                "evidence_type": "counterevidence",
+                "coverage_axis": "controversy_or_counterevidence",
+                "why_relevant": "Provides counter-signals and failure conditions.",
+            },
+        ]
+    }
+
+
+def _rich_ddgs_hits(query: str = "decision evidence") -> list[dict[str, str]]:
+    return [
+        {
+            "query": query,
+            "title": "Current evidence review",
+            "url": "https://current-evidence.example.test/review",
+            "snippet": "Current evidence supports bounded claims while preserving caveats and measurement limits.",
+        },
+        {
+            "query": query,
+            "title": "Mechanism and transfer boundaries",
+            "url": "https://mechanism.example.test/study",
+            "snippet": "Mechanism transfer depends on context, counter-signals, and applicability boundaries.",
+        },
+        {
+            "query": query,
+            "title": "Practice evidence for decision constraints",
+            "url": "https://practice.example.test/report",
+            "snippet": "Practice evidence can support conditional decisions when tied to observable outcomes.",
+        },
+        {
+            "query": query,
+            "title": "Counterevidence and failure signals",
+            "url": "https://counterevidence.example.test/signals",
+            "snippet": "Counterevidence identifies failure conditions and uncertainty gaps for later stages.",
+        },
+    ]
+
+
 def _complete_research_evidence_packet_text() -> str:
     return "\n".join(
         [
@@ -148,6 +208,23 @@ def _complete_research_evidence_packet_text() -> str:
             "Foresight hypothesis: future-facing claims are conditional hypotheses, not settled facts, and require counter-signals and failure conditions.",
             "",
             "scope: acceptance gate plus compact evidence packet; no raw artifact dump and no user-facing advice.",
+        ]
+    )
+
+
+def _valid_evidence_judge_fixture_text() -> str:
+    return "\n".join(
+        [
+            "evidence_quality_map",
+            "Current-run claims have medium or low strength and preserve uncertainty boundaries.",
+            "strength_by_claim",
+            "- claim / strength: medium / evidence_basis: current packet and role artifacts / uncertainty_or_gap: source verification remains bounded.",
+            "applicability_to_user_context",
+            "Applicability depends on context fit and should remain conditional.",
+            "uncertainty_and_limits",
+            "Limits include transfer uncertainty, measurement differences, and incomplete source verification.",
+            "evidence_gaps_for_later_stages",
+            "Later stages should preserve caveats and counter-signals.",
         ]
     )
 
@@ -3052,7 +3129,7 @@ def test_l5_rejected_does_not_complete(tmp_path: Path):
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
             return "verdict: REJECTED\naccepted: false\ninsufficient evidence"
 
@@ -4608,6 +4685,227 @@ def test_business_strategy_vague_pause_condition_bad():
     assert "missing_stop_pause_condition" in errors
 
 
+def _business_strategy_final_packet() -> dict:
+    import tools.task_engine_executors as executors
+
+    return {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": (
+            "一个早期 B2B SaaS 团队有 6 个月 runway，产品是面向专业服务公司的 workflow automation。"
+            "团队在纠结 PLG、自助试用、founder-led sales、渠道合作和内容获客。请判断：\n"
+            "1. 下一阶段最应该押注的 GTM 顺序；\n"
+            "2. 哪些增长动作是虚荣指标；\n"
+            "3. 如何判断 PMF 信号是真的；\n"
+            "4. 什么时候应该暂停产品功能扩张；\n"
+            "5. 给出 90 天执行计划，但明确哪些只是合理推断。"
+        ),
+        "output_quality_profile": [executors.PROFILE_BUSINESS_STRATEGY_PLAN],
+        "excerpts": {
+            "convergence_report": "\n".join(
+                [
+                    "convergence_decision_framework",
+                    "1. GTM Sequence: Priority 1 founder-led sales; Priority 2 targeted referrals; Priority 3 conditional self-serve.",
+                    "2. Vanity Metrics: trial signups, website traffic, partner meetings without qualified opportunities.",
+                    "3. Market Fit Signals: paid conversion, repeated workflow usage, retention, expansion, referral.",
+                    "4. Pause Conditions: pause feature expansion when requests are scattered or paid usage is not repeating.",
+                    "5. 90-Day Execution Plan: Weeks 1-4 sell, Weeks 5-8 narrow delivery, Weeks 9-12 reassess.",
+                ]
+            ),
+            "external_calibration": "\n".join(
+                [
+                    "Recommended calibrated final stance:",
+                    "1. GTM 顺序：Founder-led sales first；targeted referrals second as reasonable inference；sales-enablement content only as support；PLG/self-serve only after activation path and repeatable workflow wedge are validated；channel partnerships defer unless existing warm channel is unusually strong.",
+                    "2. 虚荣指标：website traffic、content impressions、trial signups、free users、demo bookings without ICP fit、partner logos、MOU、webinar attendance、pilot count without paid conversion、feature request volume。",
+                    "3. 真 PMF 信号：narrow ICP repeats the same pain; paid conversion; repeated workflow usage; retention/expansion; shorter sales cycles; strong qualitative pull; customer willingness to refer; implementation does not require bespoke work each time.",
+                    "4. 暂停功能扩张：当 feature requests 分散、核心 workflow usage 未稳定、付费客户不足、销售依赖承诺新功能、runway 少于能完成一个完整 GTM learning loop 的时间时，应暂停扩张，转向 ICP、onboarding、activation、case study、sales script 和 retention 修复。",
+                    "5. 90 天计划：Weeks 1-2 ICP narrowing; Weeks 3-4 founder sales; Weeks 5-8 win/loss review and referral asks; Weeks 9-12 test self-serve only if activation event is clear.",
+                ]
+            ),
+        },
+    }
+
+
+def test_business_strategy_final_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 1. 下一阶段最应该押注的 GTM 顺序" in text
+    assert "## 2. 哪些增长动作是虚荣指标" in text
+    assert "## 3. 如何判断 PMF 信号是真的" in text
+    assert "## 4. 什么时候应该暂停产品功能扩张" in text
+    assert "## 5. 给出 90 天执行计划，但明确哪些只是合理推断" in text
+    assert "trial signups" in text or "注册" in text
+    assert "paid conversion" in text or "付费" in text
+    assert "暂停产品功能扩张" in text
+    assert "[合理推断]" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_business_strategy_final_missing_sequence_bad():
+    import tools.task_engine_executors as executors
+
+    text = "\n".join(
+        [
+            "# 研究决策最终报告",
+            "## 1. 下一阶段最应该押注的增长方向",
+            "应该综合考虑多个渠道，但这里没有给出第一、第二、第三的实际先后顺序。",
+            "## 2. 哪些增长动作是虚荣指标",
+            "虚荣指标：注册、浏览、试用和会议如果没有付费或留存，就是虚假信号。",
+            "## 3. 如何判断真实产品市场匹配信号",
+            "真实信号：付费、转化、留存、重复使用和推荐。",
+            "## 4. 什么时候应该暂停产品功能扩张",
+            "如果新功能不能提高成交、激活、留存或扩展，应暂停功能扩张，转向销售和复盘。",
+            "## 5. 90 天执行计划",
+            "90 天计划：0-30 天验证，31-60 天交付，61-90 天复盘。",
+            "## 证据与推断边界",
+            "[证据支持] 有边界。[合理推断] 顺序需验证。[前瞻假设] 低触达增长后置。",
+            "监控指标：付费、留存、销售周期、推荐，并每月重新评估。",
+        ]
+    )
+
+    errors = executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_BUSINESS_STRATEGY_PLAN],
+        stage_name="final_controller_report",
+    )
+
+    assert "missing_business_strategy_sequence" in errors
+
+
+def test_business_strategy_final_template_headings_bad():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    bad = "\n".join(
+        [
+            "# 研究决策最终报告",
+            "## 1. 下一阶段最应该押注的 GTM 顺序",
+            "围绕下一阶段最应该押注的、GTM、顺序、B2B、PLG、PMF，应按证据强度、执行约束和反证信号分层回答。触发条件：这些关键对象和约束在当前材料中成立。中间机制：先用证据边界限定事实底座。",
+            "## 2. 哪些增长动作是虚荣指标",
+            "围绕哪些增长动作是虚荣指标，应按证据强度回答。当前材料中成立。",
+            "## 3. 如何判断 PMF 信号是真的",
+            "围绕如何判断、PMF、信号是真的，应按证据强度回答。当前材料中成立。",
+            "## 4. 什么时候应该暂停产品功能扩张",
+            "围绕什么时候应该暂停产品功能扩张，应按证据强度回答。当前材料中成立。",
+            "## 5. 给出 90 天执行计划",
+            "围绕 90 天执行计划，应按证据强度回答。当前材料中成立。",
+        ]
+    )
+    profile_errors = executors._quality_profile_errors(
+        bad,
+        [executors.PROFILE_BUSINESS_STRATEGY_PLAN],
+        stage_name="final_controller_report",
+    )
+    assert "missing_business_strategy_sequence" in profile_errors
+
+    try:
+        executors._assert_final_controller_packet_quality(packet, bad)
+    except RuntimeError as exc:
+        assert "user_facing_quality" in str(exc) or "missing_business_strategy_sequence" in str(exc)
+    else:
+        raise AssertionError("template headings without substantive business answer should fail")
+
+
+def test_business_strategy_final_missing_vanity_or_pmf_bad():
+    import tools.task_engine_executors as executors
+
+    text = "\n".join(
+        [
+            "# 研究决策最终报告",
+            "## 1. 下一阶段最应该押注的增长顺序",
+            "1. 第一优先级：先做直接销售验证，因为它能最快暴露真实付费意愿、拒绝原因和交付边界。\n2. 第二优先级：再做引荐和销售辅助材料，因为它们只能放大已验证学习，不能替代学习。\n3. 第三优先级：最后评估自助试用，因为它需要清楚激活路径和可重复交付。",
+            "## 2. 哪些增长动作是虚荣指标",
+            "应该避免虚荣指标，但没有列出具体例子。",
+            "## 3. 如何判断真实产品市场匹配信号",
+            "真实信号需要进一步观察。",
+            "## 4. 什么时候应该暂停产品功能扩张",
+            "如果新功能不能提高成交、激活、留存或扩展，应暂停功能扩张，转向销售和复盘。",
+            "## 5. 90 天执行计划",
+            "90 天计划：0-30 天验证，31-60 天交付，61-90 天复盘。",
+            "## 证据与推断边界",
+            "[证据支持] 有边界。[合理推断] 顺序需验证。[前瞻假设] 后续增长后置。",
+            "监控指标：付费、留存、销售周期、推荐，并每月重新评估。",
+        ]
+    )
+
+    errors = executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_BUSINESS_STRATEGY_PLAN],
+        stage_name="final_controller_report",
+    )
+
+    assert "missing_vanity_metric_warning" in errors
+    assert "missing_market_fit_signals" in errors
+
+
+def test_business_strategy_final_missing_90day_plan_bad():
+    import tools.task_engine_executors as executors
+
+    text = "\n".join(
+        [
+            "# 研究决策最终报告",
+            "## 1. 下一阶段最应该押注的增长顺序",
+            "1. 第一优先级：先做直接销售验证。\n2. 第二优先级：再做引荐。\n3. 第三优先级：最后评估自助试用。",
+            "## 2. 哪些增长动作是虚荣指标",
+            "虚荣指标：注册、流量、试用、会议如果没有付费、留存或合格机会，就是虚假信号。",
+            "## 3. 如何判断真实产品市场匹配信号",
+            "真实信号：付费、转化、留存、重复使用和推荐。",
+            "## 4. 什么时候应该暂停产品功能扩张",
+            "如果新功能不能提高成交、激活、留存或扩展，应暂停功能扩张，转向销售和复盘。",
+            "## 5. 执行计划",
+            "持续验证客户，持续复盘策略，保持灵活。",
+            "## 证据与推断边界",
+            "[证据支持] 有边界。[合理推断] 顺序需验证。[前瞻假设] 后续增长后置。",
+            "监控指标：付费、留存、销售周期、推荐，并每月重新评估。",
+        ]
+    )
+
+    errors = executors._quality_profile_errors(
+        text,
+        [executors.PROFILE_BUSINESS_STRATEGY_PLAN],
+        stage_name="final_controller_report",
+    )
+
+    assert "missing_90_day_or_phased_plan" in errors
+
+
+def test_non_business_decision_not_forced_into_gtm_good():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": "请判断一个本地数据平台是否应该迁移云供应商，并说明风险边界。",
+        "output_quality_profile": [executors.PROFILE_GENERIC_DECISION_CONVERGENCE],
+        "excerpts": {},
+    }
+    text = "\n".join(
+        [
+            "# 研究决策最终报告",
+            "## 核心结论",
+            "建议先做可逆试点，不做一次性全量迁移。",
+            "## 决策路径",
+            "先验证安全、成本、性能和回滚路径，再决定扩大迁移范围。",
+            "## 证据分层",
+            "1. [证据支持] 云迁移需要以成本、性能和安全验证为前提。触发条件：有真实压测。中间机制：试点降低不可逆风险。失效条件 / 反证信号：账单或延迟变差。确定性：中。决策含义：先试点。",
+            "2. [合理推断] 可把非关键工作负载先迁移。触发条件：有回滚路径。中间机制：低风险验证平台能力。失效条件 / 反证信号：团队运维负担上升。确定性：中。决策含义：分阶段推进。",
+            "3. [前瞻假设] 如果未来规模上升，新云可能更有弹性。触发条件：负载增长。中间机制：弹性资源降低峰值成本。失效条件 / 反证信号：长期账单不降反升。确定性：低。决策含义：设置监控。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：团队能力和工作负载不同会改变结论。证据缺口：缺少真实压测和账单。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_business_strategy_final_internal_language_still_blocked():
+    packet = _business_strategy_final_packet()
+    bad = "# 最终答案\n\n## 1. 顺序\n根据 convergence_report 和 external_calibration，本 pipeline artifact 已吸收 calibration。"
+
+    _assert_final_quality_rejects(packet, bad, "internal_language")
+
+
 def test_cadence_plan_still_requires_cycle_frequency_bad():
     import tools.task_engine_executors as executors
 
@@ -4647,6 +4945,8 @@ def test_no_case04_hardcode_in_production():
     source = "\n".join([
         inspect.getsource(executors._task_engine_profiles_from_query),
         inspect.getsource(executors._business_stop_pause_condition_present),
+        inspect.getsource(executors._research_decision_business_strategy_final_report),
+        inspect.getsource(executors._business_strategy_final_profile_errors),
         inspect.getsource(executors._quality_profile_errors),
         inspect.getsource(executors._convergence_profile_instruction_lines),
     ])
@@ -5585,7 +5885,7 @@ def test_supplementary_search_artifact_missing_blocks_validation(tmp_path: Path)
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_controller_acceptance(self, stage, packet):
             self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
@@ -5608,7 +5908,7 @@ def test_structure_mapper_uses_qwen72b_and_stops_before_evidence_judge(tmp_path:
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -5616,7 +5916,7 @@ def test_structure_mapper_uses_qwen72b_and_stops_before_evidence_judge(tmp_path:
             return "user_question_map\nresearch_packet_map\ndecision_dimensions_for_later_stages"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_controller_acceptance(self, stage, packet):
             self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
@@ -5675,7 +5975,7 @@ def test_structure_mapper_output_forbidden_final_or_later_stage_terms_blocked(tm
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -5683,7 +5983,7 @@ def test_structure_mapper_output_forbidden_final_or_later_stage_terms_blocked(tm
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_controller_acceptance(self, stage, packet):
             self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
@@ -5919,7 +6219,7 @@ def test_evidence_judge_uses_nemotron_and_stops_before_premise_auditor(tmp_path:
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -5927,7 +6227,7 @@ def test_evidence_judge_uses_nemotron_and_stops_before_premise_auditor(tmp_path:
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_controller_acceptance(self, stage, packet):
             self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
@@ -5991,7 +6291,7 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -5999,7 +6299,7 @@ def test_evidence_judge_output_forbidden_final_or_later_stage_terms_blocked(tmp_
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_controller_acceptance(self, stage, packet):
             self.last_executor_models[stage.stage_name] = CONTROLLER_ACCEPTANCE
@@ -6597,7 +6897,7 @@ def test_insight_harvester_uses_gemma431b_and_stops_before_convergence_report(tm
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -6605,7 +6905,7 @@ def test_insight_harvester_uses_gemma431b_and_stops_before_convergence_report(tm
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
@@ -6735,7 +7035,7 @@ def test_convergence_report_uses_r1_and_stops_before_external_calibration(tmp_pa
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -6743,7 +7043,7 @@ def test_convergence_report_uses_r1_and_stops_before_external_calibration(tmp_pa
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
@@ -6819,7 +7119,7 @@ def test_convergence_report_blocks_when_unique_divergence_models_less_than_four(
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -6827,7 +7127,7 @@ def test_convergence_report_blocks_when_unique_divergence_models_less_than_four(
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
@@ -6838,7 +7138,7 @@ def test_convergence_report_blocks_when_unique_divergence_models_less_than_four(
                 return "problem_axes"
             if stage.stage_name == "evidence_judge":
                 self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
-                return "evidence_quality_map"
+                return _valid_evidence_judge_fixture_text()
             if stage.stage_name == "premise_auditor":
                 self.last_executor_models[stage.stage_name] = LLAMA70B_ACTUAL_MODEL_DEFAULT
                 return "implicit_premises"
@@ -6870,7 +7170,7 @@ def test_convergence_report_rejects_l3_artifact_reuse(tmp_path: Path):
     class ReusingExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -6878,7 +7178,7 @@ def test_convergence_report_rejects_l3_artifact_reuse(tmp_path: Path):
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_omlx_model(self, stage, model, prompt):
             self.last_executor_models[stage.stage_name] = (
@@ -6891,6 +7191,16 @@ def test_convergence_report_rejects_l3_artifact_reuse(tmp_path: Path):
                     "insight_harvester": GEMMA431B_ACTUAL_MODEL_DEFAULT,
                 }[stage.stage_name]
             )
+            if stage.stage_name == "structure_mapper":
+                return "problem_axes\nactor_map\ndecision_questions\nevidence_slots"
+            if stage.stage_name == "evidence_judge":
+                return _valid_evidence_judge_fixture_text()
+            if stage.stage_name == "premise_auditor":
+                return "implicit_premises\npremise_risks\ncounterexamples"
+            if stage.stage_name == "alternative_generator":
+                return "mutually_exclusive_alternatives\nintervention_intensity_paths\nrisk_assumption_branches"
+            if stage.stage_name == "insight_harvester":
+                return "cross_model_insights\nconflicts_and_tensions\noutliers\ndecision_turning_points"
             return "ok"
 
         def write_artifact(self, stage, content, *, base_dir):
@@ -6916,7 +7226,7 @@ def test_convergence_report_output_forbidden_final_or_tool_chain_terms_blocked(t
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             if stage.stage_name == "L1_gemini_search":
-                return {"source_candidates": [{"title": "fake"}]}
+                return _rich_l1_source_candidates()
             if stage.stage_name == "L4_gemini_audit":
                 self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
                 return "Gemini audit body"
@@ -6924,7 +7234,7 @@ def test_convergence_report_output_forbidden_final_or_tool_chain_terms_blocked(t
             return "user_question_map\nresearch_packet_map"
 
         def run_ddgs(self, stage, queries):
-            return [{"query": queries[0], "title": "fake ddgs", "url": "https://example.test/ddgs"}]
+            return _rich_ddgs_hits(queries[0])
 
         def run_omlx_model(self, stage, model, prompt):
             if stage.stage_name == "L3_r1_synthesis":
@@ -6935,7 +7245,7 @@ def test_convergence_report_output_forbidden_final_or_tool_chain_terms_blocked(t
                 return "problem_axes"
             if stage.stage_name == "evidence_judge":
                 self.last_executor_models[stage.stage_name] = NEMOTRON120B_ACTUAL_MODEL_DEFAULT
-                return "evidence_quality_map"
+                return _valid_evidence_judge_fixture_text()
             if stage.stage_name == "premise_auditor":
                 self.last_executor_models[stage.stage_name] = LLAMA70B_ACTUAL_MODEL_DEFAULT
                 return "implicit_premises"

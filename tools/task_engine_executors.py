@@ -4584,6 +4584,169 @@ def _business_stop_pause_condition_present(text: str) -> bool:
     return False
 
 
+def _business_strategy_final_profile_errors(text: str) -> list[str]:
+    value = text or ""
+    errors: list[str] = []
+    if _business_strategy_template_shell(value):
+        errors.extend(
+            [
+                "missing_business_strategy_sequence",
+                "missing_vanity_metric_warning",
+                "missing_market_fit_signals",
+                "missing_90_day_or_phased_plan",
+            ]
+        )
+        return errors
+    checks = {
+        "missing_business_strategy_sequence": _business_strategy_sequence_present,
+        "missing_vanity_metric_warning": _business_vanity_metrics_present,
+        "missing_market_fit_signals": _business_market_fit_signals_present,
+        "missing_90_day_or_phased_plan": _business_90_day_plan_present,
+    }
+    for name, check in checks.items():
+        if not check(value):
+            errors.append(name)
+    return errors
+
+
+def _business_strategy_template_shell(text: str) -> bool:
+    value = text or ""
+    lowered = value.lower()
+    shell_markers = (
+        "围绕",
+        "应按证据强度",
+        "这些关键对象和约束",
+        "当前材料中成立",
+        "先用证据边界限定事实底座",
+        "低风险、可观察、可复盘",
+    )
+    if sum(1 for marker in shell_markers if marker in value) >= 4:
+        return True
+    if lowered.count("trigger condition") >= 3 and lowered.count("decision implication") >= 3:
+        return True
+    sections = _markdown_numeric_sections(value)
+    if len(sections) >= 3:
+        repetitive = 0
+        for section in sections.values():
+            plain = _plain_body(section)
+            if "围绕" in plain and "应按证据强度" in plain and len(_list_item_bodies(section)) == 0:
+                repetitive += 1
+        if repetitive >= 2:
+            return True
+    return False
+
+
+def _business_strategy_sequence_present(text: str) -> bool:
+    value = text or ""
+    lowered = value.lower()
+    sequence_terms = ("顺序", "优先级", "排序", "先", "后", "sequence", "priority", "prioritized", "order")
+    if not any(term in value or term in lowered for term in sequence_terms):
+        return False
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    sequence_lines = [
+        line
+        for line in lines
+        if any(term in line or term in line.lower() for term in sequence_terms)
+        or re.match(r"^(?:\d{1,2}[.、)]|[-*])\s+", line)
+    ]
+    ordered_markers = sum(1 for line in sequence_lines if re.match(r"^\d{1,2}[.、)]\s+", line) or any(term in line for term in ("第一", "第二", "第三", "先", "再", "最后", "→", "->")))
+    substantive = [line for line in sequence_lines if _looks_substantive(line, min_chars=34)]
+    return ordered_markers >= 2 and len(substantive) >= 2
+
+
+def _business_vanity_metrics_present(text: str) -> bool:
+    value = _business_section_by_terms(text, ("虚荣指标", "虚假信号", "vanity", "false signal")) or (text or "")
+    lowered = value.lower()
+    if not any(term in value or term in lowered for term in ("虚荣指标", "虚假信号", "vanity", "false signal")):
+        return False
+    metric_terms = (
+        "注册",
+        "浏览",
+        "流量",
+        "曝光",
+        "会议",
+        "试用",
+        "免费用户",
+        "合作意向",
+        "下载",
+        "点击",
+        "demo",
+        "signup",
+        "traffic",
+        "trial",
+        "webinar",
+        "impression",
+        "partner",
+        "meeting",
+    )
+    conversion_terms = ("付费", "成交", "留存", "扩展", "推荐", "合格机会", "pipeline", "retention", "paid", "qualified", "conversion")
+    metric_hits = sum(1 for term in metric_terms if term in value or term in lowered)
+    conversion_hits = sum(1 for term in conversion_terms if term in value or term in lowered)
+    return metric_hits >= 2 and conversion_hits >= 1
+
+
+def _business_market_fit_signals_present(text: str) -> bool:
+    value = _business_section_by_terms(text, ("真实产品市场匹配", "真实信号", "市场匹配", "market fit", "real signal")) or (text or "")
+    lowered = value.lower()
+    if not any(term in value or term in lowered for term in ("真实信号", "市场匹配", "产品市场匹配", "market fit", "real signal")):
+        return False
+    signal_terms = (
+        "付费",
+        "转化",
+        "留存",
+        "扩展",
+        "复购",
+        "重复使用",
+        "核心使用",
+        "销售周期",
+        "推荐",
+        "预算",
+        "交付",
+        "paid",
+        "conversion",
+        "retention",
+        "expansion",
+        "repeat",
+        "usage",
+        "referral",
+        "activation",
+    )
+    hits = sum(1 for term in signal_terms if term in value or term in lowered)
+    return hits >= 3
+
+
+def _business_90_day_plan_present(text: str) -> bool:
+    value = _business_section_by_terms(text, ("90 天", "90天", "90-day", "90 day", "执行计划", "阶段计划", "分阶段")) or (text or "")
+    lowered = value.lower()
+    if not any(term in value or term in lowered for term in ("90 天", "90天", "90-day", "90 day", "30/60/90", "阶段计划", "分阶段")):
+        return False
+    phase_patterns = (
+        r"0\s*[-–]\s*30",
+        r"31\s*[-–]\s*60",
+        r"61\s*[-–]\s*90",
+        r"第\s*[一二三123]\s*阶段",
+        r"weeks?\s*\d+",
+        r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s*(?:天|day|days|周|week|weeks)",
+    )
+    phase_hits = sum(1 for pattern in phase_patterns if re.search(pattern, value, re.I))
+    action_terms = ("验证", "销售", "交付", "复盘", "门槛", "目标", "付费", "留存", "validate", "deliver", "review", "milestone")
+    action_hits = sum(1 for term in action_terms if term in value or term in lowered)
+    return phase_hits >= 2 and action_hits >= 3
+
+
+def _business_section_by_terms(text: str, terms: tuple[str, ...]) -> str:
+    value = text or ""
+    matches = list(re.finditer(r"(?m)^##\s+(.+)$", value))
+    lowered_terms = tuple(term.lower() for term in terms)
+    for index, match in enumerate(matches):
+        heading = match.group(1)
+        lowered_heading = heading.lower()
+        if any(term in heading or term in lowered_heading for term in terms) or any(term in lowered_heading for term in lowered_terms):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+            return value[match.start():end].strip()
+    return ""
+
+
 def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) -> list[str]:
     value = text or ""
     lowered = value.lower()
@@ -4670,6 +4833,10 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
                 errors.append(name)
         if not _business_stop_pause_condition_present(value):
             errors.append("missing_stop_pause_condition")
+        if stage_name == "final_controller_report":
+            for error in _business_strategy_final_profile_errors(value):
+                if error not in errors:
+                    errors.append(error)
     if PROFILE_EVIDENCE_GROUNDED in profiles and stage_name == "final_controller_report":
         checks = {
             "missing_evidence_strength": ("证据强度", "evidence_strength", "evidence strength"),
@@ -8718,6 +8885,8 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
             )
         return _generic_decision_final_report(query, packet=packet, include_evidence_boundary=include_evidence_boundary)
     profiles = _normalize_profiles(packet.get("output_quality_profile"))
+    if PROFILE_BUSINESS_STRATEGY_PLAN in profiles:
+        return _research_decision_business_strategy_final_report(query, packet)
     if PROFILE_FORESIGHT_MECHANISM in profiles:
         return _research_decision_foresight_final_report(query, packet)
     return _research_decision_generic_final_report(query, packet)
@@ -8729,6 +8898,175 @@ def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]
 
 def _research_decision_generic_final_report(query: str, packet: dict[str, Any]) -> str:
     return _research_decision_user_facing_report(query, packet, foresight=False)
+
+
+def _research_decision_business_strategy_final_report(query: str, packet: dict[str, Any]) -> str:
+    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
+    convergence_raw = str(excerpts.get("convergence_report") or "")
+    calibration_raw = str(excerpts.get("external_calibration") or "")
+    evidence_raw = str(excerpts.get("L5_deepseek_acceptance") or excerpts.get("research_evidence_packet") or "")
+    source = "\n".join(part for part in (calibration_raw, convergence_raw, evidence_raw) if part)
+    stance_items = _business_numbered_stance_items(source)
+    anchors = [terms[0] for _name, terms in _case_anchor_groups_from_query(query) if terms][:10]
+    heading_1 = _business_question_heading(query, 1, "下一阶段最应该押注的增长顺序")
+    heading_2 = _business_question_heading(query, 2, "哪些增长动作是虚荣指标")
+    heading_3 = _business_question_heading(query, 3, "如何判断真实需求和市场匹配信号")
+    heading_4 = _business_question_heading(query, 4, "什么时候应该暂停产品功能扩张")
+    heading_5 = _business_question_heading(query, 5, "90 天执行计划")
+    sequence = _business_item_or_fallback(
+        stance_items,
+        1,
+        "先做高接触客户验证和销售学习，再收敛可复制交付与可信推荐；只有在激活路径和可重复交付成立后，才扩大低触达自助、内容或渠道动作。",
+    )
+    vanity = _business_item_or_fallback(
+        stance_items,
+        2,
+        "虚荣指标是没有转化为合格机会、付费、留存、扩展或推荐的表层数字，例如注册、浏览、会议、试用、合作意向、曝光和功能请求数量。",
+    )
+    market_fit = _business_item_or_fallback(
+        stance_items,
+        3,
+        "真实产品市场匹配信号包括付费转化、重复使用、留存或扩展、销售周期缩短、客户主动推荐、核心痛点反复出现，以及交付不再依赖大量一次性定制。",
+    )
+    stop_pause = _business_item_or_fallback(
+        stance_items,
+        4,
+        "当新功能不能提高成交、激活、留存、扩展或交付效率，或销售学习尚未收敛到清晰客户群和核心工作流时，应暂停产品功能扩张，转向验证、销售、交付、留存和复盘。",
+    )
+    plan = _business_item_or_fallback(
+        stance_items,
+        5,
+        "90 天计划：第 1 阶段验证客户群、痛点和销售话术；第 2 阶段收敛最强工作流、交付边界和可引用案例；第 3 阶段只在激活路径清楚时小规模测试低触达增长，否则继续高接触销售学习。",
+    )
+    caveat = _business_source_caveat(source)
+    lines: list[str] = [
+        "# 研究决策最终报告",
+        "",
+        "## 核心结论",
+        "[合理推断] 下一阶段应先押注能最快产生付费学习和可复盘客户证据的路径；其他增长动作只能作为条件性辅助，不能在证据薄弱时提前放大。",
+        "",
+    ]
+    if anchors:
+        lines.extend([
+            "## 问题锚点与适用边界",
+            "本回答围绕这些约束给出判断：" + "、".join(anchors) + "。这些约束意味着优先级必须服务于现金约束、客户学习速度、真实需求验证和可停止的执行边界。",
+            "",
+        ])
+    lines.extend(
+        [
+            "## 1. " + heading_1,
+            "1. [证据支持] 第一优先级：" + sequence + " 决策含义：先用最短路径获得真实付费、拒绝原因和交付难点。",
+            "2. [合理推断] 第二优先级：把能放大已验证学习的引荐、销售辅助内容、案例材料或轻量试用放在主路径之后；触发条件是已有清晰客户群、重复痛点和可复用交付。",
+            "3. [不支持/风险] 暂不把大规模低触达获客、宽泛渠道扩张或不可复盘曝光当主押注；反证信号是这些动作不能带来合格机会、成交、留存或扩展。",
+            "",
+            "## 2. " + heading_2,
+            "- [合理推断] " + vanity,
+            "- [不支持/风险] 如果某个指标只增加表面热度，却不能证明客户痛点、预算 owner、付费意愿、复购或可复制交付，就不应作为主决策依据。",
+            "- [证据支持] 可以保留少量辅助内容或试用数据，但必须绑定合格机会、成交、留存、扩展或推荐，否则只能用于学习，不用于放大投入。",
+            "",
+            "## 3. " + heading_3,
+            "- [合理推断] " + market_fit,
+            "- [证据支持] 真实信号必须能改变资源分配：更聚焦的客户群、更短的销售学习循环、更明确的交付边界，以及更少依赖临时新增功能成交。",
+            "- [前瞻假设] 若这些信号连续改善，才有理由逐步提高低触达增长动作的权重；若只是表达兴趣或试用数量增长，应保持条件化。",
+            "",
+            "## 4. " + heading_4,
+            "- [合理推断] " + stop_pause,
+            "- [不支持/风险] 只因为客户提出分散功能请求、团队焦虑增长慢、或曝光数据变好，就继续扩功能，是高风险路径。",
+            "- [证据支持] 暂停不是停摆；暂停后的资源应转向客户验证、销售对话、交付质量、留存修复、案例沉淀和下一轮复盘指标。",
+            "",
+            "## 5. " + heading_5,
+            "1. [合理推断] 0-30 天：收窄客户群、痛点假设、销售名单和访谈脚本；目标是拿到明确拒绝原因、预算判断、付费意向和最小交付边界。",
+            "2. [合理推断] 31-60 天：围绕最强工作流做付费试点或可验证交付；目标是形成可复述案例、交付 checklist、定价边界和 win/loss 复盘。",
+            "3. [合理推断] 61-90 天：" + plan + " 阶段门槛是成交质量、重复使用、留存/扩展、推荐意愿和交付复杂度，而不是流量或注册数。",
+            "",
+            "## 证据与推断边界",
+            "- [证据支持] 当前材料支持把主路径放在真实客户学习、付费验证和证据边界上，但证据基础仍需要谨慎使用。",
+            "- [合理推断] 具体增长顺序、引荐/内容/自助的相对位置，是基于当前问题约束和已校正材料的商业推断。",
+            "- [前瞻假设] 低触达增长动作未来可能变强，但只有在激活路径、可复制交付和留存信号成立后才应上调。",
+            "- 证据强度：中等偏谨慎。争议点：团队已有渠道、客单价、销售周期和交付复杂度会改变排序。证据缺口：" + caveat,
+            "",
+            "## 复盘指标与反证信号",
+            "- 监控指标：合格机会、付费转化、核心使用、留存/扩展、销售周期、实施时间、推荐意愿、功能请求集中度。",
+            "- 反证信号：试用多但无激活，访谈多但无付费，渠道多但无成交，功能请求分散且不能归入同一工作流，或交付越来越依赖一次性定制。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _business_numbered_stance_items(source: str) -> dict[int, str]:
+    value = source or ""
+    if not value.strip():
+        return {}
+    lowered = value.lower()
+    starts = [
+        lowered.find("recommended calibrated final stance"),
+        lowered.find("recommended final stance"),
+        lowered.find("最终建议"),
+        lowered.find("最终立场"),
+        lowered.find("convergence_decision_framework"),
+    ]
+    start = min([idx for idx in starts if idx >= 0], default=0)
+    scoped = value[start:]
+    end_candidates = []
+    for marker in ("handoff_notes_for_final_controller", "confidence:", "## ", "\n\n### "):
+        idx = scoped.lower().find(marker.lower(), 80)
+        if idx > 0:
+            end_candidates.append(idx)
+    if end_candidates:
+        scoped = scoped[: min(end_candidates)]
+    items: dict[int, list[str]] = {}
+    current: int | None = None
+    for raw_line in scoped.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^(\d{1,2})[.)、]\s*(.+)", stripped)
+        if match:
+            current = int(match.group(1))
+            items.setdefault(current, []).append(match.group(2).strip())
+            continue
+        if current is not None and (raw_line.startswith((" ", "\t", "-", "*")) or stripped.startswith(("第一", "第二", "第三"))):
+            items[current].append(stripped.strip("-* \t"))
+    cleaned: dict[int, str] = {}
+    for index, parts in items.items():
+        text = _sanitize_user_facing_excerpt(" ".join(parts), limit=520)
+        text = _strip_business_source_labels(text)
+        if _looks_substantive(text, min_chars=36):
+            cleaned[index] = text
+    return cleaned
+
+
+def _business_item_or_fallback(items: dict[int, str], index: int, fallback: str) -> str:
+    value = _strip_business_source_labels(items.get(index, ""))
+    return value if _looks_substantive(value, min_chars=36) else fallback
+
+
+def _business_question_heading(query: str, index: int, fallback: str) -> str:
+    enumerated = dict(_enumerated_user_questions(query))
+    heading = _sanitize_user_facing_excerpt(enumerated.get(index, ""), limit=90)
+    heading = heading.strip("；;。 .")
+    return heading if _looks_substantive(heading, min_chars=8) else fallback
+
+
+def _strip_business_source_labels(text: str) -> str:
+    value = text or ""
+    value = re.sub(r"\b(?:Claim|Reasoning|Caveat|Correction|Calibration|Verdict)\s*[:：]\s*", "", value, flags=re.I)
+    value = re.sub(r"\b(?:supported|plausible|speculative|contradicted)\s*/\s*", "", value, flags=re.I)
+    value = value.replace("provided evidence", "当前材料")
+    value = value.replace("artifacts", "材料")
+    return " ".join(value.split())
+
+
+def _business_source_caveat(source: str) -> str:
+    value = source or ""
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if any(term in line for term in ("requires_full_text_verification", "full-text", "证据缺口", "缺少", "verification gap")):
+            caveat = _sanitize_user_facing_excerpt(line, limit=220)
+            caveat = _strip_business_source_labels(caveat)
+            if caveat:
+                return caveat
+    return "仍缺少完整来源核验、真实客户数据、销售周期、付费转化、留存扩展和交付复杂度的直接验证。"
 
 
 def _research_decision_user_facing_report(query: str, packet: dict[str, Any], *, foresight: bool) -> str:
