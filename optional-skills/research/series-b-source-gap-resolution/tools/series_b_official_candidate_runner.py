@@ -10,6 +10,7 @@ from typing import Any
 from series_b_official_candidate_comparator import build_empty_comparison, validate_comparison_schema
 from series_b_official_candidate_inputs import discover_existing_primitives, resolve_official_candidate_inputs
 from series_b_official_candidate_no_write_guard import OfficialCandidateGuardError, validate_no_write_policy
+from series_b_official_candidate_scoring_adapter import assess_scoring_readiness, run_scoring_adapter
 
 
 EXECUTION_FALSE_FLAGS = {
@@ -161,17 +162,21 @@ def dry_run_plan_only(
         output_dir=output_dir,
         require_clean_repo=True,
     )
+    readiness = assess_scoring_readiness(inputs)
     comparison = build_empty_comparison(reason="candidate execution not run in dry-run-plan-only mode")
     payload = {
         "status": "OFFICIAL_CANDIDATE_DRY_RUN_PLAN_PASS",
         "result_enum": "OFFICIAL_CANDIDATE_DRY_RUN_PLAN_PASS",
         "guard": guard,
         "input_discovery": inputs,
+        "scoring_adapter_readiness": readiness,
         "comparison_schema_validation": validate_comparison_schema(comparison),
         "candidate_execution_plan": {
-            "execute_candidate_available": False,
-            "execute_candidate_result_if_called": "SAFE_CANDIDATE_EXECUTION_NOT_IMPLEMENTED",
-            "required_before_execution": inputs["missing_inputs"] + inputs["partial_inputs"],
+            "execute_candidate_available": readiness["ready"],
+            "execute_candidate_result_if_called": "OFFICIAL_CANDIDATE_SAFE_RUNNER_NOT_AVAILABLE"
+            if readiness["ready"]
+            else "OFFICIAL_CANDIDATE_SCORING_ADAPTER_INPUTS_PARTIAL",
+            "required_before_execution": readiness["blockers"],
             "official_baseline_write_authorized": False,
             "production_default_integration_authorized": False,
         },
@@ -193,7 +198,15 @@ def execute_candidate(
     no_push: bool,
     no_tag: bool,
 ) -> dict[str, Any]:
-    guard = _guard(
+    inputs = resolve_official_candidate_inputs(
+        repo_path=repo_path,
+        branch=branch,
+        head=head,
+        output_dir=output_dir,
+        require_clean_repo=True,
+    )
+    payload = run_scoring_adapter(
+        input_discovery=inputs,
         output_dir=output_dir,
         repo_root=repo_path,
         no_official_write=no_official_write,
@@ -201,15 +214,7 @@ def execute_candidate(
         no_push=no_push,
         no_tag=no_tag,
     )
-    payload = {
-        "status": "SAFE_CANDIDATE_EXECUTION_NOT_IMPLEMENTED",
-        "result_enum": "SAFE_CANDIDATE_EXECUTION_NOT_IMPLEMENTED",
-        "guard": guard,
-        "candidate_run_executed": False,
-        "message": "The non-writing official candidate wrapper is installed, but safe candidate scoring execution is not implemented in this package.",
-        **EXECUTION_FALSE_FLAGS,
-    }
-    payload["artifact_path"] = _write_json(output_dir, "series_b_official_candidate_execute_blocked.json", payload)
+    payload["input_discovery"] = inputs
     return payload
 
 
@@ -222,7 +227,8 @@ def run_mode(mode: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
         if mode == "dry-run-plan-only":
             return 0, dry_run_plan_only(**kwargs)
         if mode == "execute-candidate":
-            return 2, execute_candidate(**kwargs)
+            payload = execute_candidate(**kwargs)
+            return (0 if payload.get("result_enum") == "OFFICIAL_CANDIDATE_EXECUTION_PASS" else 2), payload
     except OfficialCandidateGuardError as exc:
         return 2, {
             "status": exc.error_code,

@@ -102,7 +102,15 @@ def validate_no_write_policy(
             )
 
     lowered_command = (command or "").lower()
-    destructive_markers = ("--update-official", "--write-baseline", "git push", "git tag", "production-default")
+    destructive_markers = (
+        "--update-official",
+        "--write-baseline",
+        "--enable-production-default",
+        "--production-default",
+        "production_default_enabled=true",
+        "git push",
+        "git tag",
+    )
     if any(marker in lowered_command for marker in destructive_markers):
         raise OfficialCandidateGuardError(
             "OFFICIAL_CANDIDATE_NO_WRITE_GUARD_FAIL",

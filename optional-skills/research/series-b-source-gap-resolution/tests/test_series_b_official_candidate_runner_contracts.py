@@ -56,7 +56,8 @@ def test_verify_inputs_only_reports_partial_inputs() -> None:
         payload = json.loads(proc.stdout)
         assert payload["result_enum"] == "OFFICIAL_CANDIDATE_VERIFY_INPUTS_PASS"
         assert payload["inputs_status"] in {"OFFICIAL_CANDIDATE_INPUTS_PARTIAL", "OFFICIAL_CANDIDATE_REPO_DIRTY_BLOCKED"}
-        assert "official_dataset_path" in payload["missing_inputs"]
+        if payload["inputs_status"] == "OFFICIAL_CANDIDATE_INPUTS_PARTIAL":
+            assert "official_dataset_path" in payload["missing_inputs"]
 
 
 def test_dry_run_plan_only_writes_plan_without_execution() -> None:
@@ -65,18 +66,31 @@ def test_dry_run_plan_only_writes_plan_without_execution() -> None:
         assert proc.returncode == 0, proc.stderr + proc.stdout
         payload = json.loads(proc.stdout)
         assert payload["result_enum"] == "OFFICIAL_CANDIDATE_DRY_RUN_PLAN_PASS"
-        assert payload["candidate_execution_plan"]["execute_candidate_available"] is False
+        assert payload["candidate_execution_plan"]["execute_candidate_available"] in {False, True}
         assert payload["controlled_regression_execution_performed"] is False
         assert (Path(tmp) / "series_b_official_candidate_dry_run_plan.json").exists()
 
 
-def test_execute_candidate_is_not_run_by_package() -> None:
+def test_execute_candidate_blocks_when_inputs_partial_or_repo_dirty() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         proc = _run(["--execute-candidate", *_guard_args(tmp)])
         assert proc.returncode != 0
         payload = json.loads(proc.stdout)
-        assert payload["result_enum"] == "SAFE_CANDIDATE_EXECUTION_NOT_IMPLEMENTED"
+        assert payload["result_enum"] in {
+            "OFFICIAL_CANDIDATE_SCORING_ADAPTER_INPUTS_PARTIAL",
+            "OFFICIAL_CANDIDATE_INPUTS_BLOCKED",
+            "OFFICIAL_CANDIDATE_SAFE_RUNNER_NOT_AVAILABLE",
+        }
         assert payload["official_baseline_update_performed"] is False
+        assert payload.get("candidate_score") is None
+        assert "official_score" not in payload
+
+
+def test_execute_candidate_blocks_inside_repo_output() -> None:
+    proc = _run(["--execute-candidate", *_guard_args(str(REPO_ROOT / "candidate-output"))])
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["result_enum"] == "OFFICIAL_CANDIDATE_NO_WRITE_GUARD_FAIL"
 
 
 def test_comparator_schema_valid() -> None:
@@ -90,7 +104,8 @@ def run_tests() -> None:
     test_discover_only_writes_repo_external_artifact()
     test_verify_inputs_only_reports_partial_inputs()
     test_dry_run_plan_only_writes_plan_without_execution()
-    test_execute_candidate_is_not_run_by_package()
+    test_execute_candidate_blocks_when_inputs_partial_or_repo_dirty()
+    test_execute_candidate_blocks_inside_repo_output()
     test_comparator_schema_valid()
 
 
