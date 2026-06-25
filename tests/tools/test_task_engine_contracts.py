@@ -748,6 +748,28 @@ def test_ddgs_blocks_only_after_all_allowed_backends_have_no_fresh_results(monke
     assert "backends=duckduckgo,yahoo" in message
 
 
+def test_ddgs_missing_dependency_blocks_with_clear_reason(monkeypatch):
+    import tools.task_engine_executors as executors
+
+    def missing_ddgs(*args, **kwargs):
+        raise ModuleNotFoundError("No module named 'ddgs'")
+
+    monkeypatch.setenv("HERMES_DDGS_BACKENDS", "duckduckgo,yahoo")
+    monkeypatch.setattr(executors, "_ddgs_search_once", missing_ddgs)
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][1]
+    try:
+        LocalTaskEngineExecutor().run_ddgs(stage, ["ADHD parent training children"])
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("DDGS should fail closed when the ddgs dependency is missing")
+
+    assert "blocked_dependency_missing" in message
+    assert "ddgs Python package is required" in message
+    assert "DDGS returned no fresh hits" not in message
+
+
 def test_ddgs_default_backend_list_uses_duckduckgo_brave_yahoo(monkeypatch):
     import tools.task_engine_executors as executors
 

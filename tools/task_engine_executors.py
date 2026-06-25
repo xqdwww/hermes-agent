@@ -614,6 +614,11 @@ class LocalTaskEngineExecutor:
                     try:
                         results = _ddgs_search_once(query, backend=backend, timeout_s=timeout_s, max_results=5)
                     except Exception as exc:
+                        if _is_ddgs_dependency_missing(exc):
+                            raise RuntimeError(
+                                f"{stage.stage_name}: blocked_dependency_missing: ddgs Python package is required "
+                                "for DDGS search; install the ddgs package in the active Python environment"
+                            ) from exc
                         message = f"{backend}:{type(exc).__name__}:{exc}"
                         errors.append(message)
                         if attempt <= retries and _is_transient_ddgs_error(exc):
@@ -4741,6 +4746,13 @@ def _normalize_ddgs_hit(query: str, hit: dict[str, Any]) -> dict[str, str]:
 def _is_transient_ddgs_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     return "timeout" in text or "timed out" in text or "temporarily" in text
+
+
+def _is_ddgs_dependency_missing(exc: Exception) -> bool:
+    if not isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return False
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "ddgs" in text
 
 
 def _require_fresh_prior_for_l3(stages: list[dict[str, Any]], *, base_dir: str | Path) -> None:
