@@ -7246,7 +7246,10 @@ def _convergence_profile_instruction_lines(profiles: list[str]) -> list[str]:
         lines.extend([
             "Business strategy profile: do not treat every execution plan as a repeated cadence plan.",
             "For business/go-to-market strategy, convergence must include: strategic_sequence or prioritized_order; vanity_metrics_or_false_signals; market_fit_signals; stop_or_pause_conditions; 90_day_or_phased_execution_plan; evidence_or_inference_tiers; monitoring_metrics; and decision_boundary or when_to_reassess.",
-            "For stop_or_pause_conditions, state concrete conditions for when to stop, pause, freeze, halt, or narrow new feature/product expansion; include what signals trigger the pause and whether resources should shift to validation, sales, retention, delivery, or review.",
+            "Write a standalone convergence judgment unit with this exact label or heading: stop_or_pause_feature_expansion_condition.",
+            "For stop_or_pause_feature_expansion_condition, state concrete conditions for when to stop, pause, freeze, halt, or narrow new feature/product expansion; include what signals trigger the pause and whether resources should shift to validation, sales, retention, delivery, or review.",
+            "This unit must answer the user's stop/pause question directly: what signals mean the team should stop adding features and instead focus on sales proof, delivery quality, retention, PMF validation, or customer learning.",
+            "Do not treat vague language such as stay flexible, watch feedback, adjust strategy, keep iterating, or 适时优化 as a valid stop/pause condition.",
             "If the evidence packet is conditional or accepted_with_defects, preserve that caveat and do not turn assumptions into settled conclusions.",
         ])
     if PROFILE_IMPLEMENTATION_PLAN in profiles:

@@ -4685,6 +4685,112 @@ def test_business_strategy_vague_pause_condition_bad():
     assert "missing_stop_pause_condition" in errors
 
 
+def test_live_case04_missing_stop_pause_recurrence_bad():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个早期 B2B SaaS 团队有 6 个月 runway，产品是面向专业服务公司的 workflow automation。"
+        "团队在纠结 PLG、自助试用、founder-led sales、渠道合作和内容获客。请判断："
+        "下一阶段最应该押注的 GTM 顺序；哪些增长动作是虚荣指标；如何判断 PMF 信号是真的；"
+        "什么时候应该暂停产品功能扩张；给出 90 天执行计划。"
+    )
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then limited self-serve, then content and partnerships.",
+        "vanity_metrics_or_false_signals: traffic, signups, demos, and trial accounts without activation or paid conversion.",
+        "market_fit_signals: paid conversion, retention, repeated usage, expansion intent, and a clear budget owner.",
+        "90_day_or_phased_execution_plan: 0-30 days validate ICP, 31-60 days sell and deliver a narrow workflow, 61-90 days reassess retention and conversion.",
+        "evidence_or_inference_tiers: evidence supports cohort retention as a stronger signal; channel timing is a reasonable inference.",
+        "monitoring_metrics: paid conversion, qualified pipeline, retention, sales cycle, and delivery quality.",
+        "decision_boundary: reassess monthly under the six-month runway constraint.",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_stop_pause_condition" in errors
+
+
+def test_live_case04_stop_pause_explicit_good():
+    import tools.task_engine_executors as executors
+
+    query = "早期 B2B SaaS GTM strategy，需要判断什么时候暂停产品功能扩张并给 90 天计划。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then limited self-serve, then content and partnerships.",
+        "vanity metric: traffic, signups, demos, and trial accounts without activation or paid conversion.",
+        "market fit signals: paid conversion, retention, repeated usage, expansion intent, and a clear budget owner.",
+        "stop_or_pause_feature_expansion_condition: stop new feature expansion when paid conversion, retention, and repeated usage do not improve; shift resources to sales proof, delivery quality, PMF validation, and customer learning.",
+        "90_day_or_phased_execution_plan: 0-30 days validate ICP, 31-60 days sell and deliver a narrow workflow, 61-90 days reassess retention and conversion.",
+        "evidence_or_inference_tiers: evidence supports cohort retention as a stronger signal; channel timing is a reasonable inference.",
+        "monitoring_metrics: paid conversion, qualified pipeline, retention, sales cycle, and delivery quality.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_live_case04_equivalent_stop_pause_good():
+    import tools.task_engine_executors as executors
+
+    query = "Need business strategy, go-to-market order, vanity metrics, market fit signals, and a 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "prioritized_order: founder-led sales first, then narrow self-serve, then content and partners.",
+        "vanity metric: signups, traffic, and meetings without activation, retention, or paid intent are false signals.",
+        "market fit signals: paid intent, retention, conversion quality, repeated usage, and expansion requests.",
+        "pause condition: freeze new feature development until retention and sales proof improve; move the team to validation, sales, delivery, and review.",
+        "90-day phased plan: 0-30 validate, 31-60 deliver, 61-90 reassess conversion and retention.",
+        "evidence boundary: evidence-supported for general PMF signals; reasonable inference for exact GTM timing.",
+        "monitoring_metrics: activation, retention, paid conversion, sales cycle, and monthly reassess.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_live_case04_vague_adjustment_bad():
+    import tools.task_engine_executors as executors
+
+    query = "早期 B2B SaaS business strategy 和 GTM 计划，需要判断暂停产品功能扩张条件。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: sales first, self-serve second, content and partnerships later.",
+        "vanity_metrics_or_false_signals: traffic, signups, and meetings without paid conversion.",
+        "market_fit_signals: retention, paid intent, conversion quality, and repeated usage.",
+        "stop_or_pause_feature_expansion_condition: 关注市场反馈，保持灵活，适时优化，并根据情况调整策略。",
+        "90_day_or_phased_execution_plan: 0-30 validate, 31-60 deliver, 61-90 reassess.",
+        "evidence_or_inference_tiers: evidence-supported for general sequencing and reasonable inference for timing.",
+        "monitoring_metrics: conversion, retention, sales cycle, and delivery quality.",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_stop_pause_condition" in errors
+
+
+def test_business_prompt_contains_stop_pause_required_unit():
+    import tools.task_engine_executors as executors
+
+    lines = executors._convergence_profile_instruction_lines([executors.PROFILE_BUSINESS_STRATEGY_PLAN])
+    prompt_text = "\n".join(lines)
+
+    assert "stop_or_pause_feature_expansion_condition" in prompt_text
+    assert "stay flexible" in prompt_text
+    assert "适时优化" in prompt_text
+
+
+def test_cadence_regression_still_strict():
+    import tools.task_engine_executors as executors
+
+    query = "请给一个每周训练计划和周期安排，需要频率、步骤、记录指标和调整规则。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "训练计划：每天练习，包含步骤和记录指标。"
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert executors.PROFILE_IMPLEMENTATION_PLAN in profiles
+    assert "missing_cycle" in errors
+    assert "missing_adjustment_rules" in errors
+
+
 def _business_strategy_final_packet() -> dict:
     import tools.task_engine_executors as executors
 
