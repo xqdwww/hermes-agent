@@ -199,7 +199,20 @@ def resolve_official_candidate_inputs(
     head: str,
     output_dir: str | Path,
     require_clean_repo: bool = True,
+    input_registry_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    if input_registry_path is not None:
+        from series_b_official_candidate_input_registry import resolve_inputs_from_registry
+
+        return resolve_inputs_from_registry(
+            registry_path=input_registry_path,
+            repo_path=repo_path,
+            branch=branch,
+            head=head,
+            output_dir=output_dir,
+            require_clean_repo=require_clean_repo,
+        )
+
     repo = Path(repo_path).expanduser().resolve(strict=False)
     target_output = validate_output_dir(output_dir, repo_root=repo)
     runner_path = Path(__file__).resolve().parent / "run_series_b_official_candidate.py"

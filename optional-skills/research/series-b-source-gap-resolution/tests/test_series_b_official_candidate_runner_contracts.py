@@ -37,6 +37,7 @@ def test_runner_help() -> None:
     assert proc.returncode == 0
     assert "--discover-only" in proc.stdout
     assert "--execute-candidate" in proc.stdout
+    assert "--input-registry" in proc.stdout
 
 
 def test_discover_only_writes_repo_external_artifact() -> None:

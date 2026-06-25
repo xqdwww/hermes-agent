@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-production-default", action="store_true", required=True)
     parser.add_argument("--no-push", action="store_true", required=True)
     parser.add_argument("--no-tag", action="store_true", required=True)
+    parser.add_argument("--input-registry", default=None, help="Optional read-only official candidate input registry JSON.")
     return parser
 
 
@@ -66,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         no_production_default=args.no_production_default,
         no_push=args.no_push,
         no_tag=args.no_tag,
+        input_registry_path=args.input_registry,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return status

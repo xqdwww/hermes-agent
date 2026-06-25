@@ -66,6 +66,7 @@ def discover_only(
     no_production_default: bool,
     no_push: bool,
     no_tag: bool,
+    input_registry_path: str | Path | None = None,
 ) -> dict[str, Any]:
     guard = _guard(
         output_dir=output_dir,
@@ -81,6 +82,7 @@ def discover_only(
         head=head,
         output_dir=output_dir,
         require_clean_repo=True,
+        input_registry_path=input_registry_path,
     )
     primitives = discover_existing_primitives(repo_path)
     payload = {
@@ -105,6 +107,7 @@ def verify_inputs_only(
     no_production_default: bool,
     no_push: bool,
     no_tag: bool,
+    input_registry_path: str | Path | None = None,
 ) -> dict[str, Any]:
     guard = _guard(
         output_dir=output_dir,
@@ -120,6 +123,7 @@ def verify_inputs_only(
         head=head,
         output_dir=output_dir,
         require_clean_repo=True,
+        input_registry_path=input_registry_path,
     )
     payload = {
         "status": "OFFICIAL_CANDIDATE_VERIFY_INPUTS_PASS",
@@ -146,6 +150,7 @@ def dry_run_plan_only(
     no_production_default: bool,
     no_push: bool,
     no_tag: bool,
+    input_registry_path: str | Path | None = None,
 ) -> dict[str, Any]:
     guard = _guard(
         output_dir=output_dir,
@@ -161,6 +166,7 @@ def dry_run_plan_only(
         head=head,
         output_dir=output_dir,
         require_clean_repo=True,
+        input_registry_path=input_registry_path,
     )
     readiness = assess_scoring_readiness(inputs)
     comparison = build_empty_comparison(reason="candidate execution not run in dry-run-plan-only mode")
@@ -197,6 +203,7 @@ def execute_candidate(
     no_production_default: bool,
     no_push: bool,
     no_tag: bool,
+    input_registry_path: str | Path | None = None,
 ) -> dict[str, Any]:
     inputs = resolve_official_candidate_inputs(
         repo_path=repo_path,
@@ -204,6 +211,7 @@ def execute_candidate(
         head=head,
         output_dir=output_dir,
         require_clean_repo=True,
+        input_registry_path=input_registry_path,
     )
     payload = run_scoring_adapter(
         input_discovery=inputs,
