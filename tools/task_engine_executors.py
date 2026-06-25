@@ -9061,11 +9061,8 @@ def _business_source_caveat(source: str) -> str:
     value = source or ""
     for raw_line in value.splitlines():
         line = raw_line.strip()
-        if any(term in line for term in ("requires_full_text_verification", "full-text", "证据缺口", "缺少", "verification gap")):
-            caveat = _sanitize_user_facing_excerpt(line, limit=220)
-            caveat = _strip_business_source_labels(caveat)
-            if caveat:
-                return caveat
+        if any(term in line for term in ("requires_full_text_verification", "full-text", "证据缺口", "缺少", "verification gap", "evidence_gap", "verification_required", "evidence_gaps", "audit_summary", "Accepted compact packet", "DECISION handoff", "## evidence_strength", "compact packet", "claim_text:", "epistemic_tier:", "source_anchors:", "decision_use:", "notes:", "Handoff caveats", "Audit Status")):
+            return _natural_language_packet_caveat(line)
     return "仍缺少完整来源核验、真实客户数据、销售周期、付费转化、留存扩展和交付复杂度的直接验证。"
 
 
@@ -9394,6 +9391,8 @@ def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
     )
     for line in (text or "").splitlines():
         if any(term in line for term in blocked_line_terms):
+            continue
+        if _raw_packet_metadata_leakage_failures(line, allow_claim_table=False):
             continue
         raw_lines.append(line)
     value = _safe_final_excerpt("\n".join(raw_lines), limit=limit)
@@ -9801,6 +9800,12 @@ def _final_user_facing_quality_failures(packet: dict[str, Any], text: str) -> li
     value = text or ""
     failures: list[str] = []
     failures.extend(_internal_user_facing_language_failures(value))
+    failures.extend(
+        _raw_packet_metadata_leakage_failures(
+            value,
+            allow_claim_table=_query_requests_evidence_packet_output(query),
+        )
+    )
 
     enumerated = _enumerated_user_questions(query)
     if len(enumerated) >= 2:
@@ -9882,6 +9887,24 @@ def _query_requests_evidence_tiers(query: str) -> bool:
     return any(term in lowered or term in value for term in ("证据支持", "plausible", "speculative", "证据分层", "evidence"))
 
 
+def _query_requests_evidence_packet_output(query: str) -> bool:
+    value = query or ""
+    lowered = value.lower()
+    return any(
+        term in lowered or term in value
+        for term in (
+            "evidence packet",
+            "claim table",
+            "claim_id",
+            "source_id",
+            "证据包",
+            "证据表",
+            "claim 表",
+            "来源锚点",
+        )
+    )
+
+
 def _top_k_request_count(text: str) -> int | None:
     value = text or ""
     match = re.search(r"Top\s*(\d+)|Top(\d+)|前\s*(\d+)", value, re.I)
@@ -9946,6 +9969,65 @@ def _internal_user_facing_language_failures(text: str) -> list[str]:
         elif needle in lowered:
             failures.append("internal_language:" + term)
     return failures
+
+
+def _raw_packet_metadata_leakage_failures(text: str, *, allow_claim_table: bool = False) -> list[str]:
+    value = text or ""
+    lowered = value.lower()
+    raw_terms = (
+        "accepted_with_defects",
+        "accepted: true",
+        "checked_stages",
+        "checked_阶段s",
+        "research_packet_profile",
+        "profile_acceptance_requirements",
+        "evidence_packet_ready_for_decision",
+        "verification_required",
+        "evidence_gaps:",
+        "handoff_caveats:",
+        "audit_summary:",
+        "accepted compact packet",
+        "decision handoff",
+        "## evidence_strength",
+        "## claim_table",
+        "## controversy",
+        "## evidence_gap",
+        "evidence_strength:",
+        "evidence_gap:",
+        "critical_defects:",
+        "missing_or_invalid_artifacts:",
+        "l2_5_valid",
+        "l2_5_stub_detected",
+        "insufficient_sources",
+        "verdict:",
+    )
+    failures: list[str] = []
+    for term in raw_terms:
+        if term in lowered:
+            failures.append("raw_packet_metadata_leakage:" + term)
+    if not allow_claim_table:
+        for term in (
+            "source_id:",
+            "claim_id:",
+            "claim_text:",
+            "epistemic_tier:",
+            "source_anchors:",
+            "applicability_boundary:",
+            "counter_signal_or_failure_condition:",
+            "decision_use:",
+            "notes:",
+        ):
+            if term in lowered:
+                failures.append("raw_packet_metadata_leakage:" + term)
+    return failures
+
+
+def _natural_language_packet_caveat(text: str = "") -> str:
+    return (
+        "本结论依赖的证据包仍有缺口，部分材料需要进一步全文核验；"
+        "因此建议只作为条件性决策使用，不应视为高置信事实结论。"
+        "证据强度不足的部分已按合理推断或待验证假设处理。"
+    )
 
 
 def _markdown_numeric_sections(text: str) -> dict[int, str]:
@@ -10525,6 +10607,30 @@ def _strip_raw_artifact_metadata_for_final_body(text: str) -> str:
         "owner=",
         "owner:",
         "model:",
+        "accepted:",
+        "checked_stages:",
+        "checked_阶段s:",
+        "research_packet_profile:",
+        "profile_acceptance_requirements:",
+        "evidence_packet_ready_for_decision:",
+        "verification_required:",
+        "evidence_gaps:",
+        "handoff_caveats:",
+        "audit_summary:",
+        "accepted compact packet",
+        "decision handoff",
+        "## evidence_strength",
+        "## claim_table",
+        "## controversy",
+        "## evidence_gap",
+        "evidence_strength:",
+        "evidence_gap:",
+        "critical_defects:",
+        "missing_or_invalid_artifacts:",
+        "l2_5_valid:",
+        "l2_5_stub_detected:",
+        "insufficient_sources:",
+        "verdict:",
     )
     skipped_exact = {
         "external_calibration",
@@ -10546,6 +10652,8 @@ def _strip_raw_artifact_metadata_for_final_body(text: str) -> str:
         if lowered in skipped_exact:
             continue
         if any(lowered.startswith(prefix) for prefix in skipped_prefixes):
+            continue
+        if _raw_packet_metadata_leakage_failures(line, allow_claim_table=False):
             continue
         if "external_calibration executor_model" in lowered:
             continue

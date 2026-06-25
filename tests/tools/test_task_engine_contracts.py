@@ -4906,6 +4906,99 @@ def test_business_strategy_final_internal_language_still_blocked():
     _assert_final_quality_rejects(packet, bad, "internal_language")
 
 
+def test_final_blocks_raw_packet_metadata_bad():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    bad = (
+        executors._final_controller_report_from_packet(packet)
+        + "\n\n证据缺口：证据材料 ACCEPTED_WITH_DEFECTS accepted: true "
+        "checked_stages: [L1_gemini_search] research_packet_profile: [business_strategy_plan] "
+        "verification_required: [C4] evidence_gaps: [full-text gap]"
+    )
+
+    _assert_final_quality_rejects(packet, bad, "raw_packet_metadata_leakage")
+
+
+def test_final_allows_natural_language_caveat_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    text = (
+        executors._final_controller_report_from_packet(packet)
+        + "\n\n证据边界：证据包仍有缺口，部分材料需要进一步全文核验，本建议为条件性决策，"
+        "不能视为高置信事实结论。"
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_final_does_not_delete_evidence_gap_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    packet["excerpts"]["L5_deepseek_acceptance"] = (
+        "evidence_gap: evidence packet ACCEPTED_WITH_DEFECTS accepted: true "
+        "checked_stages: [L1_gemini_search, L4_gemini_audit] "
+        "research_packet_profile: [business_strategy_plan] verification_required: [C4] evidence_gaps: [full-text gap]"
+    )
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "证据包仍有缺口" in text
+    assert "进一步全文核验" in text
+    assert "条件性决策" in text
+    assert "ACCEPTED_WITH_DEFECTS" not in text
+    assert "accepted: true" not in text
+    assert "checked_stages" not in text
+    assert "research_packet_profile" not in text
+    assert "verification_required" not in text
+    assert "evidence_gaps" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_diagnostic_report_can_contain_raw_metadata_good():
+    import tools.task_engine_executors as executors
+
+    diagnostic = (
+        "diagnostic summary\n"
+        "verdict: ACCEPTED_WITH_DEFECTS\n"
+        "accepted: true\n"
+        "checked_stages: [L1_gemini_search]\n"
+        "research_packet_profile: [business_strategy_plan]\n"
+        "verification_required: [C4]\n"
+        "evidence_gaps: [full-text gap]\n"
+    )
+
+    assert executors._raw_packet_metadata_leakage_failures(diagnostic, allow_claim_table=False)
+
+
+def test_business_strategy_final_still_valid_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    packet["excerpts"]["L5_deepseek_acceptance"] = (
+        "evidence_gap: ACCEPTED_WITH_DEFECTS accepted: true checked_stages: [L1_gemini_search] "
+        "research_packet_profile: [business_strategy_plan] verification_required: [C4] evidence_gaps: [full-text gap]"
+    )
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 1. 下一阶段最应该押注的 GTM 顺序" in text
+    assert "虚荣指标" in text
+    assert "PMF" in text or "产品市场匹配" in text
+    assert "暂停产品功能扩张" in text
+    assert "90 天" in text
+    assert "证据包仍有缺口" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_internal_language_regression():
+    packet = _business_strategy_final_packet()
+    bad = "# 最终答案\n\n## 1. 顺序\nconvergence_report external_calibration artifact pipeline StageRecord"
+
+    _assert_final_quality_rejects(packet, bad, "internal_language")
+
+
 def test_cadence_plan_still_requires_cycle_frequency_bad():
     import tools.task_engine_executors as executors
 
