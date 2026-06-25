@@ -77,6 +77,64 @@ Stop immediately when:
 
 Untracked `outputs/**` can be allowed only when the task declares output artifacts as uncommitted evidence. Never stage those outputs unless the user gives an explicit, separate instruction.
 
+## Runtime / Python Interpreter Preflight
+
+Run this preflight before any L2/DDGS check, Research pipeline run, cross-domain rerun, stage rerun, pytest, or `py_compile` command. Interpreter mismatch is a validation blocker because it can make dependencies appear missing in one runtime while available in another.
+
+### Interpreter selection rule
+
+- 不要默认使用 `python3`。
+- Do not use unsupported Python, including Python 3.14 when it appears in the local environment.
+- Prefer the repo supported interpreter:
+  - `.venv/bin/python`, when it exists and is the project venv.
+  - Otherwise, a clearly verified `python`.
+- All Research/Decision runner, pytest, `py_compile`, and stage rerun commands must use the same supported interpreter.
+- If the runner interpreter and test interpreter differ, stop and reconcile the interpreter before continuing.
+
+### Required preflight commands
+
+```bash
+which python
+python -c "import sys; print(sys.executable); print(sys.version)"
+python -c "import ddgs; print('ddgs ok', ddgs)" || true
+python -m pip show ddgs || true
+
+which python3
+python3 -c "import sys; print(sys.executable); print(sys.version)" || true
+python3 -c "import ddgs; print('ddgs ok', ddgs)" || true
+python3 -m pip show ddgs || true
+
+test -x .venv/bin/python && .venv/bin/python -c "import sys; print(sys.executable); print(sys.version)" || true
+test -x .venv/bin/python && .venv/bin/python -c "import ddgs; print('ddgs ok', ddgs)" || true
+test -x .venv/bin/python && .venv/bin/python -m pip show ddgs || true
+```
+
+### DDGS dependency rule
+
+- If `ddgs` is available in the supported interpreter but missing from `python3`, switch to the supported interpreter; do not change code.
+- If supported `.venv/bin/python` lacks `ddgs`, install only inside that venv after explicit dependency-governance approval; do not install into system Python.
+- If `pyproject.toml` or `uv.lock` does not declare `ddgs`, open a separate dependency governance task instead of mixing dependency changes into a case rerun.
+- Missing `ddgs` must clear-block as `blocked_dependency_missing`; never disguise it as `DDGS returned no fresh hits`.
+- Do not mix an environment package failure with a Research quality failure.
+
+### Rerun rule
+
+- Record the runner interpreter before rerunning a case.
+- Rerun artifacts must save:
+  - `sys.executable`
+  - `sys.version`
+  - `ddgs` import status
+  - `pip show ddgs` result
+- If the wrong interpreter is in use, stop and correct the interpreter before running the pipeline.
+- Do not use unsupported `python3` 3.14 to install dependencies or rerun Research/Decision.
+
+### Anti-repeat rule
+
+- Run this check before L2/DDGS, Research pipeline, or cross-domain reruns.
+- Do not repeatedly rediagnose `ModuleNotFoundError: No module named 'ddgs'` as if it were a new Research defect.
+- First confirm the interpreter; then decide whether the issue is dependency declaration, venv setup, or command invocation.
+- If it is interpreter mismatch, select the correct interpreter. If it is dependency declaration drift, open a separate dependency governance task.
+
 ## allowed scope
 
 A guarded validation task may read source, logs, StageRecords, summaries, and output artifacts. It may write only the output artifacts requested by the task. It must not modify production code, tests, skills, registries, router policy, model policy, bridge code, or executor configuration unless the user explicitly changes the task from validation to repair.
