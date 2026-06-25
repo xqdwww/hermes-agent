@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Artifact contract checks for nat_eco_041 controlled dry-runs."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from series_b_nat_eco_041_result_schema import CASE_ID, REQUIRED_ARTIFACTS, require_result_enum
+
+
+class NatEco041ArtifactContractError(ValueError):
+    """Raised when nat_eco_041 controlled artifacts are missing or unsafe."""
+
+
+def validate_nat_eco_041_artifact_contract(output_dir: str | Path) -> dict[str, object]:
+    target = Path(output_dir).expanduser().resolve(strict=False)
+    missing = [name for name in REQUIRED_ARTIFACTS if not (target / name).exists()]
+    if missing:
+        raise NatEco041ArtifactContractError(f"missing required artifacts: {missing}")
+    parsed: dict[str, object] = {}
+    for name in REQUIRED_ARTIFACTS:
+        path = target / name
+        text = path.read_text(encoding="utf-8")
+        if "dummy_test_artifact_only" in text:
+            raise NatEco041ArtifactContractError(f"{name} is a dummy artifact")
+        if '"mock_builder_output": true' in text or '"mock_audit_output": true' in text:
+            raise NatEco041ArtifactContractError(f"{name} is a mock artifact")
+        if CASE_ID not in text:
+            raise NatEco041ArtifactContractError(f"{name} does not mention nat_eco_041")
+        if path.suffix == ".json":
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                parsed[name] = payload
+    result = parsed.get("nat_eco_041_controlled_execution_result.json", {})
+    if isinstance(result, dict):
+        if result.get("case_id") != CASE_ID:
+            raise NatEco041ArtifactContractError("result case_id must be nat_eco_041")
+        require_result_enum(str(result.get("result_enum")))
+        if result.get("mock_audit_output") is True or result.get("mock_builder_output") is True:
+            raise NatEco041ArtifactContractError("mock outputs are not allowed")
+        if result.get("official_baseline_update_performed") is not False:
+            raise NatEco041ArtifactContractError("baseline update flag must be false")
+        if result.get("full_series_b_run_performed") is not False:
+            raise NatEco041ArtifactContractError("full Series B flag must be false")
+        if result.get("production_default_manifest_integration_performed") is not False:
+            raise NatEco041ArtifactContractError("production default flag must be false")
+        if result.get("binding_caveat_preserved") is not True:
+            raise NatEco041ArtifactContractError("binding caveat was not preserved")
+        if result.get("dune_migration_caveat_preserved") is not True:
+            raise NatEco041ArtifactContractError("dune migration caveat was not preserved")
+    return {"status": "PASS", "artifacts": [str(target / name) for name in REQUIRED_ARTIFACTS]}
