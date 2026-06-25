@@ -86,6 +86,8 @@ PROFILE_EVIDENCE_GROUNDED = "evidence_grounded"
 PROFILE_FORESIGHT_MECHANISM = "foresight_mechanism"
 PROFILE_FUTURE_SCENARIO = "future_scenario"
 PROFILE_IMPLEMENTATION_PLAN = "implementation_plan"
+PROFILE_BUSINESS_STRATEGY_PLAN = "business_strategy_plan"
+PROFILE_GENERIC_DECISION_CONVERGENCE = "generic_decision_convergence"
 
 
 class TaskEngineExecutor(Protocol):
@@ -4120,18 +4122,56 @@ def _task_engine_profiles_from_query(query: str) -> list[str]:
     if any(term in value for term in foresight_terms) or any(term in lowered for term in ("future scenario", "structural reversal")):
         profiles.append(PROFILE_FORESIGHT_MECHANISM)
 
-    implementation_terms = (
-        "家长行为培训",
-        "如何执行",
-        "训练方案",
-        "准备路线",
-        "操作计划",
-        "执行计划",
-        "干预方案",
-        "implementation plan",
-        "parent training",
+    business_strategy_terms = (
+        "商业策略",
+        "产品策略",
+        "增长策略",
+        "市场进入",
+        "增长动作",
+        "虚荣指标",
+        "获客",
+        "渠道",
+        "销售",
+        "转化",
+        "留存",
+        "付费意愿",
+        "product strategy",
+        "business strategy",
+        "go-to-market",
+        "market-fit",
+        "sales",
+        "growth",
+        "acquisition",
+        "retention",
+        "runway",
+        "gtm",
     )
-    if any(term in value for term in implementation_terms) or any(term in lowered for term in ("implementation plan", "parent training")):
+    if any(term in value for term in business_strategy_terms) or any(term in lowered for term in business_strategy_terms):
+        profiles.append(PROFILE_BUSINESS_STRATEGY_PLAN)
+
+    cadence_plan_terms = (
+        "家长行为培训",
+        "训练方案",
+        "训练计划",
+        "学习计划",
+        "行为习惯",
+        "日常练习",
+        "周期训练",
+        "周期性执行",
+        "复盘节奏",
+        "每周",
+        "每天",
+        "干预方案",
+        "parent training",
+        "training plan",
+        "learning plan",
+        "habit plan",
+        "routine",
+        "cadence",
+        "practice schedule",
+        "implementation cadence",
+    )
+    if any(term in value for term in cadence_plan_terms) or any(term in lowered for term in cadence_plan_terms):
         profiles.append(PROFILE_IMPLEMENTATION_PLAN)
 
     evidence_terms = (
@@ -4147,7 +4187,32 @@ def _task_engine_profiles_from_query(query: str) -> list[str]:
         "guideline",
         "evidence",
     )
-    if not profiles or any(term in value for term in evidence_terms) or any(term in lowered for term in ("treatment", "guideline", "evidence")):
+    evidence_hit = any(term in value for term in evidence_terms) or any(term in lowered for term in ("treatment", "guideline", "evidence"))
+
+    generic_decision_terms = (
+        "是否应该",
+        "应该如何",
+        "如何判断",
+        "优先",
+        "排序",
+        "风险",
+        "权衡",
+        "决策",
+        "recommend",
+        "recommendation",
+        "decision",
+        "prioritize",
+        "tradeoff",
+        "risk",
+    )
+    if (
+        not profiles
+        and not evidence_hit
+        and (any(term in value for term in generic_decision_terms) or any(term in lowered for term in generic_decision_terms))
+    ):
+        profiles.append(PROFILE_GENERIC_DECISION_CONVERGENCE)
+
+    if not profiles or evidence_hit:
         profiles.insert(0, PROFILE_EVIDENCE_GROUNDED)
 
     deduped: list[str] = []
@@ -4459,6 +4524,70 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
             "missing_steps": ("步骤", "step"),
             "missing_metrics": ("记录指标", "观察指标", "metric"),
             "missing_adjustment_rules": ("调整规则", "降难度", "adjustment rule"),
+        }
+        for name, terms in checks.items():
+            if not any(term in value or term in lowered for term in terms):
+                errors.append(name)
+    if PROFILE_BUSINESS_STRATEGY_PLAN in profiles:
+        checks = {
+            "missing_business_strategy_sequence": (
+                "战略顺序",
+                "优先级",
+                "排序",
+                "先后顺序",
+                "sequence",
+                "prioritized",
+                "priority",
+            ),
+            "missing_vanity_metric_warning": ("虚荣指标", "虚假信号", "false signal", "vanity metric"),
+            "missing_market_fit_signals": (
+                "真实信号",
+                "市场匹配",
+                "付费意愿",
+                "留存",
+                "转化",
+                "market-fit",
+                "market fit",
+                "real signal",
+            ),
+            "missing_stop_pause_condition": (
+                "暂停",
+                "停止",
+                "收缩",
+                "stop condition",
+                "pause condition",
+                "kill criteria",
+            ),
+            "missing_90_day_or_phased_plan": (
+                "90 天",
+                "90天",
+                "30/60/90",
+                "阶段计划",
+                "分阶段",
+                "90-day",
+                "90 day",
+                "phased plan",
+            ),
+            "missing_evidence_boundary": (
+                "证据支持",
+                "合理推断",
+                "前瞻假设",
+                "假设",
+                "evidence",
+                "inference",
+                "speculative",
+                "assumption",
+            ),
+            "missing_monitoring_metrics": (
+                "监控指标",
+                "观察指标",
+                "复盘",
+                "重新评估",
+                "metric",
+                "indicator",
+                "monitor",
+                "reassess",
+            ),
         }
         for name, terms in checks.items():
             if not any(term in value or term in lowered for term in terms):
@@ -6716,6 +6845,8 @@ def _normalize_profiles(raw: Any) -> list[str]:
             PROFILE_FORESIGHT_MECHANISM,
             PROFILE_FUTURE_SCENARIO,
             PROFILE_IMPLEMENTATION_PLAN,
+            PROFILE_BUSINESS_STRATEGY_PLAN,
+            PROFILE_GENERIC_DECISION_CONVERGENCE,
         } and value not in normalized:
             normalized.append(value)
     return normalized or [PROFILE_EVIDENCE_GROUNDED]
@@ -6862,6 +6993,25 @@ def _convergence_foresight_template_lines(profiles: list[str]) -> list[str]:
         "Use high / medium / low or 高 / 中 / 低 under certainty_levels for each major claim.",
         "## uncertainty_boundary",
     ]
+
+
+def _convergence_profile_instruction_lines(profiles: list[str]) -> list[str]:
+    lines: list[str] = []
+    if PROFILE_BUSINESS_STRATEGY_PLAN in profiles:
+        lines.extend([
+            "Business strategy profile: do not treat every execution plan as a repeated cadence plan.",
+            "For business/go-to-market strategy, convergence must include: strategic_sequence or prioritized_order; vanity_metrics_or_false_signals; market_fit_signals; stop_or_pause_conditions; 90_day_or_phased_execution_plan; evidence_or_inference_tiers; monitoring_metrics; and decision_boundary or when_to_reassess.",
+            "If the evidence packet is conditional or accepted_with_defects, preserve that caveat and do not turn assumptions into settled conclusions.",
+        ])
+    if PROFILE_IMPLEMENTATION_PLAN in profiles:
+        lines.append(
+            "Implementation cadence profile: for repeated training, learning, habit, or routine execution plans, include cycle, frequency, steps, feedback metrics, and adjustment rules."
+        )
+    if PROFILE_GENERIC_DECISION_CONVERGENCE in profiles and PROFILE_BUSINESS_STRATEGY_PLAN not in profiles:
+        lines.append(
+            "Generic decision convergence profile: include options or recommendation, rationale, risks, tradeoffs, evidence boundary, counter-signals, and next action."
+        )
+    return lines
 
 
 def _l5_acceptance_text_is_accepted(text: str) -> bool:
@@ -7111,6 +7261,7 @@ def _decision_stage_prompt(
     context = _decision_research_packet_context(research_packet_path)
     profiles = _task_engine_profiles_from_query(query)
     foresight_sections = _convergence_foresight_template_lines(profiles) if stage.stage_name == "convergence_report" else []
+    profile_instruction_lines = _convergence_profile_instruction_lines(profiles) if stage.stage_name == "convergence_report" else []
     duties = {
         "structure_mapper": "Map the problem space, decision axes, constraints, uncertainties, stakeholders, and evaluation criteria.",
         "evidence_judge": "Judge evidence quality, strength, applicability, gaps, and over/under-supported claims.",
@@ -7140,6 +7291,7 @@ def _decision_stage_prompt(
         *_decision_stage_output_contract_lines(stage),
         "Internal output_quality_profile: " + ", ".join(profiles) + ".",
         *foresight_sections,
+        *profile_instruction_lines,
         f"Current run root: {base}",
         "",
         "## User original decision question",
@@ -8270,6 +8422,7 @@ def _convergence_report_prompt_from_artifacts(
     ]
     profiles = _task_engine_profiles_from_query(query)
     foresight_sections = _convergence_foresight_template_lines(profiles)
+    profile_instruction_lines = _convergence_profile_instruction_lines(profiles)
     return "\n".join(
         [
             "Run RESEARCH_DECISION stage 14: convergence_report using R1-32B only.",
@@ -8281,7 +8434,7 @@ def _convergence_report_prompt_from_artifacts(
             "Internal output_quality_profile: " + ", ".join(profiles) + ".",
             "If foresight_mechanism is present, include key driving variables, input variables -> mediating mechanisms -> output variables, scenario branches, uncertainty/failure conditions, observable counter-signals, and certainty levels.",
             *foresight_sections,
-            "If implementation_plan is present, include cycle, frequency, steps, metrics, and adjustment rules only when the user asks for implementation.",
+            *profile_instruction_lines,
             (
                 "Return the hard-template headings exactly as listed above; include divergence_role_summary, conflicts_to_resolve, convergence_decision_framework, uncertainty_boundaries, and handoff_questions_for_external_calibration content inside those headings."
                 if foresight_sections

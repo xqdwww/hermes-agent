@@ -4487,6 +4487,98 @@ def test_convergence_report_foresight_quality_gate_accepts_required_fields():
     ) == []
 
 
+def test_business_gtm_plan_does_not_require_cadence_fields_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个早期 B2B SaaS 团队有 6 个月 runway，正在判断 GTM、PLG、"
+        "founder-led sales、渠道合作和内容获客。请给出 90 天执行计划，"
+        "并区分证据支持、合理推断和 speculative。"
+    )
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "divergence_role_summary",
+        "convergence_decision_framework",
+        "战略顺序 / prioritized_order：先验证高接触销售，再小范围自助试用，最后再考虑渠道扩张。",
+        "虚荣指标 / vanity metric：注册数、内容阅读量和无付费意愿的试用量不能证明需求。",
+        "真实信号 / market-fit signals：付费意愿、留存、转化质量、重复使用和明确预算 owner。",
+        "暂停条件 / stop_or_pause_conditions：如果销售访谈无法形成付费承诺，应暂停功能扩张。",
+        "90 天计划：0-30 天验证付费痛点，31-60 天收敛最小 workflow，61-90 天复盘转化和留存。",
+        "证据支持：短 runway 下优先学习速度；合理推断：渠道合作会拖慢反馈；speculative：自助试用可能后置。",
+        "监控指标 / monitoring_metrics：合格线索转化、付费承诺、留存、销售周期，并在每月重新评估。",
+        "uncertainty_boundaries",
+        "证据边界：这些判断依赖当前团队资源、客单价和销售周期。",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert executors.PROFILE_BUSINESS_STRATEGY_PLAN in profiles
+    assert executors.PROFILE_IMPLEMENTATION_PLAN not in profiles
+    assert errors == []
+
+
+def test_business_gtm_plan_low_quality_bad():
+    import tools.task_engine_executors as executors
+
+    query = "早期团队要做 business strategy 和 go-to-market 决策，请给 90 天执行计划。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "convergence_decision_framework\n应该增长，应该做销售，也要做产品，整体要保持灵活。"
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert executors.PROFILE_BUSINESS_STRATEGY_PLAN in profiles
+    assert "missing_vanity_metric_warning" in errors
+    assert "missing_market_fit_signals" in errors
+    assert "missing_90_day_or_phased_plan" in errors
+    assert "missing_evidence_boundary" in errors
+
+
+def test_cadence_plan_still_requires_cycle_frequency_bad():
+    import tools.task_engine_executors as executors
+
+    query = "请为孩子设计阅读训练计划和日常练习 routine。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "implementation plan\n步骤：阅读、记录、复盘。观察指标：正确率。"
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert executors.PROFILE_IMPLEMENTATION_PLAN in profiles
+    assert "missing_cycle" in errors
+    assert "missing_frequency" in errors
+    assert "missing_adjustment_rules" in errors
+
+
+def test_cadence_plan_good():
+    import tools.task_engine_executors as executors
+
+    query = "请为孩子设计学习计划、训练方案和每周复盘节奏。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "implementation plan",
+        "周期：4-6 周一个观察周期。",
+        "频率：每周 4 次，每天 20 分钟。",
+        "步骤：热身、练习、复盘。",
+        "观察指标：正确率、完成时间、抗挫反应。",
+        "调整规则：如果连续两周压力过高则降难度。",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_no_case04_hardcode_in_production():
+    import inspect
+    import tools.task_engine_executors as executors
+
+    source = "\n".join([
+        inspect.getsource(executors._task_engine_profiles_from_query),
+        inspect.getsource(executors._quality_profile_errors),
+        inspect.getsource(executors._convergence_profile_instruction_lines),
+    ])
+
+    for banned in ("B2B SaaS", "PMF", "founder-led", "PLG", "GTM"):
+        assert banned not in source
+
+
 def test_output_quality_profile_accepts_future_scenario_alias_with_fixed_headings():
     import tools.task_engine_executors as executors
 
