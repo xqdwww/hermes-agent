@@ -4533,6 +4533,81 @@ def test_business_gtm_plan_low_quality_bad():
     assert "missing_evidence_boundary" in errors
 
 
+def test_business_strategy_stop_pause_condition_good():
+    import tools.task_engine_executors as executors
+
+    query = "早期团队要做 business strategy 和 go-to-market 决策，请给 90 天执行计划。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "战略顺序：先验证高接触销售，再小范围试用，最后再考虑渠道扩张。",
+        "虚荣指标：注册数和无付费意愿的试用量不能证明需求。",
+        "真实信号：付费意愿、留存、转化质量和明确预算 owner。",
+        "暂停新功能开发条件：如果连续两轮销售访谈没有形成付费承诺，应暂停功能扩张，转向验证、销售和留存复盘。",
+        "90 天计划：0-30 天验证痛点，31-60 天收敛交付，61-90 天复盘转化。",
+        "证据支持：短 runway 下优先学习速度；合理推断：渠道合作会拖慢反馈。",
+        "监控指标：合格线索转化、付费承诺、留存、销售周期，并每月重新评估。",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_business_strategy_stop_pause_condition_equivalent_language_good():
+    import tools.task_engine_executors as executors
+
+    query = "Need business strategy, go-to-market order, vanity metrics, market fit signals, and a 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "prioritized_order: validate sales motion first, then limited self-serve, then partner expansion.",
+        "vanity metric: signups without activation, retention, or paid intent are false signals.",
+        "market fit signals: retention, paid intent, conversion quality, and repeated usage.",
+        "stop_or_pause_conditions: freeze new feature development until retention and sales signals improve; shift resources to validation, sales, delivery, and review.",
+        "90-day phased plan: 0-30 validate, 31-60 narrow delivery, 61-90 reassess conversion and retention.",
+        "evidence boundary: evidence-supported for general sequencing; assumption for exact channel timing.",
+        "monitoring_metrics: activation, retention, paid conversion, sales cycle, and monthly reassess.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_business_strategy_missing_stop_pause_condition_bad():
+    import tools.task_engine_executors as executors
+
+    query = "早期团队要做 business strategy 和 go-to-market 决策，请给 90 天执行计划。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "战略顺序：先验证销售，再试用，再渠道。",
+        "虚荣指标：注册数和浏览量是虚假信号。",
+        "真实信号：付费意愿、留存、转化质量。",
+        "90 天计划：0-30 天访谈，31-60 天交付，61-90 天复盘。",
+        "证据支持和合理推断：区分文献支持和假设。",
+        "监控指标：转化、留存、销售周期，并重新评估。",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_stop_pause_condition" in errors
+
+
+def test_business_strategy_vague_pause_condition_bad():
+    import tools.task_engine_executors as executors
+
+    query = "Need business strategy, go-to-market order, vanity metrics, market fit signals, and a 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "prioritized_order: sales first, then self-serve, then partnerships.",
+        "vanity metric: top-line traffic without retention is a false signal.",
+        "market fit signals: retention, conversion quality, and paid intent.",
+        "pause condition: stay flexible, watch feedback, adjust strategy, and iterate at the right time.",
+        "90-day phased plan: 0-30 validate, 31-60 deliver, 61-90 reassess.",
+        "evidence boundary: supported for general sequencing and inference for timing.",
+        "monitoring_metrics: conversion, retention, and sales cycle.",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_stop_pause_condition" in errors
+
+
 def test_cadence_plan_still_requires_cycle_frequency_bad():
     import tools.task_engine_executors as executors
 
@@ -4571,11 +4646,12 @@ def test_no_case04_hardcode_in_production():
 
     source = "\n".join([
         inspect.getsource(executors._task_engine_profiles_from_query),
+        inspect.getsource(executors._business_stop_pause_condition_present),
         inspect.getsource(executors._quality_profile_errors),
         inspect.getsource(executors._convergence_profile_instruction_lines),
     ])
 
-    for banned in ("B2B SaaS", "PMF", "founder-led", "PLG", "GTM"):
+    for banned in ("B2B SaaS", "PMF", "founder-led", "PLG", "GTM", "workflow automation", "case_04"):
         assert banned not in source
 
 

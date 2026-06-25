@@ -4500,6 +4500,90 @@ def _assert_final_controller_packet_quality(packet: dict[str, Any], text: str) -
         raise RuntimeError("final_controller_report: output_quality_profile_error:" + ",".join(profile_errors))
 
 
+def _business_stop_pause_condition_present(text: str) -> bool:
+    value = text or ""
+    if not value.strip():
+        return False
+    action_terms = (
+        "stop",
+        "pause",
+        "freeze",
+        "halt",
+        "narrow",
+        "suspend",
+        "kill",
+        "停止",
+        "暂停",
+        "暂缓",
+        "收缩",
+        "冻结",
+        "终止",
+        "砍掉",
+        "不该继续",
+        "不要继续",
+        "不再继续",
+    )
+    object_terms = (
+        "feature expansion",
+        "product expansion",
+        "new feature",
+        "new features",
+        "feature development",
+        "functionality",
+        "product scope",
+        "product roadmap",
+        "narrow scope",
+        "功能扩张",
+        "功能开发",
+        "新功能",
+        "扩功能",
+        "加功能",
+        "产品扩张",
+        "产品范围",
+        "产品路线",
+    )
+    redirect_terms = (
+        "validation",
+        "sales",
+        "retention",
+        "delivery",
+        "verification",
+        "reassess",
+        "验证",
+        "销售",
+        "留存",
+        "交付",
+        "复盘",
+        "重新评估",
+    )
+    redirect_condition_terms = (
+        "rather than",
+        "instead of",
+        "not continue",
+        "do not continue",
+        "don't continue",
+        "转向",
+        "转为",
+        "而应",
+        "改为",
+        "不该继续",
+        "不要继续",
+        "不再继续",
+    )
+    segments = [segment.strip() for segment in re.split(r"[\n。；;.!?？]+", value) if segment.strip()]
+    for segment in segments:
+        lowered = segment.lower()
+        has_action = any(term in segment or term in lowered for term in action_terms)
+        has_object = any(term in segment or term in lowered for term in object_terms)
+        if has_action and has_object:
+            return True
+        has_redirect = any(term in segment or term in lowered for term in redirect_terms)
+        has_redirect_condition = any(term in segment or term in lowered for term in redirect_condition_terms)
+        if has_object and has_redirect and has_redirect_condition:
+            return True
+    return False
+
+
 def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) -> list[str]:
     value = text or ""
     lowered = value.lower()
@@ -4550,14 +4634,6 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
                 "market fit",
                 "real signal",
             ),
-            "missing_stop_pause_condition": (
-                "暂停",
-                "停止",
-                "收缩",
-                "stop condition",
-                "pause condition",
-                "kill criteria",
-            ),
             "missing_90_day_or_phased_plan": (
                 "90 天",
                 "90天",
@@ -4592,6 +4668,8 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
         for name, terms in checks.items():
             if not any(term in value or term in lowered for term in terms):
                 errors.append(name)
+        if not _business_stop_pause_condition_present(value):
+            errors.append("missing_stop_pause_condition")
     if PROFILE_EVIDENCE_GROUNDED in profiles and stage_name == "final_controller_report":
         checks = {
             "missing_evidence_strength": ("证据强度", "evidence_strength", "evidence strength"),
@@ -7001,6 +7079,7 @@ def _convergence_profile_instruction_lines(profiles: list[str]) -> list[str]:
         lines.extend([
             "Business strategy profile: do not treat every execution plan as a repeated cadence plan.",
             "For business/go-to-market strategy, convergence must include: strategic_sequence or prioritized_order; vanity_metrics_or_false_signals; market_fit_signals; stop_or_pause_conditions; 90_day_or_phased_execution_plan; evidence_or_inference_tiers; monitoring_metrics; and decision_boundary or when_to_reassess.",
+            "For stop_or_pause_conditions, state concrete conditions for when to stop, pause, freeze, halt, or narrow new feature/product expansion; include what signals trigger the pause and whether resources should shift to validation, sales, retention, delivery, or review.",
             "If the evidence packet is conditional or accepted_with_defects, preserve that caveat and do not turn assumptions into settled conclusions.",
         ])
     if PROFILE_IMPLEMENTATION_PLAN in profiles:
