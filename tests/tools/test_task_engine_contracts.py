@@ -5278,6 +5278,287 @@ def test_case01_case05_case06_clean_regression_good():
         executors._assert_final_controller_packet_quality(packet, text)
 
 
+def test_answer_obligation_map_extracts_expected_shapes():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "请判断一个系统：\n"
+        "1. 最该优先工程化的 Top 3 gate；\n"
+        "2. 哪些风险最容易被低估；\n"
+        "3. 什么情况下应该暂停；\n"
+        "4. 应该如何设计 walk-forward / out-of-sample 验证。"
+    )
+
+    obligation_map = executors._answer_obligation_map(query)
+
+    assert [item["obligation_id"] for item in obligation_map] == ["Q1", "Q2", "Q3", "Q4"]
+    assert [item["expected_answer_shape"] for item in obligation_map] == [
+        "top_k",
+        "negative_examples",
+        "trigger_conditions",
+        "validation_or_monitoring",
+    ]
+    assert all(item["required_domain_units"] for item in obligation_map)
+
+
+def test_final_blocks_generic_template_bad():
+    query = (
+        "一个家庭计划长期教育决策，请判断：\n"
+        "1. 最应该优先处理的 Top 3 方向；\n"
+        "2. 哪些风险最容易被低估；\n"
+        "3. 什么情况下应该调整路线。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 最应该优先处理的 Top 3 方向",
+            "1. 持续监控并保持灵活，根据反馈调整。\n2. 综合考虑并动态评估，平衡风险。\n3. 分阶段推进并定期复盘。",
+            "## 2. 哪些风险最容易被低估",
+            "风险都需要关注，应该控制风险，保持灵活，根据反馈调整。",
+            "## 3. 什么情况下应该调整路线",
+            "如果情况变化，就适时优化，动态评估，持续监控。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：需要平衡。证据缺口：需要继续观察。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "template_like_final")
+
+
+def test_final_blocks_missing_ranked_topn_bad():
+    query = "请判断一个工程系统：\n1. 最该优先工程化的 Top 3 gate；\n2. 给出下一步路线。"
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 最该优先工程化的 Top 3 gate",
+            "应该加强验证、控制风险，并分阶段工程化，但这里没有明确第一、第二、第三排序。",
+            "## 2. 给出下一步路线",
+            "先验证，再复盘，持续改进。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：执行条件不同。证据缺口：缺少真实数据。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "top_k_item_count")
+
+
+def test_final_blocks_missing_negative_examples_bad():
+    query = "请判断一个增长方案：\n1. 哪些增长动作是虚荣指标；\n2. 什么情况下应该暂停。"
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 哪些增长动作是虚荣指标",
+            "增长动作要综合考虑，不要只看表面数字，应持续监控并保持灵活。",
+            "## 2. 什么情况下应该暂停",
+            "如果反馈不好，就暂停并复盘。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：增长环境不同。证据缺口：缺少数据。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "missing_negative_examples")
+
+
+def test_final_blocks_missing_trigger_conditions_bad():
+    query = "请判断一个路线方案：\n1. 什么情况下应该缩短路线；\n2. 哪些信息必须临近出发再核验。"
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 什么情况下应该缩短路线",
+            "保持灵活，根据反馈调整，安全第一，合理安排。",
+            "## 2. 哪些信息必须临近出发再核验",
+            "需要核验相关信息，持续监控并动态评估。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：情况不同。证据缺口：缺少实时信息。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "missing_trigger_conditions")
+
+
+def test_final_allows_specific_conditional_answer_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "请判断一个本地 AI agent 执行器架构：\n"
+        "1. 推荐 Top 3 架构选择；\n"
+        "2. 哪些风险最容易被低估；\n"
+        "3. 如何设计 fallback 和 resume；\n"
+        "4. 哪些判断只是合理推断。"
+    )
+    text = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 推荐 Top 3 架构选择",
+            "1. [合理推断] 官方 API + GPT Bridge 双路径：先保障高能力任务和人工可审计恢复。触发条件是关键任务需要高可靠输出；反证信号是成本或认证故障频繁。",
+            "2. [合理推断] 本地 70B/72B 执行低风险草稿、分类和摘要任务：触发条件是任务可回滚且质量可检查；反证信号是上下文或内存 ceiling 阻断。",
+            "3. [前瞻假设] AGY/Gemini fallback 做外部高能力备用：触发条件是主路径不可用且策略允许外部执行；反证信号是认证、延迟或审计日志不完整。",
+            "## 2. 哪些风险最容易被低估",
+            "- 具体负例：把 executor unavailable 当成 prompt failure；把 fallback 成功伪装成主路径成功；忽略原始失败上下文和 resume 记录。",
+            "- 反证信号：StageRecord、日志、fallback reason 和恢复点不能复盘时，应停止交付。",
+            "## 3. 如何设计 fallback 和 resume",
+            "- 验证方法：先分类 load-time resource exhaustion、request-time context failure 和 contract violation，再决定 retry、fallback 或 clear block。",
+            "- 触发条件：只有保存原始 failure context、artifact 和 stage record 后，才允许 resume。",
+            "## 4. 哪些判断只是合理推断",
+            "1. [证据支持] 单点失败需要 fallback 和审计日志。触发条件：主执行器不可用会阻断任务。反证信号：单路径恢复足够可靠。确定性：中。",
+            "2. [合理推断] 本地模型适合低风险任务，高能力模型适合综合判断。触发条件：质量差异可测。反证信号：本地输出无法稳定复核。确定性：中。",
+            "3. [前瞻假设] 未来工具状态会改变排序。触发条件：成本、能力、可用性变化。反证信号：实际故障率不改善。确定性：低到中。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：成本、模型能力和认证状态会改变架构排序。证据缺口：缺少真实失败率、延迟、成本和恢复日志。",
+        ]
+    )
+
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case01_finance_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "我有一个 A 股日线/周线 swing trading 因子系统，当前候选信号包括 trend-following、repair/rebound、hot momentum、volume-price confirmation。请判断：\n"
+        "1. 最该优先工程化的 Top 3 gate；\n2. 哪些信号最容易在回测中虚高；\n3. 应该如何设计 walk-forward / out-of-sample 验证；\n4. 哪些结论是证据支持，哪些只是合理推断，哪些是 speculative；\n5. 给出下一步工程路线，但不要写成投资建议。"
+    )
+    text = executors._final_controller_report_from_packet(_handoff_leakage_fixture_packet(query))
+
+    assert "Top 3" in text and "walk-forward" in text and "out-of-sample" in text
+    assert "虚高" in text and "交易成本" in text
+    assert "不要写成投资建议" in text or "不构成投资建议" in text
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case01_finance_generic_bad():
+    query = (
+        "我有一个 A 股日线/周线 swing trading 因子系统。请判断：\n"
+        "1. 最该优先工程化的 Top 3 gate；\n2. 哪些信号最容易在回测中虚高；\n3. 应该如何设计 walk-forward / out-of-sample 验证。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 最该优先工程化的 Top 3 gate",
+            "1. 加强风控。2. 回测验证。3. 分阶段工程化。",
+            "## 2. 哪些信号最容易在回测中虚高",
+            "需要注意回测虚高，保持谨慎并持续监控。",
+            "## 3. 应该如何设计 walk-forward / out-of-sample 验证",
+            "应该做好验证，根据反馈调整。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：很多。证据缺口：很多。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "missing_negative_examples")
+
+
+def test_case02_geopolitics_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "未来 10 年，如果北极航道商业化程度上升，一个依赖中欧海运的制造企业是否应该把北极航道纳入战略备选？"
+        "请从法律主权争议、保险、港口与救援能力、地缘风险、季节性、成本不确定性角度判断：\n"
+        "1. 最可能被高估的机会；\n2. 最可能被低估的风险；\n3. 哪些前提一旦变化会改变结论；\n4. 需要监控哪些指标；\n5. 不要把长期情景推演写成确定预测。"
+    )
+    text = executors._final_controller_report_from_packet(_handoff_leakage_fixture_packet(query))
+
+    for term in ("法律主权争议", "保险", "港口与救援能力", "地缘风险", "季节性", "成本不确定性", "监控"):
+        assert term in text
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case02_geopolitics_generic_bad():
+    query = (
+        "未来 10 年，如果北极航道商业化程度上升，一个依赖中欧海运的制造企业是否应该把北极航道纳入战略备选？请判断：\n"
+        "1. 最可能被高估的机会；\n2. 最可能被低估的风险；\n3. 哪些前提一旦变化会改变结论；\n4. 需要监控哪些指标。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 最可能被高估的机会",
+            "保持关注，分散风险，动态评估。",
+            "## 2. 最可能被低估的风险",
+            "需要综合考虑各种风险，保持观察。",
+            "## 3. 哪些前提一旦变化会改变结论",
+            "如果情况变化，就调整结论。",
+            "## 4. 需要监控哪些指标",
+            "监控相关指标，持续复盘。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：很多。证据缺口：很多。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "template_like_final")
+
+
+def test_case05_travel_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。目标不是做每日行程，而是判断路线设计原则：自然景观、驾驶强度、亲子体验、老人舒适度、住宿稳定性、天气和安全冗余之间如何排序。请给出：\n"
+        "1. 路线设计优先级；\n2. 最容易犯的 5 个规划错误；\n3. 哪些信息必须临近出发再核验；\n4. 什么情况下应该缩短路线；\n5. 不要编造当前路况、营业时间或政策。"
+    )
+    text = executors._final_controller_report_from_packet(_handoff_leakage_fixture_packet(query))
+
+    for term in ("自然景观", "驾驶强度", "亲子体验", "老人舒适度", "住宿稳定性", "天气和安全冗余"):
+        assert term in text
+    assert "临近" in text and "缩短" in text and "不要编造" in text
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case05_travel_generic_bad():
+    query = (
+        "一个家庭计划北疆自驾，请给出：\n1. 路线设计优先级；\n2. 最容易犯的 5 个规划错误；\n3. 什么情况下应该缩短路线。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. 路线设计优先级",
+            "安全第一，劳逸结合，提前规划。",
+            "## 2. 最容易犯的 5 个规划错误",
+            "1. 安排太满。2. 没准备。3. 太累。4. 信息不全。5. 缺少备选。",
+            "## 3. 什么情况下应该缩短路线",
+            "如果体验不好，就调整。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：不同家庭不同。证据缺口：实时信息。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "missing_trigger_conditions")
+
+
+def test_case06_education_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。家长想知道应该把 AI 用在讲解、练习生成、错题复盘、阅读拓展还是写作辅助。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径；\n3. 阅读、数学、写作、AI 工具的优先级；\n4. 哪些判断是教育研究支持，哪些只是合理推断；\n5. 给出家长可执行原则，但不要写成医疗或心理诊断。"
+    )
+    text = executors._final_controller_report_from_packet(_handoff_leakage_fixture_packet(query))
+
+    for term in ("AI tutor", "讲解", "练习生成", "错题复盘", "阅读", "数学", "写作", "家长", "医疗或心理诊断"):
+        assert term in text
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case06_education_generic_bad():
+    query = (
+        "一个 10 岁孩子未来会大量接触 AI tutor。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径；\n3. 给出家长可执行原则。"
+    )
+    bad = "\n".join(
+        [
+            "# 最终答案",
+            "## 1. AI tutor 最有价值的 Top 5 使用场景",
+            "1. 因材施教。2. 家长监督。3. 平衡发展。4. 保持兴趣。5. 适度使用。",
+            "## 2. 最危险的 5 个依赖路径",
+            "1. 过度依赖。2. 缺少监督。3. 使用太多。4. 不够平衡。5. 缺少复盘。",
+            "## 3. 给出家长可执行原则",
+            "家长要监督，因材施教，保持平衡。",
+            "## 证据强度、争议点、证据缺口",
+            "证据强度：中。争议点：孩子不同。证据缺口：长期数据。",
+        ]
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "template_like_final")
+
+
 def test_case01_finance_final_clean_good():
     import tools.task_engine_executors as executors
 

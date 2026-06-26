@@ -9656,6 +9656,9 @@ def _enumerated_user_answer_sections(
 
 def _answer_lines_for_user_question(query: str, body: str, convergence_note: str, calibration_note: str) -> list[str]:
     combined = f"{query}\n{body}\n{convergence_note}\n{calibration_note}"
+    specific = _specific_answer_lines_for_obligation(query, body, combined)
+    if specific:
+        return specific
     if _top_k_request_count(body):
         return _top_k_answer_lines(query, body, combined)
     if _query_requests_ranking(body):
@@ -9674,13 +9677,149 @@ def _answer_lines_for_user_question(query: str, body: str, convergence_note: str
         f"[合理推断] 围绕{focus}，应按证据强度、执行约束和反证信号分层回答。触发条件：这些关键对象和约束在当前材料中成立。中间机制：先用证据边界限定事实底座，再把可逆行动、监控指标和反证信号绑定。失效条件 / 反证信号：如果{focus}相关前提、执行条件或外部约束不成立，应下调结论。确定性：中。决策含义：先选择低风险、可观察、可复盘的路径。"
     ]
 
+def _answer_obligation_map(query: str) -> list[dict[str, Any]]:
+    obligations: list[dict[str, Any]] = []
+    for index, body in _enumerated_user_questions(query):
+        obligations.append(
+            {
+                "obligation_id": f"Q{index}",
+                "user_asked_for": body,
+                "expected_answer_shape": _obligation_expected_shape(body),
+                "required_domain_units": _obligation_required_domain_units(query, body),
+                "confidence_boundary": _obligation_confidence_boundary(query, body),
+            }
+        )
+    return obligations
+
+
+def _obligation_expected_shape(body: str) -> str:
+    value = body or ""
+    lowered = value.lower()
+    if _top_k_request_count(value):
+        return "top_k"
+    if _query_requests_ranking(value):
+        return "ranking"
+    if _query_requests_evidence_tiers(value):
+        return "claim_evidence_tiers"
+    if any(term in value for term in ("错误", "风险", "虚高", "虚荣", "低估", "高估", "危险", "依赖路径", "陷阱")):
+        return "negative_examples"
+    if any(term in value for term in ("什么时候", "什么情况下", "哪些前提", "一旦变化", "暂停", "缩短", "改变结论", "停止")):
+        return "trigger_conditions"
+    if any(term in lowered for term in ("walk-forward", "out-of-sample", "oos", "pmf")) or any(term in value for term in ("验证", "核验", "监控指标", "监控哪些指标")):
+        return "validation_or_monitoring"
+    if any(term in value for term in ("计划", "路线", "家长", "可执行", "原则", "不要")):
+        return "action_boundary"
+    return "specific_judgment"
+
+
+def _obligation_confidence_boundary(query: str, body: str) -> str:
+    value = f"{query}\n{body}"
+    if _query_requests_evidence_tiers(value):
+        return "必须把证据支持、合理推断和前瞻假设分开，不把薄证据写成高置信事实。"
+    if any(term in value for term in ("未来", "10 年", "长期", "speculative", "情景")):
+        return "长期或前瞻判断只能作为条件性假设，并绑定反证信号。"
+    if negative := _negative_constraint_excerpt(value):
+        return negative
+    return "保持条件性判断，给出触发条件、反证信号和执行边界。"
+
+
+def _obligation_required_domain_units(query: str, body: str) -> list[str]:
+    terms: list[str] = []
+    terms.extend(_delimited_domain_units(query))
+    terms.extend(_domain_focus_terms_from_query(query))
+    terms.extend(_question_keywords(body))
+    # For question-local option lists such as "阅读、数学、写作、AI 工具的优先级".
+    terms.extend(_delimited_domain_units(body))
+    stop = _anchor_stop_terms() | {"Top 3", "Top 5", "Top", "gate", "验证", "计划", "路线", "原则", "指标"}
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw in terms:
+        term = " ".join((raw or "").strip(" ：:，,。；;、/()（）").split())
+        if len(term) < 2 or term in stop:
+            continue
+        if len(term) > 42:
+            # Keep long user phrases only when they carry a compact concrete object.
+            compact = re.sub(r"^(一个|一位|目标不是|而是|如果|计划做)", "", term)
+            if len(compact) > 42:
+                continue
+            term = compact
+        key = re.sub(r"\s+", "", term).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(term)
+    return deduped[:12]
+
+
+def _delimited_domain_units(text: str) -> list[str]:
+    value = text or ""
+    spans: list[str] = []
+    marker_patterns = (
+        r"(?:候选信号包括|包括|纠结|用在)([^。；;\n]{4,180})",
+        r"路线设计原则[:：]([^。；;\n]{4,180}?)(?:之间|如何|。|$)",
+        r"从([^。；;\n]{4,180}?)(?:角度|方面|维度)",
+        r"([A-Za-z0-9 /+\-]+、[A-Za-z0-9 /+\-、]+)",
+        r"((?:阅读|数学|写作|AI 工具|AI tutor|讲解|练习生成|错题复盘|阅读拓展|写作辅助)[^。；;\n]{0,80})",
+    )
+    for pattern in marker_patterns:
+        for match in re.findall(pattern, value, flags=re.I):
+            spans.append(match if isinstance(match, str) else " ".join(match))
+    units: list[str] = []
+    for span in spans:
+        cleaned_span = re.sub(r"(当前|目标|团队|家长).*?$", "", span).strip()
+        for token in re.split(r"[、/,，]|和|以及|还是|与|及|;|；", cleaned_span):
+            unit = token.strip(" ：:，,。；;、/()（）")
+            unit = re.sub(r"^(当前|候选|信号|包括|用在|纠结)\s*", "", unit)
+            if 2 <= len(unit) <= 34 and unit not in _anchor_stop_terms():
+                units.append(unit)
+    return list(dict.fromkeys(units))[:12]
+
+
+def _specific_answer_lines_for_obligation(query: str, body: str, combined: str) -> list[str]:
+    shape = _obligation_expected_shape(body)
+    if shape == "top_k":
+        return _top_k_answer_lines(query, body, combined)
+    if shape == "ranking":
+        return _ranking_answer_lines(query, body, combined)
+    if shape == "negative_examples":
+        return _negative_example_answer_lines(query, body)
+    if shape == "trigger_conditions":
+        return _trigger_condition_answer_lines(query, body)
+    if shape == "validation_or_monitoring":
+        return _validation_or_monitoring_answer_lines(query, body)
+    if shape == "claim_evidence_tiers":
+        return _claim_level_evidence_lines(query, combined)
+    if shape == "action_boundary":
+        return _action_boundary_answer_lines(query, body, combined)
+    return []
+
+
 def _top_k_answer_lines(query: str, body: str, combined: str) -> list[str]:
     count = _top_k_request_count(body) or 5
-    focus_terms = list(dict.fromkeys(_question_keywords(body)[:3] + _domain_focus_terms_from_query(query)[:4]))
+    focus_terms = list(dict.fromkeys(_obligation_required_domain_units(query, body)[:6] + _domain_focus_terms_from_query(query)[:4]))
     focus = "、".join(focus_terms) if focus_terms else "该决策对象"
     is_opportunity = any(term in body for term in ("优势", "机会", "被高估", "benefit", "advantage", "opportunity"))
     is_risk = any(term in body for term in ("陷阱", "风险", "错误", "依赖", "被低估", "trap", "risk"))
-    if is_opportunity and not is_risk:
+    if "gate" in body.lower():
+        bases = [
+            "适用环境 / 样本外稳定性 gate",
+            "确认、成交约束和可交易性 gate",
+            "回撤、暴露和停止条件 gate",
+            "候选信号去拥挤 gate",
+            "参数冻结和复盘 gate",
+        ]
+        tier = "[合理推断]"
+    elif any(term in body for term in ("使用场景", "用途")):
+        units = _obligation_required_domain_units(query, body)
+        bases = [f"{unit}的受控使用" for unit in units[:count]] or [
+            "讲解后的自述验证",
+            "练习生成后的错因复盘",
+            "错题复盘后的相似题迁移",
+            "阅读拓展后的事实核查",
+            "写作辅助后的独立改写",
+        ]
+        tier = "[合理推断]"
+    elif is_opportunity and not is_risk:
         bases = [
             "把可能性当成确定收益",
             "忽略进入成本和执行摩擦",
@@ -9711,7 +9850,7 @@ def _top_k_answer_lines(query: str, body: str, combined: str) -> list[str]:
     for index in range(count):
         base = bases[index % len(bases)]
         lines.append(
-            f"{index + 1}. {tier} {base}：针对{focus}，先说明适用前提、证据强度和执行边界；触发条件是相关前提被当前材料支持，失效条件 / 反证信号是事实核验、成本、时点或替代方案与预期相反。"
+            f"{index + 1}. {tier} {base}：针对{focus}，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。"
         )
     return lines
 
@@ -9729,6 +9868,101 @@ def _ranking_answer_lines(query: str, body: str, combined: str) -> list[str]:
     for index, item in enumerate(ordered, start=1):
         reason = _ranking_item_reason(item, combined)
         lines.append(f"{index}. {item}：{reason}")
+    return lines
+
+
+def _negative_example_answer_lines(query: str, body: str) -> list[str]:
+    units = _obligation_required_domain_units(query, body)
+    focus = "、".join(units[:5]) if units else "用户列出的关键对象"
+    if "虚高" in body:
+        return [
+            f"- [不支持/风险] 最容易虚高的是没有经过样本外、真实成本、流动性或执行约束复核的信号；具体要逐项检查{focus}，避免把样本内噪声、幸存者偏差或拥挤交易当成稳定收益。",
+            "- 反证信号：加入 walk-forward / out-of-sample、滑点、换手、容量、停牌和回撤约束后，原排序或收益显著坍塌。",
+        ]
+    if "虚荣" in body:
+        return [
+            f"- [不支持/风险] 虚荣指标是不能转化为真实约束改善的数字；针对{focus}，如果只增加浏览、注册、会议、试用、合作意向或功能请求，却没有成交、留存、扩展、复购或推荐，就不能作为放大投入依据。",
+            "- 反证信号：指标上升但合格机会、付费、重复使用、交付效率或留存没有改善。",
+        ]
+    if "高估" in body:
+        return [
+            f"- [合理推断] 最容易被高估的是把{focus}中的单一有利变化直接外推成整体收益；只有当成本、可靠性、法律/安全边界和替代路径同时成立时，机会才可上调。",
+            "- 反证信号：实际成本、时点、保险/合规、基础设施、救援能力或替代方案表现与乐观假设相反。",
+        ]
+    if "低估" in body or "风险" in body:
+        return [
+            f"- [合理推断] 最容易被低估的是{focus}之间的叠加风险：单项约束看似可控，但一旦同时影响成本、可靠性、恢复路径和责任边界，就会改变主结论。",
+            "- 反证信号：临近核验显示约束变强、恢复成本升高、替代方案更稳，或关键指标无法连续改善。",
+        ]
+    if "依赖" in body:
+        return [
+            f"- [不支持/风险] 危险依赖路径不是使用工具本身，而是把{focus}中的启动、排序、练习、纠错、表达或复盘外包到工具，导致独立能力没有同步增长。",
+            "- 反证信号：没有工具时仍能独立启动、完成、检查、订正和复述原因；如果做不到，应下调工具使用强度。",
+        ]
+    return [
+        f"- [不支持/风险] 具体负例必须落到{focus}，而不是只写一般风险；凡是不能改变真实决策、成本、恢复路径、留存或验证结果的表面改善，都不能作为强依据。",
+        "- 反证信号：把该负例加入复核后，原结论不再成立或需要明显降级。",
+    ]
+
+
+def _trigger_condition_answer_lines(query: str, body: str) -> list[str]:
+    units = _obligation_required_domain_units(query, body)
+    focus = "、".join(units[:6]) if units else "用户列出的关键条件"
+    if "缩短" in body:
+        return [
+            f"- [合理推断] 缩短路线的触发条件必须具体：如果{focus}中的驾驶强度、天气安全、住宿稳定、老人/孩子舒适度或临近核验结果任一项恶化，就减少跨度或放弃远端点。",
+            "- 执行规则：宁可少去一个点，也不要用长距离驾驶、临时住宿和未核验实时信息换取表面完整路线。",
+        ]
+    if "暂停" in body or "停止" in body:
+        return [
+            f"- [合理推断] 暂停条件是{focus}不能改善成交、激活、留存、扩展、交付效率或真实验证结果；此时资源应从新增功能转向销售学习、交付复盘、留存修复和核心假设验证。",
+            "- 反证信号：如果新增功能直接提高付费转化、重复使用或交付效率，才可恢复扩张；否则继续加功能只是扩大不确定性。",
+        ]
+    if "前提" in body or "改变结论" in body or "变化" in body:
+        return [
+            f"- [合理推断] 会改变结论的前提包括：{focus}中任一关键变量从可控变成不可控，或从不确定变成连续改善。",
+            "- 执行规则：把这些前提设成监控项；一旦成本、法律/合规、安全、季节窗口、执行能力或替代方案出现反向变化，就下调结论。",
+        ]
+    return [
+        f"- [合理推断] 触发条件必须绑定{focus}，不能只写“看反馈”。如果关键事实、成本、执行条件、恢复路径或反证信号不成立，应缩小范围、暂停或重做判断。",
+        "- 反证信号：实际数据不能支持原排序，或临近核验发现关键条件变化。",
+    ]
+
+
+def _validation_or_monitoring_answer_lines(query: str, body: str) -> list[str]:
+    units = _obligation_required_domain_units(query, body)
+    focus = "、".join(units[:6]) if units else "关键变量"
+    if any(term in body.lower() for term in ("walk-forward", "out-of-sample", "oos")):
+        return [
+            f"- [证据支持] 验证设计应冻结规则后做 walk-forward / out-of-sample：先在训练窗口确定{focus}的规则，再在后续时间窗口检验收益、回撤、换手、滑点、容量和稳定性。",
+            "- [合理推断] 同时做反事实：去掉单个 gate、加入交易成本、按市场状态拆分，并记录规则变更；如果只有样本内改善，不能工程化放大。",
+        ]
+    if "核验" in body:
+        return [
+            f"- [证据支持] 临近执行前必须核验{focus}中会随时间变化的事实：天气、交通、营业/开放状态、住宿、政策、安全提示、价格和替代路线。",
+            "- [合理推断] 核验结果不是补充信息，而是路线是否缩短、调换或取消的触发条件。",
+        ]
+    if "监控" in body:
+        return [
+            f"- [合理推断] 监控指标应覆盖{focus}，并分成成本、可靠性、法律/合规、安全、季节窗口、替代路径和真实采用信号。",
+            "- [前瞻假设] 如果这些指标连续改善，才上调战略权重；如果只改善单项叙事而没有改善可执行性，应保持低权重备选。",
+        ]
+    return [
+        f"- [合理推断] 验证方法要围绕{focus}设置可观察指标、停止条件和复盘频率；不能只写持续观察。",
+        "- 反证信号：指标无法测量、结果不能改变行动，或验证只重复原假设。",
+    ]
+
+
+def _action_boundary_answer_lines(query: str, body: str, combined: str) -> list[str]:
+    units = _obligation_required_domain_units(query, body)
+    focus = "、".join(units[:6]) if units else "用户目标"
+    lines = [
+        f"- [合理推断] 下一步行动必须围绕{focus}拆成可执行规则：先做低风险验证，再按明确指标扩大、缩小或停止。",
+        "- 执行规则：每一步都要有输入事实、判断标准、复盘时间和停止条件；没有这些条件时，不把建议升级成强结论。",
+    ]
+    negative = _negative_constraint_excerpt(combined)
+    if negative:
+        lines.append(f"- 边界：{negative}。因此最终答案只能提供决策原则、核验清单或教育/工程使用边界，不替代被用户排除的建议类型。")
     return lines
 
 def _ranking_item_priority(item: str) -> int:
@@ -9828,6 +10062,7 @@ def _final_user_facing_quality_failures(packet: dict[str, Any], text: str) -> li
     enumerated = _enumerated_user_questions(query)
     if len(enumerated) >= 2:
         failures.extend(_enumerated_answer_substance_failures(enumerated, value))
+        failures.extend(_answer_obligation_specificity_failures(query, value, enumerated))
 
     failures.extend(_top_k_substance_failures(query, value, enumerated))
     failures.extend(_ranking_substance_failures(query, value, enumerated))
@@ -10248,6 +10483,176 @@ def _enumerated_answer_substance_failures(enumerated: list[tuple[int, str]], tex
             if len(hits) < min(2, len(keywords)):
                 failures.append(f"off_topic_enumerated_answer:{index}")
     return failures
+
+
+def _answer_obligation_specificity_failures(query: str, text: str, enumerated: list[tuple[int, str]]) -> list[str]:
+    sections = _markdown_numeric_sections(text)
+    failures: list[str] = []
+    if _template_like_final(text, query):
+        failures.append("template_like_final")
+    obligation_map = {int(str(item["obligation_id"]).lstrip("Q")): item for item in _answer_obligation_map(query)}
+    for index, body in enumerated:
+        section = sections.get(index, "")
+        if not section:
+            continue
+        obligation = obligation_map.get(index, {})
+        shape = str(obligation.get("expected_answer_shape") or _obligation_expected_shape(body))
+        units = [str(unit) for unit in obligation.get("required_domain_units") or _obligation_required_domain_units(query, body)]
+        failures.extend(_obligation_section_specificity_failures(index, shape, body, section, units))
+    return failures
+
+
+def _template_like_final(text: str, query: str) -> bool:
+    value = text or ""
+    filler_hits = sum(value.count(phrase) for phrase in _generic_filler_phrases())
+    if filler_hits < 4:
+        return False
+    query_units = _obligation_required_domain_units(query, query)
+    unit_hits = _domain_unit_hit_count(value, query_units)
+    list_items = len(_list_item_bodies(value))
+    return unit_hits < 4 or list_items < 4
+
+
+def _generic_filler_phrases() -> tuple[str, ...]:
+    return (
+        "持续监控",
+        "保持灵活",
+        "根据反馈调整",
+        "动态评估",
+        "综合考虑",
+        "平衡风险",
+        "合理安排",
+        "安全第一",
+        "提前规划",
+        "因材施教",
+        "家长监督",
+        "加强验证",
+        "控制风险",
+        "关注风险",
+        "分阶段推进",
+        "定期复盘",
+        "适时优化",
+        "多元化方案",
+        "保持观察",
+    )
+
+
+def _obligation_section_specificity_failures(
+    index: int,
+    shape: str,
+    body: str,
+    section: str,
+    units: list[str],
+) -> list[str]:
+    failures: list[str] = []
+    if _template_like_section(section, units):
+        failures.append(f"template_like_final:Q{index}")
+    unit_hits = _domain_unit_hit_count(section, units)
+    if shape in {"top_k", "ranking", "negative_examples", "trigger_conditions", "validation_or_monitoring"} and unit_hits < 1:
+        failures.append(f"missing_domain_specific_units:Q{index}")
+    if shape == "top_k":
+        count = _top_k_request_count(body) or 3
+        if len(_list_item_bodies(section)) < count:
+            failures.append(f"missing_ranked_topn:Q{index}")
+    if shape == "negative_examples" and not _specific_negative_examples_present(section, units):
+        failures.append(f"missing_negative_examples:Q{index}")
+    if shape == "trigger_conditions" and not _specific_trigger_conditions_present(section, units):
+        failures.append(f"missing_trigger_conditions:Q{index}")
+    if shape == "validation_or_monitoring" and not _specific_validation_method_present(section, body):
+        failures.append(f"missing_validation_method:Q{index}")
+    if shape == "claim_evidence_tiers" and not _claim_tiers_tied_to_concrete_units(section, units):
+        failures.append(f"evidence_tiers_not_tied_to_claims:Q{index}")
+    return failures
+
+
+def _template_like_section(section: str, units: list[str]) -> bool:
+    value = section or ""
+    if not value.strip():
+        return True
+    filler_hits = sum(value.count(phrase) for phrase in _generic_filler_phrases())
+    if filler_hits < 2:
+        return False
+    return _domain_unit_hit_count(value, units) == 0 or len(_list_item_bodies(value)) == 0
+
+
+def _domain_unit_hit_count(text: str, units: list[str]) -> int:
+    value = text or ""
+    lowered = value.lower()
+    hits = 0
+    for raw in units:
+        unit = (raw or "").strip()
+        if len(unit) < 2:
+            continue
+        if unit in value or unit.lower() in lowered:
+            hits += 1
+    return hits
+
+
+def _specific_negative_examples_present(section: str, units: list[str]) -> bool:
+    value = section or ""
+    lowered = value.lower()
+    negative_terms = (
+        "负例",
+        "错误",
+        "风险",
+        "虚高",
+        "虚荣",
+        "低估",
+        "高估",
+        "危险",
+        "依赖",
+        "反证",
+        "失效",
+        "回撤",
+        "成本",
+        "留存",
+        "保险",
+        "救援",
+        "天气",
+        "营业",
+        "政策",
+        "diagnostic",
+        "vanity",
+    )
+    return any(term in value or term in lowered for term in negative_terms) and (
+        _domain_unit_hit_count(value, units) >= 1 or len(_list_item_bodies(value)) >= 2
+    )
+
+
+def _specific_trigger_conditions_present(section: str, units: list[str]) -> bool:
+    value = section or ""
+    trigger_terms = ("如果", "当", "一旦", "触发", "条件", "前提", "临近", "直到", "暂停", "停止", "缩短", "下调", "freeze", "until")
+    weak_only = ("看反馈", "保持灵活", "适时调整", "适时优化", "动态评估")
+    has_trigger = any(term in value for term in trigger_terms)
+    if not has_trigger:
+        return False
+    if any(term in value for term in weak_only) and _domain_unit_hit_count(value, units) == 0:
+        return False
+    return _domain_unit_hit_count(value, units) >= 1 or any(term in value for term in ("成本", "留存", "成交", "天气", "路况", "保险", "港口", "救援", "样本外"))
+
+
+def _specific_validation_method_present(section: str, body: str) -> bool:
+    value = section or ""
+    lowered = value.lower()
+    if any(term in (body or "").lower() for term in ("walk-forward", "out-of-sample", "oos")):
+        return any(term in lowered for term in ("walk-forward", "out-of-sample", "oos", "样本外", "滚动")) and any(
+            term in value for term in ("冻结", "窗口", "滑点", "换手", "回撤", "成本", "容量")
+        )
+    if "pmf" in (body or "").lower() or "产品市场匹配" in body:
+        return any(term in value for term in ("付费", "转化", "留存", "重复", "扩展", "推荐", "销售周期", "核心痛点", "交付"))
+    if "监控" in body:
+        return "监控" in value and any(term in value for term in ("指标", "成本", "法律", "保险", "季节", "地缘", "救援", "采用"))
+    if "核验" in body:
+        return "核验" in value and any(term in value for term in ("临近", "天气", "交通", "住宿", "政策", "价格", "开放"))
+    return any(term in lowered for term in ("validation", "verify", "walk-forward", "out-of-sample")) or any(term in value for term in ("验证", "核验", "监控", "复盘"))
+
+
+def _claim_tiers_tied_to_concrete_units(section: str, units: list[str]) -> bool:
+    value = section or ""
+    has_tiers = all(term in value for term in ("证据支持", "合理推断")) and any(term in value for term in ("前瞻假设", "speculative", "不支持/风险"))
+    if not has_tiers:
+        return False
+    return _domain_unit_hit_count(value, units) >= 1 or any(term in value for term in ("触发条件", "反证信号", "确定性", "决策含义"))
 
 
 def _top_k_substance_failures(query: str, text: str, enumerated: list[tuple[int, str]]) -> list[str]:
