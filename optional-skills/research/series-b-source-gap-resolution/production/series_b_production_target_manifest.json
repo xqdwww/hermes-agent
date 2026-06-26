@@ -1,5 +1,5 @@
 {
-  "adv_trap_059_status": "deferred_not_counted",
+  "adv_trap_059_status": "policy_gated_not_counted",
   "caveat_cases": [
     "obj_art_003",
     "obj_art_007",
@@ -10,11 +10,17 @@
     "hist_arch_020",
     "rel_space_031",
     "nat_eco_042",
-    "cross_route_053"
+    "cross_route_053",
+    "nat_eco_046",
+    "nat_eco_043",
+    "obj_art_005",
+    "obj_art_011",
+    "hist_arch_025",
+    "rel_space_036"
   ],
   "caveat_details": {
-    "adv_trap_059": "deferred; not counted",
-    "controlled_evidence_count": 17,
+    "adv_trap_059": "policy-gated; not counted; must not be treated as resolved",
+    "controlled_evidence_count": 23,
     "cross_route_053": [
       "approved with caveat",
       "Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence",
@@ -23,11 +29,40 @@
       "LP locator is not counted as formal axis evidence",
       "nature/geography/karst-hydrology source backing remains explicit"
     ],
-    "remaining_failed_or_deferred_cases": "remaining 16 cases are excluded from the 44/60 official baseline",
-    "score_classification": "44/60 is a human-reviewed official baseline, not a raw candidate-only score."
+    "remaining_failed_or_deferred_cases": "remaining 10 cases are excluded from the 50/60 official baseline",
+    "score_classification": "50/60 is a human-reviewed official baseline, not a raw candidate-only score.",
+    "newly_countable_case_caveats": {
+      "nat_eco_046": [
+        "Travel guide pages must not overrule geography/ecology sources.",
+        "Baidu redirects are rejected.",
+        "Natural process / regional relation / ecology grounding remains source-scoped."
+      ],
+      "nat_eco_043": [
+        "PDF extraction remains validated/caveated.",
+        "ScienceDirect metadata-only page is not counted unless body/extract exists.",
+        "Geomorphology / hydrology process grounding remains source-scoped."
+      ],
+      "obj_art_005": [
+        "Architecture pages provide concept evidence, not listicle-only framing.",
+        "Blocked page is rejected."
+      ],
+      "obj_art_011": [
+        "Architectural order / column / capital / classical context remains source-backed.",
+        "Generic architecture-course filler is not overcounted."
+      ],
+      "hist_arch_025": [
+        "Historical/archaeological frontier-system evidence remains source-backed.",
+        "Non-institutional pages are supplementary unless source-backed body is strong."
+      ],
+      "rel_space_036": [
+        "UNESCO / Beijing Gov / Wikipedia provide source-scoped religious-spatial grounding.",
+        "TravelChinaGuide remains context/locator unless conceptual content is source-backed.",
+        "Empty page is rejected."
+      ]
+    }
   },
   "classification": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER",
-  "controlled_evidence_count": 17,
+  "controlled_evidence_count": 23,
   "description": "Explicit, non-default Series B production target layer for future separately authorized integration planning and smoke testing.",
   "explicit_production_integration_enabled": true,
   "full_series_b_required_before_release": true,
@@ -43,11 +78,12 @@
   "integration_manifest_file": "series_b_production_integration.json",
   "layer_id": "series_b_production_target_v1",
   "newly_countable_cases": [
-    "obj_art_002",
-    "hist_arch_020",
-    "rel_space_031",
-    "nat_eco_042",
-    "cross_route_053"
+    "nat_eco_046",
+    "nat_eco_043",
+    "obj_art_005",
+    "obj_art_011",
+    "hist_arch_025",
+    "rel_space_036"
   ],
   "no_default_integration_attestation": {
     "explicit_production_integration_performed": true,
@@ -59,34 +95,28 @@
     "tag_created": false
   },
   "official_baseline_classification": "human_reviewed_official_baseline_not_raw_candidate_only",
-  "official_baseline_commit": "bb4a928ec1d63eec3ad9b0247c15fb49d44d39c9",
+  "official_baseline_commit": "2b8c10a44936f176e0503f8bab03f02a1166096a",
   "official_baseline_file": "../official/series_b_official_baseline_current.json",
   "official_baseline_ledger_file": "../official/series_b_official_baseline_ledger.json",
-  "official_baseline_ref": "44/60",
-  "official_baseline_tag": "travel-series-b-official-44of60-human-reviewed-2026-06-25",
+  "official_baseline_ref": "50/60",
+  "official_baseline_tag": "travel-series-b-official-50of60-human-reviewed-2026-06-25",
   "official_baseline_write_enabled": false,
   "official_dataset_file": "../official/series_b_official_60case_dataset.json",
-  "previous_official_baseline_ref": "39/60",
+  "previous_official_baseline_ref": "44/60",
   "production_default_enabled": false,
   "production_default_scope": "explicit_series_b_target_only",
   "production_release_ready": false,
   "push_tag_required_separate_authorization": true,
   "release_requires_separate_authorization": true,
   "remaining_failed_or_deferred_cases": [
-    "obj_art_005",
     "obj_art_008",
-    "obj_art_011",
     "obj_art_012",
     "hist_arch_022",
-    "hist_arch_025",
     "rel_space_028",
     "rel_space_033",
     "rel_space_034",
     "rel_space_035",
-    "rel_space_036",
-    "nat_eco_043",
     "nat_eco_045",
-    "nat_eco_046",
     "cross_route_055",
     "adv_trap_059"
   ],

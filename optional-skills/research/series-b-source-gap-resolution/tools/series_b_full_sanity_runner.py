@@ -23,20 +23,20 @@ SOURCE_STATE_PATH = OFFICIAL_ROOT / "series_b_source_state_manifest.json"
 SCORING_AUDIT_PATH = SERIES_B_ROOT / "tools/series_b_official_scoring_audit.py"
 INTEGRATION_PATH = PRODUCTION_ROOT / "series_b_production_integration.json"
 CONTROLLED_CASE_LIST_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/controlled_evidence_case_list_17cases.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-controlled-evidence-rollup/outputs/controlled_evidence_case_list_23cases.json"
 )
 CONTROLLED_ROLLUP_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_controlled_evidence_rollup.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-controlled-evidence-rollup/outputs/series_b_23case_controlled_evidence_rollup.json"
 )
 FINAL_CASE_MATRIX_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_artifact_index.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-controlled-evidence-rollup/outputs/series_b_23case_artifact_index.json"
 )
 FINAL_SEAL_AUDIT_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_controlled_evidence_rollup_report.md"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-controlled-evidence-rollup/outputs/series_b_23case_controlled_evidence_rollup_report.md"
 )
-EXPECTED_BASELINE = "44/60"
-EXPECTED_PREVIOUS_BASELINE = "39/60"
-EXPECTED_CONTROLLED_EVIDENCE_COUNT = 17
+EXPECTED_BASELINE = "50/60"
+EXPECTED_PREVIOUS_BASELINE = "44/60"
+EXPECTED_CONTROLLED_EVIDENCE_COUNT = 23
 REQUIRED_CAVEAT_CASES = [
     "obj_art_003",
     "obj_art_007",
@@ -48,6 +48,12 @@ REQUIRED_CAVEAT_CASES = [
     "rel_space_031",
     "nat_eco_042",
     "cross_route_053",
+    "nat_eco_046",
+    "nat_eco_043",
+    "obj_art_005",
+    "obj_art_011",
+    "hist_arch_025",
+    "rel_space_036",
 ]
 RESULT_PASS = "FULL_NON_DESTRUCTIVE_SANITY_PASS"
 RESULT_BLOCKED = "FULL_NON_DESTRUCTIVE_SANITY_BLOCKED"
@@ -165,8 +171,9 @@ def check_baseline() -> dict[str, Any]:
         raise FullSanityError("FULL_SANITY_BASELINE_CURRENT_INVALID", f"official baseline current must be {EXPECTED_BASELINE}")
     if current.get("previous_official_score") != EXPECTED_PREVIOUS_BASELINE and current.get("prior_score") != EXPECTED_PREVIOUS_BASELINE:
         raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", f"previous {EXPECTED_PREVIOUS_BASELINE} baseline trace must be retained")
-    if ledger.get("prior_score") != EXPECTED_PREVIOUS_BASELINE or "31/60" not in json.dumps(ledger, sort_keys=True):
-        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", "ledger must retain 31/60 and 39/60 baseline traces")
+    ledger_text = json.dumps(ledger, sort_keys=True)
+    if ledger.get("prior_score") != EXPECTED_PREVIOUS_BASELINE or "31/60" not in ledger_text or "39/60" not in ledger_text:
+        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", "ledger must retain 31/60, 39/60, and 44/60 baseline traces")
     if current.get("controlled_evidence_count") != EXPECTED_CONTROLLED_EVIDENCE_COUNT:
         raise FullSanityError("FULL_SANITY_CONTROLLED_EVIDENCE_COUNT_INVALID", f"baseline must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases")
     if current.get("production_default_integrated") is not False:

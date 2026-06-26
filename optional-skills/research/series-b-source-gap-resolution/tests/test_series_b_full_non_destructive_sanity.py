@@ -69,7 +69,7 @@ def test_full_non_destructive_sanity_passes_with_all_checks() -> None:
         )
         assert status == 0, payload
         assert payload["result_enum"] == "FULL_NON_DESTRUCTIVE_SANITY_PASS"
-        assert payload["official_baseline_current"] == "44/60"
+        assert payload["official_baseline_current"] == "50/60"
         assert payload["dataset_60case_check"] == "PASS"
         assert payload["trace_12case_check"] == "PASS"
         assert payload["one_case_dry_run"] == "PASS"
