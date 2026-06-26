@@ -101,6 +101,24 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_sections=("spatial_structure", "historical_layers", "regional_relations", "theme_tracks"),
         required_axes=("archaeology_book", "history_book", "context_sources", "wiki_or_zim"),
     ),
+
+    "obj_art_002": CaseConfig(
+        case_id="obj_art_002",
+        expected_formal_ready_decision="OBJ_ART_002_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=(
+            "Jian ware",
+            "Tenmoku",
+            "glaze",
+            "iron",
+            "firing",
+            "oil_spot",
+            "crystallization",
+            "Chinese_ceramics",
+        ),
+        required_sections=("spatial_structure", "historical_layers", "materials_mechanics", "theme_tracks"),
+        required_axes=("context_sources", "wiki_or_zim"),
+    ),
 }
 
 
