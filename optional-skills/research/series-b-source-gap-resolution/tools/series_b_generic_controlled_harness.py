@@ -241,6 +241,23 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=("art_architecture_book", "wiki_or_zim"),
     ),
 
+
+    "obj_art_011": CaseConfig(
+        case_id="obj_art_011",
+        expected_formal_ready_decision="OBJ_ART_011_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=("Corinthian", "acanthus", "capital", "column", "proportion"),
+        required_sections=(
+            "spatial_structure",
+            "historical_layers",
+            "material_architecture",
+            "regional_relations",
+            "religious_symbolism",
+            "theme_tracks",
+        ),
+        required_axes=("archaeology_book", "art_architecture_book", "wiki_or_zim"),
+    ),
+
 }
 
 
