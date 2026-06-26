@@ -18,9 +18,44 @@ EXPECTED_SCHEMA_VERSION = "series_b_production_target_manifest.v1"
 EXPECTED_CLASSIFICATION = "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
 EXPECTED_INTEGRATION_SCHEMA = "series_b_production_integration.v1"
 EXPECTED_INTEGRATION_CLASSIFICATION = "EXPLICIT_SERIES_B_PRODUCTION_INTEGRATION_PATH"
-EXPECTED_BASELINE = "39/60"
+EXPECTED_BASELINE = "44/60"
+EXPECTED_PREVIOUS_BASELINE = "39/60"
+EXPECTED_CONTROLLED_EVIDENCE_COUNT = 17
+EXPECTED_OFFICIAL_BASELINE_COMMIT = "bb4a928ec1d63eec3ad9b0247c15fb49d44d39c9"
+EXPECTED_OFFICIAL_BASELINE_TAG = "travel-series-b-official-44of60-human-reviewed-2026-06-25"
 EXPECTED_SCOPE = "explicit_series_b_target_only"
-REQUIRED_CAVEAT_CASES = {"obj_art_003", "obj_art_007", "nat_eco_039", "obj_art_010", "hist_arch_024"}
+REQUIRED_CAVEAT_CASES = {
+    "obj_art_003",
+    "obj_art_007",
+    "nat_eco_039",
+    "obj_art_010",
+    "hist_arch_024",
+    "obj_art_002",
+    "hist_arch_020",
+    "rel_space_031",
+    "nat_eco_042",
+    "cross_route_053",
+}
+REQUIRED_NEWLY_COUNTABLE_CASES = {"obj_art_002", "hist_arch_020", "rel_space_031", "nat_eco_042", "cross_route_053"}
+REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES = {
+    "obj_art_005",
+    "obj_art_008",
+    "obj_art_011",
+    "obj_art_012",
+    "hist_arch_022",
+    "hist_arch_025",
+    "rel_space_028",
+    "rel_space_033",
+    "rel_space_034",
+    "rel_space_035",
+    "rel_space_036",
+    "nat_eco_043",
+    "nat_eco_045",
+    "nat_eco_046",
+    "cross_route_055",
+    "adv_trap_059",
+}
+REQUIRED_BASELINE_TRACE_VALUES = {"31/60", EXPECTED_PREVIOUS_BASELINE, EXPECTED_BASELINE}
 
 
 class ProductionTargetLayerError(ValueError):
@@ -97,6 +132,30 @@ def _validate_no_write_policy(payload: dict[str, Any], *, context: str) -> None:
         raise ProductionTargetLayerError(f"{context}_WRITE_TARGET_RISK", "write_targets must be empty")
 
 
+def _validate_current_baseline_metadata(payload: dict[str, Any], *, context: str) -> None:
+    if payload.get("official_baseline_ref") != EXPECTED_BASELINE:
+        raise ProductionTargetLayerError(f"{context}_BASELINE_INVALID", f"metadata must reference {EXPECTED_BASELINE} baseline")
+    if payload.get("previous_official_baseline_ref") != EXPECTED_PREVIOUS_BASELINE:
+        raise ProductionTargetLayerError(f"{context}_PREVIOUS_BASELINE_INVALID", f"metadata must retain previous {EXPECTED_PREVIOUS_BASELINE} baseline")
+    if payload.get("controlled_evidence_count") != EXPECTED_CONTROLLED_EVIDENCE_COUNT:
+        raise ProductionTargetLayerError(
+            f"{context}_CONTROLLED_EVIDENCE_COUNT_INVALID",
+            f"metadata must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases",
+        )
+    if payload.get("official_baseline_commit") != EXPECTED_OFFICIAL_BASELINE_COMMIT:
+        raise ProductionTargetLayerError(f"{context}_BASELINE_COMMIT_INVALID", "metadata must reference the official 44/60 baseline commit")
+    if payload.get("official_baseline_tag") != EXPECTED_OFFICIAL_BASELINE_TAG:
+        raise ProductionTargetLayerError(f"{context}_BASELINE_TAG_INVALID", "metadata must reference the official 44/60 baseline tag")
+    missing_new = sorted(REQUIRED_NEWLY_COUNTABLE_CASES - set(payload.get("newly_countable_cases") or []))
+    if missing_new:
+        raise ProductionTargetLayerError(f"{context}_NEW_CASE_TRACE_MISSING", f"metadata missing newly countable cases: {missing_new}")
+    missing_remaining = sorted(REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES - set(payload.get("remaining_failed_or_deferred_cases") or []))
+    if missing_remaining:
+        raise ProductionTargetLayerError(f"{context}_REMAINING_CASE_TRACE_MISSING", f"metadata missing remaining failed/deferred cases: {missing_remaining}")
+    if payload.get("adv_trap_059_status") != "deferred_not_counted":
+        raise ProductionTargetLayerError(f"{context}_ADV_TRAP_059_STATUS_INVALID", "adv_trap_059 must remain deferred and not counted")
+
+
 def validate_production_integration_manifest(integration_path: str | Path, *, target_manifest_path: str | Path) -> dict[str, Any]:
     path = Path(integration_path).expanduser().resolve(strict=False)
     if not path.exists() or not path.is_file():
@@ -119,8 +178,7 @@ def validate_production_integration_manifest(integration_path: str | Path, *, ta
     _assert_false(payload, "tag_enabled", "PRODUCTION_INTEGRATION_TAG_RISK")
     _assert_false(payload, "release_enabled", "PRODUCTION_INTEGRATION_RELEASE_RISK")
     _validate_no_write_policy(payload, context="PRODUCTION_INTEGRATION")
-    if payload.get("official_baseline_ref") != EXPECTED_BASELINE:
-        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_BASELINE_INVALID", "integration must reference 39/60 baseline")
+    _validate_current_baseline_metadata(payload, context="PRODUCTION_INTEGRATION")
     caveats = set(payload.get("caveat_cases") or [])
     if not REQUIRED_CAVEAT_CASES.issubset(caveats):
         raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_CAVEAT_MISSING", "integration manifest missing required caveat cases")
@@ -159,8 +217,7 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
         raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_ID_INVALID", "unexpected layer_id")
     if manifest.get("classification") != EXPECTED_CLASSIFICATION:
         raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_CLASSIFICATION_INVALID", "unexpected classification")
-    if manifest.get("official_baseline_ref") != EXPECTED_BASELINE:
-        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_BASELINE_INVALID", "official baseline ref must be 39/60")
+    _validate_current_baseline_metadata(manifest, context="PRODUCTION_TARGET_LAYER")
 
     _assert_false(manifest, "production_default_enabled", "PRODUCTION_TARGET_LAYER_DEFAULT_RISK")
     _assert_false(manifest, "global_default_enabled", "PRODUCTION_TARGET_LAYER_GLOBAL_DEFAULT_RISK")
@@ -199,19 +256,37 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
         resolved[key] = str(path)
 
     baseline = load_json(resolved["official_baseline_file"])
-    if baseline.get("official_score") != "39/60" or baseline.get("case_count") != 60:
-        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_BASELINE_INVALID", "official baseline current must be 39/60 over 60 cases")
-    if baseline.get("prior_score") != "31/60":
-        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_PRIOR_TRACE_MISSING", "official baseline current must retain prior 31/60 trace")
+    if baseline.get("official_score") != EXPECTED_BASELINE or baseline.get("case_count") != 60:
+        raise ProductionTargetLayerError(
+            "PRODUCTION_TARGET_LAYER_BASELINE_INVALID",
+            f"official baseline current must be {EXPECTED_BASELINE} over 60 cases",
+        )
+    if baseline.get("previous_official_score") != EXPECTED_PREVIOUS_BASELINE and baseline.get("prior_score") != EXPECTED_PREVIOUS_BASELINE:
+        raise ProductionTargetLayerError(
+            "PRODUCTION_TARGET_LAYER_PRIOR_TRACE_MISSING",
+            f"official baseline current must retain previous {EXPECTED_PREVIOUS_BASELINE} trace",
+        )
+    if baseline.get("controlled_evidence_count") != EXPECTED_CONTROLLED_EVIDENCE_COUNT:
+        raise ProductionTargetLayerError(
+            "PRODUCTION_TARGET_LAYER_CONTROLLED_EVIDENCE_COUNT_INVALID",
+            f"official baseline must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases",
+        )
+    missing_new = sorted(REQUIRED_NEWLY_COUNTABLE_CASES - set(baseline.get("newly_countable_cases") or []))
+    if missing_new:
+        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_NEW_CASE_TRACE_MISSING", f"missing newly countable cases: {missing_new}")
+    missing_remaining = sorted(REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES - set(baseline.get("remaining_failed_or_deferred_cases") or []))
+    if missing_remaining:
+        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_REMAINING_CASE_TRACE_MISSING", f"missing remaining failed/deferred cases: {missing_remaining}")
     if baseline.get("production_default_integrated") is not False:
         raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_DEFAULT_RISK", "baseline must not be marked production-default integrated")
     if not REQUIRED_CAVEAT_CASES.issubset(set(baseline.get("caveat_cases") or [])):
         raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_CAVEAT_MISSING", "baseline current missing required caveat cases")
 
     ledger = load_json(resolved["official_baseline_ledger_file"])
-    ledger_entries = ledger.get("ledger_entries") or []
-    if "31/60" not in json.dumps(ledger_entries) and ledger.get("prior_score") != "31/60":
-        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_PRIOR_TRACE_MISSING", "ledger must retain prior 31/60 trace")
+    ledger_text = json.dumps(ledger, sort_keys=True)
+    missing_trace = sorted(value for value in REQUIRED_BASELINE_TRACE_VALUES if value not in ledger_text)
+    if missing_trace:
+        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_PRIOR_TRACE_MISSING", f"ledger must retain baseline trace values: {missing_trace}")
 
     source_state = load_json(resolved["source_state_manifest_file"])
     if source_state.get("official_write_enabled") is not False or source_state.get("production_default_enabled") is not False:
@@ -230,6 +305,10 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
         "manifest_sha256": sha256_file(target),
         "layer_id": manifest["layer_id"],
         "official_baseline_ref": manifest["official_baseline_ref"],
+        "previous_official_baseline_ref": manifest.get("previous_official_baseline_ref"),
+        "controlled_evidence_count": manifest.get("controlled_evidence_count"),
+        "official_baseline_commit": manifest.get("official_baseline_commit"),
+        "official_baseline_tag": manifest.get("official_baseline_tag"),
         "production_default_enabled": False,
         "global_default_enabled": False,
         "requires_explicit_integration": True,

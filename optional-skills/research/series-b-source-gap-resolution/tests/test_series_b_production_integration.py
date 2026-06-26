@@ -30,10 +30,12 @@ def test_explicit_integration_artifact_is_series_b_scoped_only() -> None:
 def test_explicit_integration_does_not_modify_official_baseline_artifacts() -> None:
     baseline = json.loads((OFFICIAL / "series_b_official_baseline_current.json").read_text(encoding="utf-8"))
     ledger = json.loads((OFFICIAL / "series_b_official_baseline_ledger.json").read_text(encoding="utf-8"))
-    assert baseline["official_score"] == "39/60"
-    assert baseline["prior_score"] == "31/60"
+    assert baseline["official_score"] == "44/60"
+    assert baseline["prior_score"] == "39/60"
     assert baseline["production_default_integrated"] is False
     assert "31/60" in json.dumps(ledger)
+    assert "39/60" in json.dumps(ledger)
+    assert baseline["controlled_evidence_count"] == 17
 
 
 def test_loader_exposes_integrated_read_only_config() -> None:

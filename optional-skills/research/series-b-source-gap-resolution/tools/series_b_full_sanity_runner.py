@@ -23,18 +23,32 @@ SOURCE_STATE_PATH = OFFICIAL_ROOT / "series_b_source_state_manifest.json"
 SCORING_AUDIT_PATH = SERIES_B_ROOT / "tools/series_b_official_scoring_audit.py"
 INTEGRATION_PATH = PRODUCTION_ROOT / "series_b_production_integration.json"
 CONTROLLED_CASE_LIST_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-12case-controlled-evidence-rollup/outputs/controlled_evidence_case_list_12cases.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/controlled_evidence_case_list_17cases.json"
 )
 CONTROLLED_ROLLUP_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-12case-controlled-evidence-rollup/outputs/series_b_12case_controlled_evidence_rollup.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_controlled_evidence_rollup.json"
 )
 FINAL_CASE_MATRIX_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-12case-final-seal-audit/outputs/series_b_12case_final_case_matrix.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_artifact_index.json"
 )
 FINAL_SEAL_AUDIT_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-12case-final-seal-audit/outputs/series_b_12case_final_seal_audit.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_controlled_evidence_rollup_report.md"
 )
-REQUIRED_CAVEAT_CASES = ["obj_art_003", "obj_art_007", "nat_eco_039", "obj_art_010", "hist_arch_024"]
+EXPECTED_BASELINE = "44/60"
+EXPECTED_PREVIOUS_BASELINE = "39/60"
+EXPECTED_CONTROLLED_EVIDENCE_COUNT = 17
+REQUIRED_CAVEAT_CASES = [
+    "obj_art_003",
+    "obj_art_007",
+    "nat_eco_039",
+    "obj_art_010",
+    "hist_arch_024",
+    "obj_art_002",
+    "hist_arch_020",
+    "rel_space_031",
+    "nat_eco_042",
+    "cross_route_053",
+]
 RESULT_PASS = "FULL_NON_DESTRUCTIVE_SANITY_PASS"
 RESULT_BLOCKED = "FULL_NON_DESTRUCTIVE_SANITY_BLOCKED"
 
@@ -147,10 +161,14 @@ def validate_no_write_flags(*, no_source_write: bool, no_vector_write: bool, no_
 def check_baseline() -> dict[str, Any]:
     current = load_json(BASELINE_CURRENT_PATH)
     ledger = load_json(BASELINE_LEDGER_PATH)
-    if current.get("official_score") != "39/60":
-        raise FullSanityError("FULL_SANITY_BASELINE_CURRENT_INVALID", "official baseline current must be 39/60")
-    if current.get("prior_score") != "31/60" or ledger.get("prior_score") != "31/60":
-        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", "prior 31/60 baseline trace must be retained")
+    if current.get("official_score") != EXPECTED_BASELINE:
+        raise FullSanityError("FULL_SANITY_BASELINE_CURRENT_INVALID", f"official baseline current must be {EXPECTED_BASELINE}")
+    if current.get("previous_official_score") != EXPECTED_PREVIOUS_BASELINE and current.get("prior_score") != EXPECTED_PREVIOUS_BASELINE:
+        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", f"previous {EXPECTED_PREVIOUS_BASELINE} baseline trace must be retained")
+    if ledger.get("prior_score") != EXPECTED_PREVIOUS_BASELINE or "31/60" not in json.dumps(ledger, sort_keys=True):
+        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", "ledger must retain 31/60 and 39/60 baseline traces")
+    if current.get("controlled_evidence_count") != EXPECTED_CONTROLLED_EVIDENCE_COUNT:
+        raise FullSanityError("FULL_SANITY_CONTROLLED_EVIDENCE_COUNT_INVALID", f"baseline must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases")
     if current.get("production_default_integrated") is not False:
         raise FullSanityError("FULL_SANITY_BASELINE_DEFAULT_RISK", "baseline must not be marked production default integrated")
     caveats = set(current.get("caveat_cases") or [])
@@ -162,6 +180,7 @@ def check_baseline() -> dict[str, Any]:
         "official_baseline_current": current.get("official_score"),
         "prior_baseline_retained": current.get("prior_score"),
         "ledger_prior_baseline_retained": ledger.get("prior_score"),
+        "controlled_evidence_count": current.get("controlled_evidence_count"),
         "official_passed_cases": len(current.get("passed_cases") or current.get("official_passed_cases") or []),
         "official_failed_cases": len(current.get("failed_cases") or current.get("official_failed_cases") or []),
         "caveat_cases": sorted(caveats),
@@ -261,8 +280,8 @@ def check_12case_trace(dataset_case_ids: list[str]) -> dict[str, Any]:
     rollup_payload = load_json(CONTROLLED_ROLLUP_PATH)
     matrix_payload = load_json(FINAL_CASE_MATRIX_PATH)
     cases = _controlled_cases_from_payload(case_list_payload) or _controlled_cases_from_payload(rollup_payload) or _controlled_cases_from_payload(matrix_payload)
-    if len(cases) != 12 or len(set(cases)) != 12:
-        raise FullSanityError("FULL_SANITY_12CASE_COUNT_INVALID", "12-case trace must contain exactly 12 unique cases")
+    if len(cases) != EXPECTED_CONTROLLED_EVIDENCE_COUNT or len(set(cases)) != EXPECTED_CONTROLLED_EVIDENCE_COUNT:
+        raise FullSanityError("FULL_SANITY_CONTROLLED_TRACE_COUNT_INVALID", f"controlled evidence trace must contain exactly {EXPECTED_CONTROLLED_EVIDENCE_COUNT} unique cases")
     missing_from_dataset = sorted(set(cases) - set(dataset_case_ids))
     if missing_from_dataset:
         raise FullSanityError("FULL_SANITY_12CASE_DATASET_MISMATCH", f"controlled cases missing from official dataset: {missing_from_dataset}")

@@ -16,8 +16,17 @@
     "vector_index_write_allowed_by_this_layer": false
   },
   "properties": {
+    "adv_trap_059_status": {
+      "const": "deferred_not_counted"
+    },
+    "caveat_details": {
+      "type": "object"
+    },
     "classification": {
       "const": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
+    },
+    "controlled_evidence_count": {
+      "const": 17
     },
     "explicit_production_integration_enabled": {
       "type": "boolean"
@@ -34,11 +43,26 @@
     "layer_id": {
       "const": "series_b_production_target_v1"
     },
+    "newly_countable_cases": {
+      "type": "array"
+    },
+    "official_baseline_classification": {
+      "const": "human_reviewed_official_baseline_not_raw_candidate_only"
+    },
+    "official_baseline_commit": {
+      "const": "bb4a928ec1d63eec3ad9b0247c15fb49d44d39c9"
+    },
     "official_baseline_ref": {
-      "const": "39/60"
+      "const": "44/60"
+    },
+    "official_baseline_tag": {
+      "const": "travel-series-b-official-44of60-human-reviewed-2026-06-25"
     },
     "official_baseline_write_enabled": {
       "const": false
+    },
+    "previous_official_baseline_ref": {
+      "const": "39/60"
     },
     "production_default_enabled": {
       "const": false
@@ -53,6 +77,9 @@
     },
     "push_tag_required_separate_authorization": {
       "const": true
+    },
+    "remaining_failed_or_deferred_cases": {
+      "type": "array"
     },
     "requires_explicit_integration": {
       "const": true

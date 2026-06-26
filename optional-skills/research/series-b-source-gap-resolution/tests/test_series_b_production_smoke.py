@@ -70,7 +70,7 @@ def test_smoke_helper_no_mutation_mode_works() -> None:
         assert payload["production_default_manifest_integration_performed"] is False
         assert payload["official_baseline_modified"] is False
         assert payload["source_vector_mutation_performed"] is False
-        assert payload["checks"]["baseline"]["official_baseline_current"] == "39/60"
+        assert payload["checks"]["baseline"]["official_baseline_current"] == "44/60"
         assert payload["checks"]["dry_run_one_case"]["dossier_generated"] is False
 
 

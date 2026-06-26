@@ -1,22 +1,54 @@
 {
+  "adv_trap_059_status": "deferred_not_counted",
   "caveat_cases": [
     "obj_art_003",
     "obj_art_007",
     "nat_eco_039",
     "obj_art_010",
-    "hist_arch_024"
+    "hist_arch_024",
+    "obj_art_002",
+    "hist_arch_020",
+    "rel_space_031",
+    "nat_eco_042",
+    "cross_route_053"
   ],
+  "caveat_details": {
+    "adv_trap_059": "deferred; not counted",
+    "controlled_evidence_count": 17,
+    "cross_route_053": [
+      "approved with caveat",
+      "Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence",
+      "cached Tikal excerpts are supplementary only",
+      "rejected sources are excluded",
+      "LP locator is not counted as formal axis evidence",
+      "nature/geography/karst-hydrology source backing remains explicit"
+    ],
+    "remaining_failed_or_deferred_cases": "remaining 16 cases are excluded from the 44/60 official baseline",
+    "score_classification": "44/60 is a human-reviewed official baseline, not a raw candidate-only score."
+  },
+  "controlled_evidence_count": 17,
   "explicit_production_integration_enabled": true,
   "full_series_b_required_before_release": true,
   "global_default_enabled": false,
   "layer_id": "series_b_production_target_v1",
+  "newly_countable_cases": [
+    "obj_art_002",
+    "hist_arch_020",
+    "rel_space_031",
+    "nat_eco_042",
+    "cross_route_053"
+  ],
   "notes": [
     "This readiness artifact describes the explicit target layer only.",
     "It does not register the target layer as production default.",
     "It does not authorize push, tag, release, vector writes, source writes, or full Series B execution.",
     "Explicit Series B production integration path is present, but release/push/tag remain unauthorized."
   ],
-  "official_baseline_ref": "39/60",
+  "official_baseline_classification": "human_reviewed_official_baseline_not_raw_candidate_only",
+  "official_baseline_commit": "bb4a928ec1d63eec3ad9b0247c15fb49d44d39c9",
+  "official_baseline_ref": "44/60",
+  "official_baseline_tag": "travel-series-b-official-44of60-human-reviewed-2026-06-25",
+  "previous_official_baseline_ref": "39/60",
   "production_default_enabled": false,
   "production_default_integrated": false,
   "production_default_scope": "explicit_series_b_target_only",
@@ -24,6 +56,24 @@
   "production_release_ready": false,
   "production_target_layer_integrated": true,
   "readiness_status": "EXPLICIT_PRODUCTION_INTEGRATED_NOT_RELEASED",
+  "remaining_failed_or_deferred_cases": [
+    "obj_art_005",
+    "obj_art_008",
+    "obj_art_011",
+    "obj_art_012",
+    "hist_arch_022",
+    "hist_arch_025",
+    "rel_space_028",
+    "rel_space_033",
+    "rel_space_034",
+    "rel_space_035",
+    "rel_space_036",
+    "nat_eco_043",
+    "nat_eco_045",
+    "nat_eco_046",
+    "cross_route_055",
+    "adv_trap_059"
+  ],
   "requires_explicit_integration": true,
   "schema_version": "series_b_production_readiness.v1",
   "smoke_test_required": true
