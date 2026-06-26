@@ -1,0 +1,4 @@
+interface:
+  display_name: "Series B Score Pipeline"
+  short_description: "Run guarded Series B score-improvement cycles."
+  default_prompt: "Use the Series B score-improvement pipeline to plan and execute a safe candidate-to-baseline workflow."
