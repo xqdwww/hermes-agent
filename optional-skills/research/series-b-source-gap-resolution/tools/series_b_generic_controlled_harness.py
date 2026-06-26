@@ -275,6 +275,23 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=("archaeology_book", "history_book", "wiki_or_zim"),
     ),
 
+
+    "rel_space_036": CaseConfig(
+        case_id="rel_space_036",
+        expected_formal_ready_decision="REL_SPACE_036_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=("Heaven", "altar", "circular", "concentric", "platform"),
+        required_sections=(
+            "spatial_structure",
+            "historical_layers",
+            "material_architecture",
+            "regional_relations",
+            "religious_symbolism",
+            "theme_tracks",
+        ),
+        required_axes=("art_architecture_book", "local_place", "religion_book"),
+    ),
+
 }
 
 
