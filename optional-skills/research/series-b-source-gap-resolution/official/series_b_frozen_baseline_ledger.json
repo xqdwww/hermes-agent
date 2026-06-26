@@ -1,0 +1,171 @@
+{
+  "avg_score": 74.6,
+  "case_count": 60,
+  "classification": "FROZEN_BASELINE_LEDGER_TRACE_V1",
+  "fail_count": 29,
+  "failed_cases": [
+    "obj_art_002",
+    "obj_art_003",
+    "obj_art_005",
+    "obj_art_007",
+    "obj_art_008",
+    "obj_art_010",
+    "obj_art_011",
+    "obj_art_012",
+    "hist_arch_020",
+    "hist_arch_022",
+    "hist_arch_023",
+    "hist_arch_024",
+    "hist_arch_025",
+    "rel_space_028",
+    "rel_space_030",
+    "rel_space_031",
+    "rel_space_033",
+    "rel_space_034",
+    "rel_space_035",
+    "rel_space_036",
+    "nat_eco_039",
+    "nat_eco_042",
+    "nat_eco_043",
+    "nat_eco_045",
+    "nat_eco_046",
+    "cross_route_052",
+    "cross_route_053",
+    "cross_route_055",
+    "adv_trap_059"
+  ],
+  "generated_at": "2026-06-25T19:16:38.754956+00:00",
+  "issue_count": 57,
+  "issue_types": {
+    "missing_required_axis": 16,
+    "missing_required_term": 7,
+    "not_enough_distinct_sources": 4,
+    "not_enough_source_groups": 5,
+    "quality_below_required": 25
+  },
+  "official_baseline_score": "31/60",
+  "official_baseline_update_performed": false,
+  "partition_summary": {
+    "adversarial": {
+      "cases": 5,
+      "failures": [
+        "adv_trap_059"
+      ],
+      "ok": 4
+    },
+    "archaeological_site": {
+      "cases": 6,
+      "failures": [
+        "hist_arch_020",
+        "hist_arch_023",
+        "hist_arch_024"
+      ],
+      "ok": 3
+    },
+    "art_architecture": {
+      "cases": 8,
+      "failures": [
+        "obj_art_005",
+        "obj_art_007",
+        "obj_art_008",
+        "obj_art_011",
+        "obj_art_012"
+      ],
+      "ok": 3
+    },
+    "cross_disciplinary": {
+      "cases": 8,
+      "failures": [
+        "cross_route_052",
+        "cross_route_053",
+        "cross_route_055"
+      ],
+      "ok": 5
+    },
+    "history_route": {
+      "cases": 6,
+      "failures": [
+        "hist_arch_022",
+        "hist_arch_025"
+      ],
+      "ok": 4
+    },
+    "material_object": {
+      "cases": 7,
+      "failures": [
+        "obj_art_002",
+        "obj_art_003",
+        "obj_art_010"
+      ],
+      "ok": 4
+    },
+    "nature_landscape": {
+      "cases": 10,
+      "failures": [
+        "nat_eco_039",
+        "nat_eco_042",
+        "nat_eco_043",
+        "nat_eco_045",
+        "nat_eco_046"
+      ],
+      "ok": 5
+    },
+    "sacred_space": {
+      "cases": 10,
+      "failures": [
+        "rel_space_028",
+        "rel_space_030",
+        "rel_space_031",
+        "rel_space_033",
+        "rel_space_034",
+        "rel_space_035",
+        "rel_space_036"
+      ],
+      "ok": 3
+    }
+  },
+  "pass_count": 31,
+  "passed_cases": [
+    "obj_art_001",
+    "obj_art_004",
+    "obj_art_006",
+    "obj_art_009",
+    "obj_art_013",
+    "obj_art_014",
+    "obj_art_015",
+    "hist_arch_016",
+    "hist_arch_017",
+    "hist_arch_018",
+    "hist_arch_019",
+    "hist_arch_021",
+    "hist_arch_026",
+    "hist_arch_027",
+    "rel_space_029",
+    "rel_space_032",
+    "rel_space_037",
+    "nat_eco_038",
+    "nat_eco_040",
+    "nat_eco_041",
+    "nat_eco_044",
+    "nat_eco_047",
+    "cross_route_048",
+    "cross_route_049",
+    "cross_route_050",
+    "cross_route_051",
+    "cross_route_054",
+    "adv_trap_056",
+    "adv_trap_057",
+    "adv_trap_058",
+    "adv_trap_060"
+  ],
+  "schema_version": "series_b_frozen_baseline_ledger.v1",
+  "source_trace": [
+    {
+      "field": "series_b_before_after.after",
+      "source_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+      "source_sha256": "368663560e204480a712115f7ca0033f52815ccf12c73654f419abfbad3c08c8",
+      "source_type": "query_bundle_final_metrics"
+    }
+  ],
+  "write_target": false
+}

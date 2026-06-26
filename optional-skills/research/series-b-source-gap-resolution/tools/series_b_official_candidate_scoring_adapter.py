@@ -11,6 +11,7 @@ from typing import Any
 from series_b_official_candidate_comparator import compare_candidate_to_frozen, validate_comparison_schema
 from series_b_official_candidate_inputs import CONTROLLED_EVIDENCE_CASES, sha256_file
 from series_b_official_candidate_no_write_guard import validate_no_write_policy
+from series_b_official_scoring_audit import run_candidate_scoring
 
 
 SCORING_ADAPTER_VERSION = "series_b_official_candidate_scoring_adapter.v1"
@@ -140,20 +141,38 @@ def run_scoring_adapter(
         return payload
 
     if fixture_candidate_payload is None:
-        payload = {
-            "status": "OFFICIAL_CANDIDATE_SAFE_RUNNER_NOT_AVAILABLE",
-            "result_enum": "OFFICIAL_CANDIDATE_SAFE_RUNNER_NOT_AVAILABLE",
-            "adapter_version": SCORING_ADAPTER_VERSION,
-            "candidate_run_executed": False,
-            "candidate_score": None,
-            "candidate_passed_cases": None,
-            "candidate_failed_cases": None,
-            "candidate_vs_frozen_summary": "verified inputs are ready, but no candidate-safe scoring command is configured",
-            "readiness": readiness,
-            "guard": guard,
-            **FALSE_FLAGS,
-        }
-        payload["artifact_path"] = _write_json(output_dir, "series_b_official_candidate_execute_attempt.json", payload)
+        inputs = input_discovery.get("inputs", {})
+        controlled_matrix = inputs.get("controlled_evidence_matrix_path") or inputs.get("final_case_matrix_path")
+        if not isinstance(controlled_matrix, dict) or not controlled_matrix.get("path"):
+            payload = {
+                "status": "OFFICIAL_CANDIDATE_SAFE_RUNNER_NOT_AVAILABLE",
+                "result_enum": "OFFICIAL_CANDIDATE_SAFE_RUNNER_NOT_AVAILABLE",
+                "adapter_version": SCORING_ADAPTER_VERSION,
+                "candidate_run_executed": False,
+                "candidate_score": None,
+                "candidate_passed_cases": None,
+                "candidate_failed_cases": None,
+                "candidate_vs_frozen_summary": "verified inputs are ready, but controlled evidence matrix input is missing",
+                "readiness": readiness,
+                "guard": guard,
+                **FALSE_FLAGS,
+            }
+            payload["artifact_path"] = _write_json(output_dir, "series_b_official_candidate_execute_attempt.json", payload)
+            return payload
+        payload = run_candidate_scoring(
+            dataset_path=inputs["official_dataset_path"]["path"],
+            frozen_ledger_path=inputs["frozen_baseline_ledger_path"]["path"],
+            controlled_evidence_matrix_path=controlled_matrix["path"],
+            output_dir=output_dir,
+            repo_root=repo_root,
+            no_official_write=no_official_write,
+            no_production_default=no_production_default,
+            no_push=no_push,
+            no_tag=no_tag,
+        )
+        payload["adapter_version"] = SCORING_ADAPTER_VERSION
+        payload["candidate_run_executed"] = True
+        payload["readiness"] = readiness
         return payload
 
     candidate = dict(fixture_candidate_payload)

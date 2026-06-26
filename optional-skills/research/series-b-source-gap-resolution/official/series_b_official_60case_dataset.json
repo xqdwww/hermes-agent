@@ -1,0 +1,2471 @@
+{
+  "canonicalization_basis": "Reconstructed from legacy Series B blind dataset path referenced by Phase 3/P1P2/query-bundle runners and validated by historical dataset hash.",
+  "case_count": 60,
+  "cases": [
+    {
+      "banned_terms": [
+        "hotel",
+        "ticket",
+        "Paris travel"
+      ],
+      "case_id": "obj_art_001",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 1,
+      "original_prompt": "Gothic cathedral ribbed vault flying buttress structural load transformation engineering",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "materials_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Gothic",
+        "vault",
+        "buttress",
+        "load"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 1,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Micro-architectural mechanics focus. Must explain the vector physics of force distribution, not generic cathedral history."
+    },
+    {
+      "banned_terms": [
+        "restaurant",
+        "shopping",
+        "tea cup price"
+      ],
+      "case_id": "obj_art_002",
+      "domain": "material_object",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 2,
+      "original_prompt": "Song dynasty Jian ware oil spot glaze iron oxide crystallization firing technology",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "materials_book",
+        "art_architecture_book",
+        "qyer_or_china_local"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Jian ware",
+        "glaze",
+        "crystallization",
+        "iron"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 2,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Object-level material science. Requires detailed thermal reduction and chemical composition mapping of the kiln site."
+    },
+    {
+      "banned_terms": [
+        "app",
+        "Rome hotel",
+        "opening hours"
+      ],
+      "case_id": "obj_art_003",
+      "domain": "material_object",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 3,
+      "original_prompt": "Roman concrete opus caementicium volcanic ash pozzolana hydraulic setting durability",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "materials_book",
+        "archaeology_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "concrete",
+        "pozzolana",
+        "hydraulic",
+        "Roman"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 3,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Sub-string 'app' check via 'opus caementicium'. Requires chemical interaction analysis of saltwater and volcanic tuff."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "restaurant",
+        "phone"
+      ],
+      "case_id": "obj_art_004",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 4,
+      "original_prompt": "Islamic muqarnas corbeling geometry mathematical projection stereotomy squinch transition",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "religion_book",
+        "external_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "muqarnas",
+        "corbeling",
+        "geometry",
+        "squinch"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 4,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Islamic Architecture. Must analyze the 3D spatial cell subdivision logic in structural transitions."
+    },
+    {
+      "banned_terms": [
+        "London guide",
+        "hotel",
+        "Google map"
+      ],
+      "case_id": "obj_art_005",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 5,
+      "original_prompt": "Brutalist architecture exposed concrete timber shuttering texture raw formwork aesthetics",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Brutalist",
+        "concrete",
+        "shuttering",
+        "formwork"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 5,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "20th-century architectural taxonomy. Isolate post-war tectonic choices from generic urban grey-space descriptions."
+    },
+    {
+      "banned_terms": [
+        "Kyoto",
+        "ticket",
+        "museum tour"
+      ],
+      "case_id": "obj_art_006",
+      "domain": "material_object",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 6,
+      "original_prompt": "Gandhara sculpture drapery Hellenistic influence grey schist material carving technique Buddhas",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "religion_book",
+        "archaeology_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Gandhara",
+        "drapery",
+        "Hellenistic",
+        "schist"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 6,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Stylistic and material hybridity. Must track the Greek toga fold geometries translated onto local north-Indian rock."
+    },
+    {
+      "banned_terms": [
+        "Chengdu",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "obj_art_007",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 7,
+      "original_prompt": "Dougong bracket sets cantilever interlocking timber joinery structural seismology modularity Tang Song",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "materials_book",
+        "local_place"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Dougong",
+        "bracket",
+        "joinery",
+        "seismology"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 7,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Isolate the seismic energy dissipation physics of traditional Chinese interlocking timber joints."
+    },
+    {
+      "banned_terms": [
+        "Berlin",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "obj_art_008",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 8,
+      "original_prompt": "Mingan architectural screens wood carving lattice thermal regulation ventilation geometry Cairo",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "history_book",
+        "external_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Mingan",
+        "lattice",
+        "ventilation",
+        "geometry"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 8,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Mashrabiya/Mingan variation check. Link geometry to micro-climate thermodynamics and privacy screening physics."
+    },
+    {
+      "banned_terms": [
+        "sports",
+        "ports",
+        "opening hours"
+      ],
+      "case_id": "obj_art_009",
+      "domain": "material_object",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 9,
+      "original_prompt": "Byzantine mosaic tesserae glass smalti angle of reflection illumination sacred space",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "religion_book",
+        "materials_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "mosaic",
+        "tesserae",
+        "smalti",
+        "reflection"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 9,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Sub-string 'ports' check. Analyze physical tilting of gold glass cuboids to optimize candle-light scattering."
+    },
+    {
+      "banned_terms": [
+        "Kyoto hotel",
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "obj_art_010",
+      "domain": "material_object",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 10,
+      "original_prompt": "Ukiyo-e woodblock printing multi block registration kento alignment pigment suspension Edo",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "history_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Ukiyo-e",
+        "woodblock",
+        "kento",
+        "alignment"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 10,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Anti-pollution against Kyoto boilerplate; query anchors to industrial printing mechanics of Edo period."
+    },
+    {
+      "banned_terms": [
+        "Athens ticket",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "obj_art_011",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 11,
+      "original_prompt": "Corinthian order acanthus leaf capital proportion stone carving architectural geometry structural pillar",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "archaeology_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Corinthian",
+        "acanthus",
+        "capital",
+        "proportion"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 11,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Mathematical and structural grammar of Classical orders; exclude plain tourist site introduction."
+    },
+    {
+      "banned_terms": [
+        "app",
+        "hotel",
+        "opening hours"
+      ],
+      "case_id": "obj_art_012",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 12,
+      "original_prompt": "Yingzao Fashi treatise state building standards module cai structural grading timber framework",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "history_book",
+        "materials_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Yingzao Fashi",
+        "module",
+        "cai",
+        "grading"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 12,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Textual and standardization framework test. Must extract the 8-grade timber module system."
+    },
+    {
+      "banned_terms": [
+        "Dublin",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "obj_art_013",
+      "domain": "material_object",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 13,
+      "original_prompt": "Persian miniature pigment illumination lapis lazuli grinding binder application scaling perspective",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "materials_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "miniature",
+        "pigment",
+        "lapis lazuli",
+        "perspective"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 13,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Chemical provenance of pigments matched to non-Euclidean spatial scaling principles in manuscript arts."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "hotel",
+        "Google map"
+      ],
+      "case_id": "obj_art_014",
+      "domain": "material_object",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 14,
+      "original_prompt": "Stained glass lead cames tracery thermal stress wind loading stained oxides medieval window",
+      "partition": "material_object",
+      "required_knowledge_axes": [
+        "materials_book",
+        "art_architecture_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "glass",
+        "cames",
+        "tracery",
+        "loading"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 14,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Structural engineering of window frames against pressure dynamics, avoiding generic church art descriptions."
+    },
+    {
+      "banned_terms": [
+        "Machu Picchu tour",
+        "restaurant",
+        "phone"
+      ],
+      "case_id": "obj_art_015",
+      "domain": "art_architecture",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 15,
+      "original_prompt": "Inca polygonal masonry cyclopean stones dry stone interlocking ashlar seismic shifting cushion",
+      "partition": "art_architecture",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "materials_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "polygonal",
+        "masonry",
+        "interlocking",
+        "seismic"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 15,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Mechanical analysis of multi-angle stone fitment acting as tectonic kinetic shock absorbers."
+    },
+    {
+      "banned_terms": [
+        "hotel",
+        "ticket",
+        "opening hours"
+      ],
+      "case_id": "hist_arch_016",
+      "domain": "archaeological_site",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 16,
+      "original_prompt": "Stratigraphic layer tell excavation terminus post quem ceramic typology relative dating methodology",
+      "partition": "archaeological_site",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "history_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Stratigraphic",
+        "tell",
+        "terminus",
+        "typology"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 16,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Pure archaeological abstraction. Must verify core deposit logic within multidimensional cultural mounds."
+    },
+    {
+      "banned_terms": [
+        "Berlin",
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "hist_arch_017",
+      "domain": "history_route",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 17,
+      "original_prompt": "Sogdian trading network network topology colonies diaspora interior Eurasia Silk Road documents",
+      "partition": "history_route",
+      "required_knowledge_axes": [
+        "external_book",
+        "history_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Sogdian",
+        "topology",
+        "colonies",
+        "diaspora"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 17,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for The Silk Road. Test system's ability to model non-state actor network corridors."
+    },
+    {
+      "banned_terms": [
+        "Dublin",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "hist_arch_018",
+      "domain": "history_route",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 18,
+      "original_prompt": "Hanseatic League Kontor network maritime trade regulation cog ship hull topology Baltic",
+      "partition": "history_route",
+      "required_knowledge_axes": [
+        "history_book",
+        "materials_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Hanseatic",
+        "Kontor",
+        "maritime",
+        "cog"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 18,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Link legal enclave spatial models (Kontor) directly to transport vessel cargo capacity (cog design)."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "hist_arch_019",
+      "domain": "history_route",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 19,
+      "original_prompt": "Axumite coinage geopolitics gold standard trade minting technology Red Sea trade routes",
+      "partition": "history_route",
+      "required_knowledge_axes": [
+        "history_book",
+        "archaeology_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Axumite",
+        "coinage",
+        "minting",
+        "Red Sea"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 19,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Object-driven macro-economics. Connect regional currency minting standards to Afro-Eurasian trade balance."
+    },
+    {
+      "banned_terms": [
+        "sports",
+        "app",
+        "hotel"
+      ],
+      "case_id": "hist_arch_020",
+      "domain": "archaeological_site",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 20,
+      "original_prompt": "Etruscan necropolis tumulus chamber spatial arrangement tomb distribution rock cutting Cerveteri",
+      "partition": "archaeological_site",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "art_architecture_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Etruscan",
+        "necropolis",
+        "tumulus",
+        "Cerveteri"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 20,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Sub-string 'sports' check via tomb wall paintings. Analyze chthonic architecture mimicking domestic house grids."
+    },
+    {
+      "banned_terms": [
+        "Kyoto",
+        "ticket",
+        "Google map"
+      ],
+      "case_id": "hist_arch_021",
+      "domain": "archaeological_site",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 21,
+      "original_prompt": "Pnyx Athens assembly spatial acoustics oratorical steps political landscape infrastructure grid",
+      "partition": "archaeological_site",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "history_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Pnyx",
+        "acoustics",
+        "oratorical",
+        "assembly"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 21,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Spatial tracking of open-air acoustic propagation fields used for political crowd governance."
+    },
+    {
+      "banned_terms": [
+        "Chengdu",
+        "hotel",
+        "restaurant"
+      ],
+      "case_id": "hist_arch_022",
+      "domain": "history_route",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 22,
+      "original_prompt": "Grand Canal grain transport caozhi taxation stations lock engineering hydraulic slope diversion",
+      "partition": "history_route",
+      "required_knowledge_axes": [
+        "qyer_or_china_local",
+        "history_book",
+        "materials_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Grand Canal",
+        "caozhi",
+        "lock",
+        "hydraulic"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 22,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Requires deep integration of hydrologic engineering mechanics with imperial resource allocation centers."
+    },
+    {
+      "banned_terms": [
+        "app",
+        "ports",
+        "phone"
+      ],
+      "case_id": "hist_arch_023",
+      "domain": "archaeological_site",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 23,
+      "original_prompt": "Clovis point flintknapping lithic reduction pattern paleolithic tool distribution migration tracking",
+      "partition": "archaeological_site",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "materials_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Clovis",
+        "flintknapping",
+        "lithic",
+        "reduction"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 23,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Micro-artifact technological fingerprinting used to plot geographic entry routes into continent."
+    },
+    {
+      "banned_terms": [
+        "Rome trip",
+        "hotel",
+        "opening hours"
+      ],
+      "case_id": "hist_arch_024",
+      "domain": "archaeological_site",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 24,
+      "original_prompt": "Pompeii insula spatial block structure house layout fauces atrium tablinum transition",
+      "partition": "archaeological_site",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "art_architecture_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "insula",
+        "atrium",
+        "tablinum",
+        "fauces"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 24,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Domestic zoning taxonomy. Must track sightline access control from public street to inner private chambers."
+    },
+    {
+      "banned_terms": [
+        "Berlin hotel",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "hist_arch_025",
+      "domain": "history_route",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 25,
+      "original_prompt": "Limes Germanicus frontier fortification system turf wall watchtower military logistics border topology",
+      "partition": "history_route",
+      "required_knowledge_axes": [
+        "history_book",
+        "archaeology_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Limes",
+        "Germanicus",
+        "watchtower",
+        "fortification"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 25,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Anti-pollution against Berlin; linear military landscape monitoring natural geographic breaks."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "hotel",
+        "Google map"
+      ],
+      "case_id": "hist_arch_026",
+      "domain": "history_route",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 26,
+      "original_prompt": "Southeast Asia maritime trade ceramic shipwrecks distribution junk technology ballast cargo composition",
+      "partition": "history_route",
+      "required_knowledge_axes": [
+        "external_book",
+        "history_book",
+        "archaeology_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "maritime",
+        "shipwrecks",
+        "junk",
+        "ballast"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 26,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Southeast Asia history. Link ceramic cargo weight distribution to maritime physical stability."
+    },
+    {
+      "banned_terms": [
+        "Kyoto",
+        "restaurant",
+        "phone"
+      ],
+      "case_id": "hist_arch_027",
+      "domain": "archaeological_site",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 27,
+      "original_prompt": "Kiln site distribution Yue ware celadon green glaze spatial production specialization Tang",
+      "partition": "archaeological_site",
+      "required_knowledge_axes": [
+        "local_place",
+        "materials_book",
+        "history_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Yue ware",
+        "celadon",
+        "kiln",
+        "production"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 27,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Geographic cluster analysis of resource supply chains (wood fuel, clay veins, river transport nodes)."
+    },
+    {
+      "banned_terms": [
+        "hotel",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "rel_space_028",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 28,
+      "original_prompt": "Chaitya hall rock cut layout stupa circumambulation path apse nave structural progression Karli",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "religion_book",
+        "art_architecture_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Chaitya",
+        "stupa",
+        "circumambulation",
+        "apse"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 28,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Buddhist iconography/architecture. Map the architectural track of kinetic ritual movement."
+    },
+    {
+      "banned_terms": [
+        "Dublin",
+        "phone",
+        "Google map"
+      ],
+      "case_id": "rel_space_029",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 29,
+      "original_prompt": "Jewish synagogue spatial orientation Torah ark bimah gender segregation ancient Mediterranean",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "religion_book",
+        "history_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "synagogue",
+        "Torah",
+        "bimah",
+        "orientation"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 29,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Interior liturgical geography mapping directional focus toward central spiritual loci across diaspora borders."
+    },
+    {
+      "banned_terms": [
+        "Berlin",
+        "ticket",
+        "opening hours"
+      ],
+      "case_id": "rel_space_030",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 30,
+      "original_prompt": "Hindu temple Vastu Purusha Mandala geometric layout garbha griha axis vertical shikhara tower",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "external_book",
+        "religion_book",
+        "art_architecture_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "art_architecture",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Vastu",
+        "Mandala",
+        "garbha griha",
+        "shikhara"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 30,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Food Culture/Sacred Geometry in India. Map 2D metaphysical grid to 3D vertical cosmic mountain."
+    },
+    {
+      "banned_terms": [
+        "Kyoto hotel",
+        "Chengdu",
+        "restaurant"
+      ],
+      "case_id": "rel_space_031",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 31,
+      "original_prompt": "Shinto shrine torii gate transitional space sando pathway sacred rope shimenawa spatial boundary",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "religion_book",
+        "lp_or_travel_guide",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Shinto",
+        "torii",
+        "sando",
+        "shimenawa"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 31,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Isolate the sequence of spatial purification steps along sacred approaching forest paths."
+    },
+    {
+      "banned_terms": [
+        "app",
+        "sports",
+        "phone"
+      ],
+      "case_id": "rel_space_032",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 32,
+      "original_prompt": "Kailashnath temple Ellora monolithic excavation vertical drop rock carving strategy software planning",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "art_architecture_book",
+        "religion_book",
+        "archaeology_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "materials_mechanics",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Ellora",
+        "monolithic",
+        "excavation",
+        "vertical"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 32,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Sub-string 'app' check. Spatial reversal of construction hierarchy: carving from peak down to base foundation."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "hotel",
+        "ticket"
+      ],
+      "case_id": "rel_space_033",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 33,
+      "original_prompt": "Christian monastery cloister layout functional zoning scriptorium refectory ascetic isolation layout",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "religion_book",
+        "history_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "cloister",
+        "scriptorium",
+        "refectory",
+        "monastery"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 33,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Spatial typology of enclosed communal systems. Analyze circulation paths isolating monks from secular interaction."
+    },
+    {
+      "banned_terms": [
+        "ports",
+        "sports",
+        "Google map"
+      ],
+      "case_id": "rel_space_034",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 34,
+      "original_prompt": "Ziggurat platform terrace orientation astronomical alignment mud brick core erosion Mesopotamia",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "religion_book",
+        "materials_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "ziggurat",
+        "terrace",
+        "alignment",
+        "brick"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 34,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Engineering and theological cross-section. Structural mass stability calculations vs stellar cardinal alignments."
+    },
+    {
+      "banned_terms": [
+        "Chengdu",
+        "restaurant",
+        "opening hours"
+      ],
+      "case_id": "rel_space_035",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 35,
+      "original_prompt": "Mesoamerican ballcourt I shaped layout acoustics timeline stone rings ritual execution geometry",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "religion_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "ballcourt",
+        "rings",
+        "ritual",
+        "geometry"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 35,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Zoning of cosmic ritual sport fields, preventing generic amusement park or basic ruins listing."
+    },
+    {
+      "banned_terms": [
+        "Chongqing",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "rel_space_036",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 36,
+      "original_prompt": "Altar of Heaven Beijing concentric circular platform numerical symbolism triple tier marble geometry",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "local_place",
+        "art_architecture_book",
+        "religion_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Heaven",
+        "concentric",
+        "platform",
+        "numerical"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 36,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Spatialization of state ideology. Map numbers (multiples of nine) directly onto structural radial building rings."
+    },
+    {
+      "banned_terms": [
+        "Dublin",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "rel_space_037",
+      "domain": "sacred_space",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 37,
+      "original_prompt": "Mithraeum cave temple layout cult image tauroctony banquet benches low illumination spatial setting",
+      "partition": "sacred_space",
+      "required_knowledge_axes": [
+        "religion_book",
+        "archaeology_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Mithraeum",
+        "tauroctony",
+        "benches",
+        "temple"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 37,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Subterranean exclusionary layout patterns designed for mystery cult ritual immersion."
+    },
+    {
+      "banned_terms": [
+        "Guilin tour",
+        "hotel",
+        "ticket"
+      ],
+      "case_id": "nat_eco_038",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 38,
+      "original_prompt": "Karst geomorphology soluble rock dissolution limestone tower sinkhole cockpit landscape hydrogeology",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim",
+        "materials_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Karst",
+        "dissolution",
+        "limestone",
+        "sinkhole"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 38,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Isolate chemical weathering formulas and underground drainage geometry from picturesque resort marketing."
+    },
+    {
+      "banned_terms": [
+        "Norway cruise",
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "nat_eco_039",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 39,
+      "original_prompt": "Fjord formation glacial overdeepening hanging valleys sill morphology bathymetry coastal threshold",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "external_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Fjord",
+        "overdeepening",
+        "sill",
+        "morphology"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 39,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Arctic/Glacial themes. Structural mechanics of glacial terminal gouging below sea levels."
+    },
+    {
+      "banned_terms": [
+        "Safari tour",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "nat_eco_040",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 40,
+      "original_prompt": "Rift valley graben tectonic faulting horizontal extension lake basins mantle plume vulcanism",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "graben",
+        "tectonic",
+        "extension",
+        "faulting"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 40,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Macro-structural fault geometry tracking earth crust divergence vectors; reject plain wildlife habitat prose."
+    },
+    {
+      "banned_terms": [
+        "app",
+        "sports",
+        "opening hours"
+      ],
+      "case_id": "nat_eco_041",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 41,
+      "original_prompt": "Sand dune morphology barchan seif dunes wind velocity vector sand transport dynamics saltation",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim",
+        "external_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "dune",
+        "barchan",
+        "seif",
+        "saltation"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 41,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Aerodynamic modeling of granular boundary interactions shaping geometric sand crest lines."
+    },
+    {
+      "banned_terms": [
+        "Kyoto",
+        "restaurant",
+        "hotel"
+      ],
+      "case_id": "nat_eco_042",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 42,
+      "original_prompt": "Mangrove adaptative physiology pneumatophores salt exclusion vivipary intertidal mud substrate mechanics",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "pneumatophores",
+        "vivipary",
+        "intertidal",
+        "substrate"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 42,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Cellular and physical anchor adaptations mapped to harsh tidal energy zones, avoiding ecotourism pamphlets."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "ticket",
+        "Google map"
+      ],
+      "case_id": "nat_eco_043",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 43,
+      "original_prompt": "Alluvial fan deposition gradient transition sediment sorting hydraulic energy drop mountain front",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim",
+        "materials_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "alluvial",
+        "fan",
+        "sorting",
+        "gradient"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 43,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Geomorphic geometry testing particle mass distribution drop-off points at steep topographical ruptures."
+    },
+    {
+      "banned_terms": [
+        "Berlin",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "nat_eco_044",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 44,
+      "original_prompt": "Caldera collapse magma chamber evacuation volcanic explosion ignimbrite sheets resurgent dome",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim",
+        "archaeology_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Caldera",
+        "evacuation",
+        "ignimbrite",
+        "dome"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 44,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Structural volcano subsidence anatomy tracking the physical emptying of subterranean chambers."
+    },
+    {
+      "banned_terms": [
+        "Dublin",
+        "restaurant",
+        "opening hours"
+      ],
+      "case_id": "nat_eco_045",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 45,
+      "original_prompt": "Cirque lake tarn subglacial plucking bergschrund crevasse alpine mountain wall headwall erosion",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "external_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Cirque",
+        "tarn",
+        "plucking",
+        "bergschrund"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 45,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Alpine/Arctic geology. Mechanical tracing of freeze-thaw cycles inside headwall cracks."
+    },
+    {
+      "banned_terms": [
+        "sports",
+        "ports",
+        "hotel"
+      ],
+      "case_id": "nat_eco_046",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 46,
+      "original_prompt": "Loess plateau wind blown silt deposition vertical cleavage erosion hydrologic gully networks",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "qyer_or_china_local",
+        "nature_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Loess",
+        "silt",
+        "cleavage",
+        "gully"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 46,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Sub-string 'sports' check. Structural verticality mechanics of unstratified silt walls prone to rainfall cutting."
+    },
+    {
+      "banned_terms": [
+        "Resort package",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "nat_eco_047",
+      "domain": "nature_landscape",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 47,
+      "original_prompt": "Atoll development volcanic subsidence fringing reef barrier transition Darwin evolutionary model reef flat",
+      "partition": "nature_landscape",
+      "required_knowledge_axes": [
+        "nature_book",
+        "wiki_or_zim",
+        "external_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "atoll",
+        "subsidence",
+        "fringing",
+        "barrier"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 47,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Long-timeline geomorphic feedback loops mapping biological coral upward growth to volcanic sinking."
+    },
+    {
+      "banned_terms": [
+        "Lijiang hotel",
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "cross_route_048",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 48,
+      "original_prompt": "Tea Horse Road Yunnan Tibet ecological transition salt tea exchange pack animal track networks",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "local_place",
+        "history_book",
+        "food_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Tea Horse",
+        "Yunnan",
+        "Tibet",
+        "exchange"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 48,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Cross-disciplinary. Requires integrating altitudinal ecology limits with trade commodity calorie exchange."
+    },
+    {
+      "banned_terms": [
+        "app",
+        "ticket",
+        "phone"
+      ],
+      "case_id": "cross_route_049",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 49,
+      "original_prompt": "Incense Route Nabataean desert logistics Petra hydrologic collection infrastructure spice network caravan",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "history_book",
+        "nature_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Incense",
+        "Nabataean",
+        "Petra",
+        "hydrologic"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 49,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Isolate hidden underground water cistern topology used to maintain trade monopoly across lethal arid gaps."
+    },
+    {
+      "banned_terms": [
+        "Kyoto",
+        "hotel booking",
+        "opening hours"
+      ],
+      "case_id": "cross_route_050",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 50,
+      "original_prompt": "Camino de Santiago pilgrimage trail Romanesque architecture transition reliquary display nodes distribution",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "lp_or_travel_guide",
+        "art_architecture_book",
+        "religion_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "religion_book",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Camino",
+        "pilgrimage",
+        "Romanesque",
+        "reliquary"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 50,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Networked art history. Map church nave expansion choices directly to high-volume pilgrim traffic lines."
+    },
+    {
+      "banned_terms": [
+        "Bangkok",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "cross_route_051",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 51,
+      "original_prompt": "Trans Saharan trade salt gold exchange ecosystem oasis layout desert caravan security hydrology",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "history_book",
+        "nature_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Saharan",
+        "salt",
+        "gold",
+        "oasis"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 51,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Interlocking of hyper-arid physics with medieval bullion supply networks. Trace water depth table tracking."
+    },
+    {
+      "banned_terms": [
+        "Berlin",
+        "hotel",
+        "phone"
+      ],
+      "case_id": "cross_route_052",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 52,
+      "original_prompt": "Dunhuang oasis hydrology Mogao caves geology conglomerate rock cliff water conservation channels",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "qyer_or_china_local",
+        "art_architecture_book",
+        "nature_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Dunhuang",
+        "Mogao",
+        "conglomerate",
+        "hydrology"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 52,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Buddhist iconography/Mogao. Connect the physical fragility of river gravel cliffs to fresco microclimate risks."
+    },
+    {
+      "banned_terms": [
+        "Chengdu",
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "cross_route_053",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 53,
+      "original_prompt": "Maya lowlands architectural adaptation karst chultun cistern networks swamp farming raised agricultural beds",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "archaeology_book",
+        "nature_book",
+        "history_book"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Maya",
+        "chultun",
+        "cistern",
+        "swamp"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 53,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Link tropical karst soil water loss to highly specific underground flask shaped plaster storage engineering."
+    },
+    {
+      "banned_terms": [
+        "ports",
+        "sports",
+        "hotel"
+      ],
+      "case_id": "cross_route_054",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "rich",
+      "ordinal": 54,
+      "original_prompt": "Frankincense trail Dhofar monsoon climate scrubland ecology maritime transport ports Dhofar Oman",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "history_book",
+        "nature_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "nature_environment",
+        "historical_layers",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Frankincense",
+        "Dhofar",
+        "monsoon",
+        "Oman"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 54,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Sub-string 'ports' filter. Map unique local micro-climate coastal fog capture to resin tree distribution."
+    },
+    {
+      "banned_terms": [
+        "Kyoto",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "cross_route_055",
+      "domain": "cross_disciplinary",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "rich",
+      "ordinal": 55,
+      "original_prompt": "Ryukyu Kingdom maritime trade proxy porcelain trade networking fortress gusuku layout architecture",
+      "partition": "cross_disciplinary",
+      "required_knowledge_axes": [
+        "history_book",
+        "art_architecture_book",
+        "wiki_or_zim"
+      ],
+      "required_sections": [
+        "spatial_structure",
+        "historical_layers",
+        "regional_relations",
+        "theme_tracks"
+      ],
+      "required_terms": [
+        "Ryukyu",
+        "proxy",
+        "gusuku",
+        "maritime"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 55,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Targeted recall for Southeast Asia/East Asia hybrid history. Isolate coral limestone wall shapes from standard Japanese castles."
+    },
+    {
+      "banned_terms": [
+        "hotel",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "adv_trap_056",
+      "domain": "adversarial",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "empty",
+      "ordinal": 56,
+      "original_prompt": "Atlantisports ancient harbor concrete technology sunken block geometric grid mapping",
+      "partition": "adversarial",
+      "required_knowledge_axes": [
+        "wiki_or_zim"
+      ],
+      "required_sections": [],
+      "required_terms": [
+        "Atlantisports"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 56,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Negative Example. Sub-string 'ports' combined with fictional location 'Atlantisports'. Must trigger empty response without generating narrative history."
+    },
+    {
+      "banned_terms": [
+        "hotel",
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "adv_trap_057",
+      "domain": "adversarial",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "empty",
+      "ordinal": 57,
+      "original_prompt": "Chengdu Gothic cathedral flight tracking structural load distribution booking information",
+      "partition": "adversarial",
+      "required_knowledge_axes": [
+        "wiki_or_zim"
+      ],
+      "required_sections": [],
+      "required_terms": [
+        "Chengdu",
+        "Gothic"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 57,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Negative Example. Cross-city spatial pollution. Forcing Gothic structural physics onto Chengdu. System must reject compilation."
+    },
+    {
+      "banned_terms": [
+        "hotel",
+        "restaurant"
+      ],
+      "case_id": "adv_trap_058",
+      "domain": "adversarial",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "empty",
+      "ordinal": 58,
+      "original_prompt": "Kyoto ancient Roman amphitheater layout seating capacity ticket price phone number lines",
+      "partition": "adversarial",
+      "required_knowledge_axes": [
+        "wiki_or_zim"
+      ],
+      "required_sections": [],
+      "required_terms": [
+        "Kyoto",
+        "amphitheater"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 58,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Negative Example. Cross-city pollution (Kyoto + Roman architecture). Must stay empty/thin, filtering transactional noise inputs."
+    },
+    {
+      "banned_terms": [
+        "restaurant",
+        "Google map"
+      ],
+      "case_id": "adv_trap_059",
+      "domain": "adversarial",
+      "legacy_baseline_result": "FAIL",
+      "min_quality": "thin",
+      "ordinal": 59,
+      "original_prompt": "Cappadociahôtel underground city ventilation shaft orientation ticket pricing system",
+      "partition": "adversarial",
+      "required_knowledge_axes": [
+        "lp_or_travel_guide"
+      ],
+      "required_sections": [
+        "spatial_structure"
+      ],
+      "required_terms": [
+        "Cappadociahôtel"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 59,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Listing noise and compound string trap. Query embeds 'hôtel' inside name string. Knowledge extraction must pierce text to gather engineering fact while throwing out listing details."
+    },
+    {
+      "banned_terms": [
+        "hotel",
+        "restaurant",
+        "ticket"
+      ],
+      "case_id": "adv_trap_060",
+      "domain": "adversarial",
+      "legacy_baseline_result": "PASS",
+      "min_quality": "empty",
+      "ordinal": 60,
+      "original_prompt": "Bangkok transit hub ancient Mesopotamian irrigation canal geometry connectivity matrix",
+      "partition": "adversarial",
+      "required_knowledge_axes": [
+        "wiki_or_zim"
+      ],
+      "required_sections": [],
+      "required_terms": [
+        "Bangkok",
+        "Mesopotamian"
+      ],
+      "source_trace": [
+        {
+          "canonicalization_basis": "case row copied from legacy source-of-truth dataset; not from controlled evidence rollup",
+          "line_number": 60,
+          "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+          "source_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+          "source_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+          "source_type": "legacy_series_b_blind_dataset_jsonl"
+        }
+      ],
+      "trap_notes": "Negative Example. High-contrast mismatch of modern transportation and ancient hydraulic nodes. Force refusal."
+    }
+  ],
+  "classification": "CANONICAL_OFFICIAL_DATASET_V1",
+  "controlled_evidence_rollup_used_as_dataset": false,
+  "created_from": {
+    "legacy_dataset_path": "/Users/xqdwww/Documents/Codex/2026-06-11/longlyplanet-skill/inputs/series_b_blind_dataset.jsonl",
+    "legacy_dataset_sha256": "9fdf5bd38b3ceedc802e74ce9f3a03336e82bde1c3f8a878321a9864fe93436e",
+    "query_bundle_final_metrics_path": "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+    "query_bundle_final_metrics_sha256": "368663560e204480a712115f7ca0033f52815ccf12c73654f419abfbad3c08c8",
+    "source_reports": [
+      "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_query_bundle_controlled/query_bundle_final_metrics.json",
+      "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_baseline_discrepancy_reconciliation/baseline_discrepancy_reconciliation_report.md",
+      "/Users/xqdwww/Documents/Codex/2026-06-22/post-lineage-series-b-controlled-re/outputs/series_b_final_closeout_no_baseline_update/series_b_final_closeout.json",
+      "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-official-canonical-input-discovery/outputs/series_b_official_canonical_input_discovery.json"
+    ]
+  },
+  "dataset_version": "series_b_official_60case_dataset.v1",
+  "generated_at": "2026-06-25T19:16:38.754956+00:00",
+  "generated_by_codex": true,
+  "schema_version": "series_b_official_60case_dataset.v1"
+}
