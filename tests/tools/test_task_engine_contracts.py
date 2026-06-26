@@ -5039,6 +5039,247 @@ def test_final_allows_natural_language_caveat_good():
     executors._assert_final_controller_packet_quality(packet, text)
 
 
+def test_final_blocks_handoff_caveats_bad():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    bad = (
+        executors._final_controller_report_from_packet(packet)
+        + "\n\n证据使用边界：Handoff caveats: L2.5 gaps.md indicates DEFECT: ignored epistemic gaps."
+    )
+
+    _assert_final_quality_rejects(packet, bad, "internal_handoff_metadata_leakage")
+
+
+def test_final_blocks_stage_label_leakage_bad():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    bad = (
+        executors._final_controller_report_from_packet(packet)
+        + "\n\n证据边界：L1-L4 evidence chain suggests this is accepted for decision handoff."
+    )
+
+    _assert_final_quality_rejects(packet, bad, "internal_handoff_metadata_leakage")
+
+
+def test_final_blocks_artifact_pipeline_language_bad():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    bad = (
+        executors._final_controller_report_from_packet(packet)
+        + "\n\n依据：based on convergence_report / calibration_report / research_evidence_packet / pipeline artifacts."
+    )
+
+    _assert_final_quality_rejects(packet, bad, "internal_language")
+
+
+def test_final_allows_naturalized_evidence_gap_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    text = (
+        executors._final_controller_report_from_packet(packet)
+        + "\n\n证据边界：这个结论仍有证据缺口，部分实时信息需要执行前重新核验；"
+        "以下建议是条件性判断，不应被视为确定预测或高置信事实。"
+    )
+
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def _handoff_leakage_fixture_packet(query: str, *, profiles: list[str] | None = None) -> dict:
+    import tools.task_engine_executors as executors
+
+    return {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": query,
+        "output_quality_profile": profiles or executors._task_engine_profiles_from_query(query),
+        "excerpts": {
+            "convergence_report": "关键判断应逐题回答，并保留证据强弱、适用边界和反证信号。",
+            "external_calibration": "",
+            "L5_deepseek_acceptance": (
+                "Controversy remains where L1-L4 materials depend on context. "
+                "Handoff caveats: DEFECT: L2.5 gaps.md requires full-text verification; "
+                "C2 is only snippet/search-result supported; do not treat as high-confidence fact."
+            ),
+        },
+    }
+
+
+def _assert_clean_final_has_no_handoff_debug_labels(text: str) -> None:
+    forbidden = (
+        "Handoff caveats",
+        "handoff caveat",
+        "L1-L4",
+        "L2.5",
+        "gaps.md",
+        "StageRecord",
+        "stage records",
+        "convergence_report",
+        "calibration_report",
+        "research_evidence_packet",
+        "evidence packet gate",
+        "checked_stages",
+        "accepted: true",
+        "ACCEPTED_WITH_DEFECTS",
+        "research_packet_profile",
+        "source_id",
+        "claim_id",
+        "Audit Finding",
+        "DEFECT",
+    )
+    for token in forbidden:
+        assert token not in text
+    assert "证据包仍有缺口" in text
+    assert "进一步全文核验" in text
+    assert "条件性决策" in text
+
+
+def test_case01_finance_final_clean_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "我有一个 A 股日线/周线 swing trading 因子系统，当前候选信号包括 trend-following、repair/rebound、hot momentum、"
+        "volume-price confirmation。目标不是预测明天涨跌，而是决定下一阶段应该优先工程化哪类 gate，避免过拟合和回撤扩大。请判断：\n"
+        "1. 最该优先工程化的 Top 3 gate；\n"
+        "2. 哪些信号最容易在回测中虚高；\n"
+        "3. 应该如何设计 walk-forward / out-of-sample 验证；\n"
+        "4. 哪些结论是证据支持，哪些只是合理推断，哪些是 speculative；\n"
+        "5. 给出下一步工程路线，但不要写成投资建议。"
+    )
+    packet = _handoff_leakage_fixture_packet(query)
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "Top 3" in text
+    assert "walk-forward" in text
+    assert "out-of-sample" in text
+    assert "[证据支持]" in text and "[合理推断]" in text and "[前瞻假设]" in text
+    _assert_clean_final_has_no_handoff_debug_labels(text)
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_case02_geopolitics_final_clean_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "未来 10 年，如果北极航道商业化程度上升，一个依赖中欧海运的制造企业是否应该把北极航道纳入战略备选？"
+        "请从法律主权争议、保险、港口与救援能力、地缘风险、季节性、成本不确定性角度判断：\n"
+        "1. 最可能被高估的机会；\n"
+        "2. 最可能被低估的风险；\n"
+        "3. 哪些前提一旦变化会改变结论；\n"
+        "4. 需要监控哪些指标；\n"
+        "5. 不要把长期情景推演写成确定预测。"
+    )
+    packet = _handoff_leakage_fixture_packet(query)
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "北极航道" in text
+    assert "长期情景" in text or "确定预测" in text
+    assert "监控" in text
+    _assert_clean_final_has_no_handoff_debug_labels(text)
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_case05_travel_final_clean_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。目标不是做每日行程，而是判断路线设计原则："
+        "自然景观、驾驶强度、亲子体验、老人舒适度、住宿稳定性、天气和安全冗余之间如何排序。请给出：\n"
+        "1. 路线设计优先级；\n"
+        "2. 最容易犯的 5 个规划错误；\n"
+        "3. 哪些信息必须临近出发再核验；\n"
+        "4. 什么情况下应该缩短路线；\n"
+        "5. 不要编造当前路况、营业时间或政策。"
+    )
+    packet = _handoff_leakage_fixture_packet(query)
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "自然景观" in text
+    assert "驾驶强度" in text
+    assert "老人舒适度" in text
+    assert "临近出发" in text or "核验" in text
+    _assert_clean_final_has_no_handoff_debug_labels(text)
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_case06_education_final_clean_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。家长想知道应该把 AI 用在讲解、练习生成、错题复盘、阅读拓展还是写作辅助。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n"
+        "2. 最危险的 5 个依赖路径；\n"
+        "3. 阅读、数学、写作、AI 工具的优先级；\n"
+        "4. 哪些判断是教育研究支持，哪些只是合理推断；\n"
+        "5. 给出家长可执行原则，但不要写成医疗或心理诊断。"
+    )
+    packet = _handoff_leakage_fixture_packet(query)
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "AI" in text
+    assert "数学" in text
+    assert "家长" in text
+    assert "医疗或心理诊断" in text or "不要写成医疗" in text
+    _assert_clean_final_has_no_handoff_debug_labels(text)
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_diagnostic_reports_can_contain_internal_terms_good():
+    import tools.task_engine_executors as executors
+
+    diagnostic = "Handoff caveats: L2.5 gaps.md StageRecord accepted: true checked_stages claim_id source_id"
+
+    assert executors._raw_packet_metadata_leakage_failures(diagnostic, allow_claim_table=False)
+    assert "证据包仍有缺口" in executors._sanitize_user_facing_excerpt(diagnostic)
+
+
+def test_final_preserves_naturalized_handoff_caveat_when_calibration_exists_good():
+    import tools.task_engine_executors as executors
+
+    packet = {
+        "mode": ENGINE_RESEARCH_DECISION,
+        "query": "请判断一个本地数据平台是否应该迁移云供应商，并说明风险边界。",
+        "output_quality_profile": [],
+        "excerpts": {
+            "external_calibration": "final_adjustment_recommendation\n把结论保持为条件性判断，并保留证据缺口。",
+            "convergence_report": "建议先做可逆试点，保留反证信号。",
+            "L5_deepseek_acceptance": (
+                "Handoff caveats: DEFECT: L2.5 gaps.md requires full-text verification; "
+                "C2 is only snippet/search-result supported; do not treat as high-confidence fact."
+            ),
+        },
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "证据包仍有缺口" in text
+    assert "进一步全文核验" in text
+    assert "条件性决策" in text
+    assert "Handoff caveats" not in text
+    assert "L2.5" not in text
+    assert "DEFECT" not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_business_case04_regression_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    packet["excerpts"]["L5_deepseek_acceptance"] = (
+        "Handoff caveats: DEFECT: L2.5 gaps.md requires full-text verification; "
+        "C2 is only snippet/search-result supported; do not treat as high-confidence fact."
+    )
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 1. 下一阶段最应该押注的 GTM 顺序" in text
+    assert "暂停产品功能扩张" in text
+    assert "90 天" in text
+    _assert_clean_final_has_no_handoff_debug_labels(text)
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
 def test_final_does_not_delete_evidence_gap_good():
     import tools.task_engine_executors as executors
 

@@ -9075,7 +9075,9 @@ def _research_decision_user_facing_report(query: str, packet: dict[str, Any], *,
     frame = _research_decision_generic_frame(query)
     convergence_note = _sanitize_user_facing_excerpt(str(excerpts.get("convergence_report") or ""), limit=700)
     calibration_note = _sanitize_user_facing_excerpt(str(excerpts.get("external_calibration") or ""), limit=700)
-    research_note = _sanitize_user_facing_excerpt(str(excerpts.get("L5_deepseek_acceptance") or excerpts.get("research_evidence_packet") or ""), limit=500)
+    research_source = str(excerpts.get("L5_deepseek_acceptance") or excerpts.get("research_evidence_packet") or "")
+    research_note = _sanitize_user_facing_excerpt(research_source, limit=500)
+    has_research_handoff_caveat = _line_carries_evidence_caveat_semantics(research_source) and bool(research_note)
     enumerated = _enumerated_user_questions(query)
     anchors = [terms[0] for _name, terms in _case_anchor_groups_from_query(query) if terms][:10]
     lines: list[str] = [
@@ -9122,6 +9124,12 @@ def _research_decision_user_facing_report(query: str, packet: dict[str, Any], *,
         "## 校准后的使用方式",
         frame["calibration_action"] + " 不把长期、弱证据或片段证据写成确定结论；只用于下一步可逆验证和监控指标设计。",
     ])
+    if has_research_handoff_caveat:
+        lines.extend([
+            "",
+            "## 证据使用边界",
+            research_note,
+        ])
     if calibration_note:
         lines.extend([
             "",
@@ -9369,6 +9377,7 @@ def _decision_future_inversion_report(
 
 def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
     raw_lines = []
+    skipped_caveat_metadata = False
     blocked_line_terms = (
         "executor_model",
         "fallback_reasons",
@@ -9394,11 +9403,17 @@ def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
     )
     for line in (text or "").splitlines():
         if any(term in line for term in blocked_line_terms):
+            skipped_caveat_metadata = skipped_caveat_metadata or _line_carries_evidence_caveat_semantics(line)
             continue
         if _raw_packet_metadata_leakage_failures(line, allow_claim_table=False):
+            skipped_caveat_metadata = skipped_caveat_metadata or _line_carries_evidence_caveat_semantics(line)
             continue
         raw_lines.append(line)
     value = _safe_final_excerpt("\n".join(raw_lines), limit=limit)
+    if skipped_caveat_metadata:
+        naturalized = _natural_language_packet_caveat(text)
+        if naturalized not in value:
+            value = _safe_final_excerpt((naturalized + " " + value).strip(), limit=limit)
     replacements = {
         "## key_drivers": "关键驱动：",
         "## mechanism_chain": "机制链：",
@@ -10004,25 +10019,73 @@ def _raw_packet_metadata_leakage_failures(text: str, *, allow_claim_table: bool 
         "insufficient_sources",
         "verdict:",
     )
+    handoff_terms = (
+        "handoff caveats",
+        "handoff caveat",
+        "handoff notes",
+        "caveats from handoff",
+        "from the handoff",
+        "as the packet says",
+        "according to stage records",
+        "stage records",
+        "stagerecord",
+        "gaps.md",
+        "evidence-chain",
+        "evidence chain",
+        "evidence packet gate",
+        "audit finding",
+        "audit status",
+        "defect (",
+        "defect:",
+        "snippet/search-result supported",
+        "do not treat as high-confidence fact",
+        "controversy remains where",
+    )
     failures: list[str] = []
     for term in raw_terms:
         if term in lowered:
             failures.append("raw_packet_metadata_leakage:" + term)
+    for term in handoff_terms:
+        if term in lowered:
+            failures.append("internal_handoff_metadata_leakage:" + term)
+    if re.search(r"\bL[1-5](?:\s*[-–]\s*L[1-5]|\.\d)?\b", value):
+        failures.append("internal_handoff_metadata_leakage:stage_label")
     if not allow_claim_table:
         for term in (
-            "source_id:",
-            "claim_id:",
-            "claim_text:",
-            "epistemic_tier:",
-            "source_anchors:",
-            "applicability_boundary:",
-            "counter_signal_or_failure_condition:",
-            "decision_use:",
-            "notes:",
+            "source_id",
+            "claim_id",
+            "claim_text",
+            "epistemic_tier",
+            "source_anchors",
+            "applicability_boundary",
+            "counter_signal_or_failure_condition",
+            "decision_use",
+            "notes",
         ):
-            if term in lowered:
+            if re.search(rf"\b{re.escape(term)}\b", lowered):
                 failures.append("raw_packet_metadata_leakage:" + term)
     return failures
+
+
+def _line_carries_evidence_caveat_semantics(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(
+        term in lowered
+        for term in (
+            "caveat",
+            "gap",
+            "verification",
+            "full-text",
+            "full text",
+            "snippet",
+            "defect",
+            "audit",
+            "controversy",
+            "证据缺口",
+            "核验",
+            "不确定",
+        )
+    )
 
 
 def _natural_language_packet_caveat(text: str = "") -> str:
@@ -10654,7 +10717,7 @@ def _strip_raw_artifact_metadata_for_final_body(text: str) -> str:
             continue
         if lowered in skipped_exact:
             continue
-        if any(lowered.startswith(prefix) for prefix in skipped_prefixes):
+        if any(lowered.startswith(prefix.lower()) for prefix in skipped_prefixes):
             continue
         if _raw_packet_metadata_leakage_failures(line, allow_claim_table=False):
             continue
