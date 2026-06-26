@@ -18,3 +18,4 @@ def test_github_remote_sync_safety_lesson_is_documented():
     assert "ssh.github.com:443" in text
     assert "github.com:443` is not the GitHub SSH endpoint" in text
     assert "No force push by default" in text
+    assert "git push <authorized-fork-remote> main" in text

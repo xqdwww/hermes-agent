@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,13 @@ from tools.task_engine_contracts import (
     normalize_mode,
     validate_pipeline,
 )
-from tools.passive_intelligence_guard import classify_skill_triggers
+from tools.passive_intelligence_guard import (
+    build_final_report_consistency_warnings,
+    check_final_report_consistency,
+    classify_action_permission,
+    classify_skill_triggers,
+    initialize_status_ledger,
+)
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
     run_decision_final_smoke,
@@ -172,6 +179,24 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "description": "Opt-in debug report of deterministic passive-intelligence guard trigger matches.",
                     "default": False,
                 },
+                "passive_guard_mode": {
+                    "type": "string",
+                    "enum": ["off", "debug", "warn", "block_destructive"],
+                    "description": "Opt-in passive-intelligence guard mode. Defaults to off; passive_guard_debug maps to debug.",
+                    "default": "off",
+                },
+                "passive_guard_action": {
+                    "type": "object",
+                    "description": "Optional caller-provided action descriptor for passive permission checks.",
+                },
+                "passive_guard_ledger": {
+                    "type": "object",
+                    "description": "Optional caller-provided status ledger seed for passive debug/warn checks.",
+                },
+                "passive_guard_report_text": {
+                    "type": "string",
+                    "description": "Optional report text to check for warning-only final report consistency.",
+                },
             },
             "required": ["query"],
         },
@@ -189,9 +214,14 @@ def task_engine_runner(
     research_packet_path: str | None = None,
     allow_archived_research_decision: bool = False,
     passive_guard_debug: bool = False,
+    passive_guard_mode: str = "off",
+    passive_guard_action: dict[str, Any] | None = None,
+    passive_guard_ledger: dict[str, Any] | None = None,
+    passive_guard_report_text: str | None = None,
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
+    guard_mode = _resolve_passive_guard_mode(passive_guard_mode, passive_guard_debug)
 
     if resolved_mode is None:
         return json.dumps(
@@ -215,6 +245,17 @@ def task_engine_runner(
     elif action == "full":
         action = _full_action_for_mode(resolved_mode)
 
+    pre_action_block = _passive_guard_pre_action_block(
+        query=query,
+        mode=resolved_mode,
+        action=action,
+        guard_mode=guard_mode,
+        passive_guard_action=passive_guard_action,
+        passive_guard_ledger=passive_guard_ledger,
+    )
+    if pre_action_block is not None:
+        return json.dumps(pre_action_block, ensure_ascii=False, indent=2)
+
     if action == "contract":
         payload = {
             "status": "ok",
@@ -222,7 +263,16 @@ def task_engine_runner(
             "contract": build_engine_contract(resolved_mode, query),
             "schema": canonical_schema(resolved_mode),
         }
-        _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
+        _attach_passive_guard_metadata(
+            payload,
+            query=query,
+            mode=resolved_mode,
+            action=action,
+            guard_mode=guard_mode,
+            passive_guard_action=passive_guard_action,
+            passive_guard_ledger=passive_guard_ledger,
+            report_text=passive_guard_report_text,
+        )
         return json.dumps(
             payload,
             ensure_ascii=False,
@@ -241,7 +291,16 @@ def task_engine_runner(
             "mode": resolved_mode,
             "plan": build_dry_run_plan(resolved_mode, base_dir=base_dir),
         }
-        _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
+        _attach_passive_guard_metadata(
+            payload,
+            query=query,
+            mode=resolved_mode,
+            action=action,
+            guard_mode=guard_mode,
+            passive_guard_action=passive_guard_action,
+            passive_guard_ledger=passive_guard_ledger,
+            report_text=passive_guard_report_text,
+        )
         return json.dumps(
             payload,
             ensure_ascii=False,
@@ -551,32 +610,140 @@ def task_engine_runner(
 
     validation = validate_pipeline(resolved_mode, run, base_dir=base_dir)
     if action == "validate":
-        return json.dumps(
-            {"status": "ok" if validation["valid"] else "blocked", "validation": validation},
-            ensure_ascii=False,
-            indent=2,
+        payload = {"status": "ok" if validation["valid"] else "blocked", "validation": validation}
+        _attach_passive_guard_metadata(
+            payload,
+            query=query,
+            mode=resolved_mode,
+            action=action,
+            guard_mode=guard_mode,
+            passive_guard_action=passive_guard_action,
+            passive_guard_ledger=passive_guard_ledger,
+            report_text=passive_guard_report_text,
         )
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     markdown = render_final_markdown(resolved_mode, run, validation, base_dir=base_dir)
-    return json.dumps(
-        {
-            "status": "ok" if validation["valid"] else "blocked",
-            "validation": validation,
-            "markdown": markdown,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def _attach_passive_guard_debug(payload: dict[str, Any], *, query: str, enabled: bool) -> None:
-    if not enabled:
-        return
-    payload["passive_intelligence_guard"] = {
-        "skill_triggers": classify_skill_triggers(query),
-        "debug_only": True,
-        "production_behavior_change": False,
+    payload = {
+        "status": "ok" if validation["valid"] else "blocked",
+        "validation": validation,
+        "markdown": markdown,
     }
+    _attach_passive_guard_metadata(
+        payload,
+        query=query,
+        mode=resolved_mode,
+        action=action,
+        guard_mode=guard_mode,
+        passive_guard_action=passive_guard_action,
+        passive_guard_ledger=passive_guard_ledger,
+        report_text=passive_guard_report_text or markdown,
+    )
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _resolve_passive_guard_mode(mode: str, debug_enabled: bool) -> str:
+    normalized = (mode or "off").strip().casefold().replace("-", "_")
+    if normalized not in {"off", "debug", "warn", "block_destructive"}:
+        normalized = "off"
+    if normalized == "off" and debug_enabled:
+        return "debug"
+    return normalized
+
+
+def _attach_passive_guard_metadata(
+    payload: dict[str, Any],
+    *,
+    query: str,
+    mode: str,
+    action: str,
+    guard_mode: str,
+    passive_guard_action: dict[str, Any] | None = None,
+    passive_guard_ledger: dict[str, Any] | None = None,
+    report_text: str | None = None,
+) -> None:
+    if guard_mode == "off":
+        return
+    ledger = _build_passive_status_ledger(mode=mode, action=action, ledger_seed=passive_guard_ledger)
+    permission = classify_action_permission(passive_guard_action) if isinstance(passive_guard_action, dict) else None
+    consistency = None
+    warnings: tuple[dict[str, str], ...] = ()
+    if guard_mode in {"warn", "block_destructive"} and report_text:
+        consistency = check_final_report_consistency(ledger, report_text)
+        warnings = build_final_report_consistency_warnings(ledger, report_text)
+    payload["passive_intelligence_guard"] = {
+        "mode": guard_mode,
+        "skill_triggers": classify_skill_triggers(query),
+        "debug_only": guard_mode == "debug",
+        "production_behavior_change": False,
+        "status_ledger": asdict(ledger),
+    }
+    if permission is not None:
+        payload["passive_intelligence_guard"]["action_permission"] = asdict(permission)
+        payload["passive_intelligence_guard"]["would_block_destructive"] = _is_destructive_permission_decision(permission)
+    if consistency is not None:
+        payload["passive_intelligence_guard"]["final_report_consistency"] = {
+            "consistent": consistency.consistent,
+            "violations": list(consistency.violations),
+            "warnings": list(warnings),
+            "warning_only": True,
+        }
+
+
+def _passive_guard_pre_action_block(
+    *,
+    query: str,
+    mode: str,
+    action: str,
+    guard_mode: str,
+    passive_guard_action: dict[str, Any] | None,
+    passive_guard_ledger: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if guard_mode != "block_destructive" or not isinstance(passive_guard_action, dict):
+        return None
+    permission = classify_action_permission(passive_guard_action)
+    if not _is_destructive_permission_decision(permission):
+        return None
+    payload = {
+        "status": "blocked",
+        "pipeline_status": PIPELINE_BLOCKED,
+        "blocked_stage": "passive_intelligence_guard",
+        "blocked_reason": permission.reason,
+        "message": "Passive guard blocked a clearly destructive or impossible action in explicit block_destructive mode.",
+    }
+    _attach_passive_guard_metadata(
+        payload,
+        query=query,
+        mode=mode,
+        action=action,
+        guard_mode=guard_mode,
+        passive_guard_action=passive_guard_action,
+        passive_guard_ledger=passive_guard_ledger,
+    )
+    return payload
+
+
+def _is_destructive_permission_decision(permission: Any) -> bool:
+    return getattr(permission, "reason", "") in {
+        "git_force_push_blocked",
+        "report_only_non_report_write_blocked",
+        "dry_run_official_update_blocked",
+        "official_or_production_update_requires_user_authorization",
+        "memory_mutation_requires_user_authorization",
+        "file_mutation_requires_user_authorization",
+        "browser_gui_execution_requires_openclaw",
+    }
+
+
+def _build_passive_status_ledger(*, mode: str, action: str, ledger_seed: dict[str, Any] | None) -> Any:
+    seed = dict(ledger_seed or {})
+    seed.setdefault("task_id", f"{normalize_mode(mode).lower()}:{action}")
+    seed.setdefault("project_id", "task_engine_runner")
+    seed.setdefault("task_status", "pending" if action in {"contract", "dry-run"} else "running")
+    seed.setdefault("current_phase", action)
+    seed.setdefault("dry_run", action == "dry-run")
+    seed.setdefault("report_only", action in {"contract", "validate"})
+    return initialize_status_ledger(seed)
 
 
 def _resolve_mode(mode: str, query: str) -> str | None:

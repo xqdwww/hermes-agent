@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 
 from tools.passive_intelligence_guard import (
+    build_final_report_consistency_warnings,
     check_final_report_consistency,
     check_verification_freshness,
     classify_action_permission,
+    classify_remote_sync_safety,
     classify_skill_triggers,
     classify_watchdog_state,
     initialize_status_ledger,
@@ -43,6 +45,183 @@ def test_task_engine_passive_guard_debug_is_opt_in_and_reports_triggers():
     assert "passive_intelligence_guard" not in default
     assert debug["passive_intelligence_guard"]["skill_triggers"] == ["codex_handoff", "stage_duty"]
     assert debug["passive_intelligence_guard"]["production_behavior_change"] is False
+
+
+def test_passive_guard_mode_default_off_no_output_change():
+    implicit = json.loads(
+        task_engine_runner(query="Run DECISION StageRecord and Codex patch", mode="DECISION", action="contract")
+    )
+    explicit_off = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord and Codex patch",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="off",
+        )
+    )
+
+    assert implicit == explicit_off
+    assert "passive_intelligence_guard" not in explicit_off
+
+
+def test_warn_mode_reports_final_report_contradiction_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_ledger={"task_id": "t1", "project_id": "p1", "task_status": "running"},
+            passive_guard_report_text="PASS. Completed.",
+        )
+    )
+
+    guard = result["passive_intelligence_guard"]
+    assert result["status"] == "ok"
+    assert guard["mode"] == "warn"
+    assert guard["final_report_consistency"]["warning_only"] is True
+    assert guard["final_report_consistency"]["consistent"] is False
+    assert guard["final_report_consistency"]["warnings"][0]["code"] == "PASSIVE_FINAL_REPORT_COMPLETION_CONFLICT"
+    assert guard["final_report_consistency"]["warnings"][0]["ledger_field"] == "task_status"
+
+
+def test_block_destructive_rejects_force_push():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_guard_action={"command": "git push --force origin main"},
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "passive_intelligence_guard"
+    assert result["blocked_reason"] == "git_force_push_blocked"
+    assert result["passive_intelligence_guard"]["action_permission"]["decision"] == "blocked"
+
+
+def test_block_destructive_rejects_report_only_non_report_write():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_guard_action={
+                "task": {"report_only": True},
+                "operation": "write",
+                "path": "src/runtime.py",
+                "artifact_type": "code",
+            },
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "report_only_non_report_write_blocked"
+
+
+def test_block_destructive_rejects_dry_run_official_update():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_guard_action={
+                "task": {"dry_run": True},
+                "operation": "write",
+                "description": "official baseline update",
+            },
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "dry_run_official_update_blocked"
+
+
+def test_block_destructive_surfaces_non_destructive_permission_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_guard_action={"command": "git push fork research-decision-validation"},
+        )
+    )
+
+    guard = result["passive_intelligence_guard"]
+    assert result["status"] == "ok"
+    assert guard["action_permission"]["decision"] == "user_authorization_required"
+    assert guard["action_permission"]["reason"] == "git_remote_or_history_change_requires_user_authorization"
+    assert guard["would_block_destructive"] is False
+
+
+def test_verification_stale_warning_surfaces_in_warn_mode():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_ledger={
+                "task_id": "t1",
+                "project_id": "p1",
+                "verification_status": "stale",
+                "latest_modification_event_id": 2,
+                "latest_verification_event_id": 1,
+            },
+            passive_guard_report_text="Verified and ready.",
+        )
+    )
+
+    warnings = result["passive_intelligence_guard"]["final_report_consistency"]["warnings"]
+    assert warnings[0]["code"] == "PASSIVE_FINAL_REPORT_VERIFICATION_CONFLICT"
+    assert warnings[0]["ledger_field"] == "verification_status"
+
+
+def test_ledger_partial_subtask_prevents_completed_claim_warning():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_ledger={
+                "task_id": "t1",
+                "project_id": "p1",
+                "task_status": "partial",
+                "subtask_statuses": {"phase_5": "partial"},
+            },
+            passive_guard_report_text="All phases complete. PASS.",
+        )
+    )
+
+    warning_codes = {
+        warning["code"] for warning in result["passive_intelligence_guard"]["final_report_consistency"]["warnings"]
+    }
+    assert "PASSIVE_FINAL_REPORT_COMPLETION_CONFLICT" in warning_codes
+    assert "PASSIVE_FINAL_REPORT_SUBTASK_CONFLICT" in warning_codes
+
+
+def test_debug_mode_surfaces_status_ledger_without_enforcement():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord and git push fork",
+            mode="DECISION",
+            action="dry-run",
+            passive_guard_mode="debug",
+        )
+    )
+
+    guard = result["passive_intelligence_guard"]
+    assert result["status"] == "ok"
+    assert guard["mode"] == "debug"
+    assert guard["debug_only"] is True
+    assert guard["status_ledger"]["dry_run"] is True
+    assert "git_safety" in guard["skill_triggers"]
 
 
 def test_code_modification_requires_codex():
@@ -261,3 +440,109 @@ def test_dry_run_report_cannot_claim_official_update():
     assert decision.consistent is False
     assert "official_update_claim_conflicts_with_ledger_false" in decision.violations
     assert "official_update_claim_conflicts_with_dry_run" in decision.violations
+
+
+def test_structured_final_report_warnings_include_phrase_field_and_safe_interpretation():
+    ledger = initialize_status_ledger({"task_id": "t1", "project_id": "p1", "task_status": "running"})
+
+    warnings = build_final_report_consistency_warnings(ledger, "PASS. Done.")
+
+    assert warnings[0]["code"] == "PASSIVE_FINAL_REPORT_COMPLETION_CONFLICT"
+    assert warnings[0]["ledger_field"] == "task_status"
+    assert warnings[0]["offending_phrase"] in {"PASS", "Done"}
+    assert "do not report completion" in warnings[0]["safe_interpretation"]
+
+
+def test_remote_sync_origin_read_not_write_regression():
+    decision = classify_remote_sync_safety(
+        {
+            "origin_read_ok": True,
+            "origin_write_proven": False,
+            "fork_write_proven": True,
+            "ls_remote_success": True,
+        }
+    )
+
+    assert decision.decision == "user_authorization_required"
+    assert decision.recommended_remote == "fork"
+    assert decision.branch_push_allowed is False
+    assert "origin_read_ok_does_not_prove_origin_write" in decision.warnings
+    assert "ls_remote_success_is_read_access_only" in decision.warnings
+
+
+def test_remote_sync_fork_write_requires_explicit_authorization_then_allows():
+    unauthorized = classify_remote_sync_safety(
+        {
+            "origin_read_ok": True,
+            "origin_write_proven": False,
+            "fork_write_proven": True,
+        }
+    )
+    authorized = classify_remote_sync_safety(
+        {
+            "origin_read_ok": True,
+            "origin_write_proven": False,
+            "fork_write_proven": True,
+            "authorized_remote": "fork",
+            "branch_push_verified": True,
+        }
+    )
+
+    assert unauthorized.decision == "user_authorization_required"
+    assert unauthorized.branch_push_allowed is False
+    assert authorized.decision == "allowed"
+    assert authorized.branch_push_allowed is True
+    assert authorized.tag_push_allowed is True
+
+
+def test_remote_sync_local_tag_does_not_imply_remote_tag_and_tag_waits_for_branch():
+    local_only = classify_remote_sync_safety(
+        {
+            "authorized_remote": "fork",
+            "fork_write_proven": True,
+            "local_tag_exists": True,
+            "remote_tag_exists": False,
+        }
+    )
+    tag_too_early = classify_remote_sync_safety(
+        {
+            "authorized_remote": "fork",
+            "fork_write_proven": True,
+            "tag_push_requested": True,
+            "branch_push_verified": False,
+        }
+    )
+
+    assert "local_tag_does_not_imply_remote_tag" in local_only.warnings
+    assert tag_too_early.decision == "blocked"
+    assert tag_too_early.reason == "tag_push_before_branch_push_verified"
+
+
+def test_github_ssh_443_endpoint_regression():
+    bad = classify_remote_sync_safety({"ssh_endpoint": "github.com:443"})
+    good = classify_remote_sync_safety(
+        {
+            "ssh_endpoint": "ssh.github.com:443",
+            "authorized_remote": "fork",
+            "fork_write_proven": True,
+        }
+    )
+
+    assert bad.decision == "blocked"
+    assert bad.reason == "github_com_443_is_not_github_ssh_endpoint"
+    assert good.decision == "allowed"
+
+
+def test_remote_sync_no_fallback_without_explicit_authorization():
+    decision = classify_remote_sync_safety({"fallback_from": "origin", "fallback_to": "fork"})
+
+    assert decision.decision == "blocked"
+    assert decision.reason == "remote_fallback_without_explicit_authorization"
+
+
+def test_git_remote_sync_terms_trigger_git_safety():
+    triggers = classify_skill_triggers(
+        "origin read works but fork write access, upstream, remote tag, ssh.github.com, github.com:443, known_hosts"
+    )
+
+    assert triggers == ["git_safety"]

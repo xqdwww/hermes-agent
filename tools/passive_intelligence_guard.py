@@ -13,7 +13,14 @@ VERIFICATION_STATUSES = {"not_required", "required", "verified", "unverified", "
 SKILL_TRIGGER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("codex_handoff", ("Codex", "patch", "repo", "pytest", "refactor", "bug fix", "修改代码", "写测试")),
     ("wait_watchdog", ("waiting", "timeout", "silent", "no output", "stuck", "卡住", "等待", "没返回", "AGY", "GPT Bridge", "subprocess")),
-    ("git_safety", ("git status", "commit", "tag", "push", "branch", "HEAD", "worktree", "merge")),
+    (
+        "git_safety",
+        (
+            "git status", "commit", "tag", "push", "branch", "HEAD", "worktree", "merge",
+            "origin", "fork", "upstream", "git push", "remote tag", "write access",
+            "ssh.github.com", "github.com:443", "known_hosts", "force push",
+        ),
+    ),
     ("browser_execution", ("OpenClaw", "browser", "Chrome Canary", "GUI", "login", "download", "screenshot", "浏览器", "下载")),
     ("document_validation", ("PDF", "OCR", "render", "Preview", "qlmanage", "pymupdf", "文件完整性", "截断")),
     ("travel_evidence", ("Travel", "Series B", "source acquisition", "OCR", "vectorization", "evidence packet", "旅行知识库")),
@@ -91,6 +98,18 @@ class WatchdogDecision:
     status: str = "running"
 
 
+@dataclass(frozen=True)
+class RemoteSyncDecision:
+    decision: str
+    reason: str
+    recommended_remote: str
+    branch_push_allowed: bool
+    tag_push_allowed: bool
+    blocked_by_default: bool
+    safe_next_action: str
+    warnings: tuple[str, ...] = ()
+
+
 def classify_skill_triggers(user_request: str) -> list[str]:
     haystack = (user_request or "").casefold()
     return [
@@ -114,8 +133,9 @@ def classify_action_permission(action: dict[str, Any]) -> PermissionDecision:
         return _decision("blocked", "dry_run_official_update_blocked", "hermes", True, "Keep official state unchanged; rerun without dry_run only after user authorization.")
     if _is_browser_gui_action(text):
         return _decision("openclaw_required", "browser_gui_execution_requires_openclaw", "openclaw", True, "Hand off to OpenClaw with explicit GUI/browser authorization.")
-    if _requires_user_authorization(data, text):
-        return _decision("user_authorization_required", "sensitive_or_external_state_change_requires_user_authorization", "user", True, "Ask the user to authorize this exact action before proceeding.")
+    user_authorization_reason = _user_authorization_reason(data, text)
+    if user_authorization_reason:
+        return _decision("user_authorization_required", user_authorization_reason, "user", True, "Ask the user to authorize this exact action before proceeding.")
     if _requires_codex(data, text):
         return _decision("codex_required", "code_change_requires_codex", "codex", True, "Create a Codex handoff or execute the code change through Codex.")
     if _is_allowed_hermes_action(text):
@@ -255,6 +275,125 @@ def check_final_report_consistency(ledger: StatusLedger, report_text: str) -> Co
     return ConsistencyDecision(not unique, unique, (), "Revise final report to match ledger state." if unique else "Report may be emitted.")
 
 
+def build_final_report_consistency_warnings(ledger: StatusLedger, report_text: str) -> tuple[dict[str, str], ...]:
+    decision = check_final_report_consistency(ledger, report_text)
+    return tuple(_warning_for_violation(violation, ledger, report_text or "") for violation in decision.violations)
+
+
+def classify_remote_sync_safety(state: dict[str, Any]) -> RemoteSyncDecision:
+    data = state if isinstance(state, dict) else {}
+    warnings: list[str] = []
+    authorized_remote = str(data.get("authorized_remote") or "").strip()
+    candidate_remote = str(data.get("candidate_remote") or data.get("remote") or "").strip()
+    origin_read_ok = bool(data.get("origin_read_ok") or data.get("origin_ls_remote_ok"))
+    origin_write_proven = bool(data.get("origin_write_proven"))
+    fork_write_proven = bool(data.get("fork_write_proven"))
+    branch_push_verified = bool(data.get("branch_push_verified"))
+    local_tag_exists = bool(data.get("local_tag_exists") or data.get("local_tag"))
+    remote_tag_exists = bool(data.get("remote_tag_exists") or data.get("remote_tag"))
+    ssh_endpoint = str(data.get("ssh_endpoint") or data.get("git_ssh_endpoint") or "")
+    fallback_from = str(data.get("fallback_from") or "")
+    fallback_to = str(data.get("fallback_to") or "")
+    explicit_fallback_authorized = bool(data.get("explicit_fallback_authorized"))
+    remote_branch_state = str(data.get("remote_branch_state") or "").strip().casefold()
+
+    if data.get("ls_remote_success"):
+        warnings.append("ls_remote_success_is_read_access_only")
+    if origin_read_ok and not origin_write_proven:
+        warnings.append("origin_read_ok_does_not_prove_origin_write")
+    if local_tag_exists and not remote_tag_exists:
+        warnings.append("local_tag_does_not_imply_remote_tag")
+
+    if "github.com:443" in ssh_endpoint and "ssh.github.com:443" not in ssh_endpoint:
+        return RemoteSyncDecision(
+            "blocked",
+            "github_com_443_is_not_github_ssh_endpoint",
+            "",
+            False,
+            False,
+            True,
+            "Use ssh.github.com:443, or a direct ssh://git@ssh.github.com:443/OWNER/REPO.git URL, after host key handling is verified.",
+            tuple(dict.fromkeys(warnings)),
+        )
+    if fallback_from and fallback_to and fallback_from != fallback_to and not explicit_fallback_authorized:
+        return RemoteSyncDecision(
+            "blocked",
+            "remote_fallback_without_explicit_authorization",
+            fallback_from,
+            False,
+            False,
+            True,
+            "Stop and ask the user to authorize the exact remote target before retrying.",
+            tuple(dict.fromkeys(warnings)),
+        )
+    if data.get("tag_push_requested") and not branch_push_verified:
+        return RemoteSyncDecision(
+            "blocked",
+            "tag_push_before_branch_push_verified",
+            candidate_remote or authorized_remote,
+            False,
+            False,
+            True,
+            "Verify the selected remote branch before pushing any tag.",
+            tuple(dict.fromkeys(warnings)),
+        )
+    if remote_branch_state in {"ahead", "diverged"}:
+        return RemoteSyncDecision(
+            "blocked",
+            f"remote_branch_{remote_branch_state}",
+            candidate_remote or authorized_remote,
+            False,
+            False,
+            True,
+            "Do not push; inspect and resolve remote branch relationship first.",
+            tuple(dict.fromkeys(warnings)),
+        )
+
+    recommended_remote = ""
+    if fork_write_proven and not origin_write_proven:
+        recommended_remote = "fork"
+    elif origin_write_proven:
+        recommended_remote = "origin"
+    elif candidate_remote:
+        recommended_remote = candidate_remote
+
+    if recommended_remote == "fork" and authorized_remote != "fork":
+        return RemoteSyncDecision(
+            "user_authorization_required",
+            "fork_write_proven_but_explicit_authorization_required",
+            "fork",
+            False,
+            False,
+            True,
+            "Ask the user to authorize fork as the exact remote target before pushing.",
+            tuple(dict.fromkeys(warnings)),
+        )
+    if candidate_remote == "origin" and not origin_write_proven:
+        return RemoteSyncDecision(
+            "user_authorization_required",
+            "origin_write_not_proven",
+            recommended_remote,
+            False,
+            False,
+            True,
+            "Do not push origin until origin write access is proven or explicitly authorized with that risk.",
+            tuple(dict.fromkeys(warnings)),
+        )
+
+    branch_allowed = bool(authorized_remote and authorized_remote == recommended_remote)
+    tag_allowed = bool(branch_allowed and branch_push_verified)
+    return RemoteSyncDecision(
+        "allowed" if branch_allowed else "user_authorization_required",
+        "remote_sync_target_authorized" if branch_allowed else "remote_sync_target_requires_authorization",
+        recommended_remote,
+        branch_allowed,
+        tag_allowed,
+        not branch_allowed,
+        "Push only the authorized remote/branch, then verify before tag push." if branch_allowed else "Ask for explicit remote authorization before pushing.",
+        tuple(dict.fromkeys(warnings)),
+    )
+
+
 def classify_watchdog_state(state: dict[str, Any]) -> WatchdogDecision:
     data = state if isinstance(state, dict) else {}
     process_status = str(data.get("process_status") or data.get("status") or "").casefold()
@@ -336,20 +475,22 @@ def _is_browser_gui_action(text: str) -> bool:
     )
 
 
-def _requires_user_authorization(action: dict[str, Any], text: str) -> bool:
-    terms = (
-        "git push", "git tag", "git merge", "branch delete", "delete branch",
-        "production promotion", "promote production", "official baseline update", "official update", "baseline update",
-        "memory delete", "delete memory", "memory replacement", "replace memory",
-        "file delete", "delete file", "remove file", "move file", "copy file",
-    )
-    if any(term in text for term in terms):
-        return True
+def _user_authorization_reason(action: dict[str, Any], text: str) -> str:
+    if any(term in text for term in ("production promotion", "promote production", "official baseline update", "official update", "baseline update")):
+        return "official_or_production_update_requires_user_authorization"
+    if any(term in text for term in ("memory delete", "delete memory", "memory replacement", "replace memory")):
+        return "memory_mutation_requires_user_authorization"
+    if any(term in text for term in ("file delete", "delete file", "remove file", "move file", "copy file")):
+        return "file_mutation_requires_user_authorization"
+    if any(term in text for term in ("git push", "git tag", "git merge", "branch delete", "delete branch")):
+        return "git_remote_or_history_change_requires_user_authorization"
     if action.get("operation") in {"delete", "move"} and action.get("path"):
-        return True
+        return "file_mutation_requires_user_authorization"
     if action.get("operation") == "copy" and not (action.get("target") or action.get("destination")):
-        return True
-    return action.get("memory_operation") in {"delete", "replace"}
+        return "file_mutation_requires_user_authorization"
+    if action.get("memory_operation") in {"delete", "replace"}:
+        return "memory_mutation_requires_user_authorization"
+    return ""
 
 
 def _requires_codex(action: dict[str, Any], text: str) -> bool:
@@ -464,6 +605,106 @@ def _apply_invariants(ledger: StatusLedger) -> StatusLedger:
     )
 
 
+def _warning_for_violation(violation: str, ledger: StatusLedger, report_text: str) -> dict[str, str]:
+    if violation.startswith("completion_claim_conflicts_with_task_status"):
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_COMPLETION_CONFLICT",
+            "task_status",
+            _first_claim_phrase(report_text, ("PASS", "passed", "completed", "complete", "done", "finished", "已完成")),
+            f"Task status is {ledger.task_status}; do not report completion unless the ledger is completed.",
+            violation,
+        )
+    if violation.startswith("verified_claim_conflicts_with_ledger"):
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_VERIFICATION_CONFLICT",
+            "verification_status",
+            _first_claim_phrase(report_text, ("verified", "verification passed", "validated", "验证通过")),
+            f"Verification status is {ledger.verification_status}; run fresh verification before claiming verified.",
+            violation,
+        )
+    if violation == "pushed_claim_conflicts_with_remote_pushed_false":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_PUSH_CONFLICT",
+            "remote_pushed",
+            _first_claim_phrase(report_text, ("pushed", "remote pushed", "push complete", "已推送")),
+            "Remote push is not recorded; treat the work as local only until remote push is verified.",
+            violation,
+        )
+    if violation == "remote_tag_claim_conflicts_with_missing_remote_tag":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_REMOTE_TAG_CONFLICT",
+            "remote_tag",
+            _first_claim_phrase(report_text, ("remote tag", "tag pushed", "pushed tag", "pushed")),
+            "A local tag does not imply a remote tag; verify the remote tag before claiming it.",
+            violation,
+        )
+    if violation == "official_update_claim_conflicts_with_ledger_false":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_OFFICIAL_UPDATE_CONFLICT",
+            "official_updated",
+            _first_claim_phrase(report_text, ("official baseline updated", "official updated", "baseline updated", "official state updated")),
+            "Official state is not recorded as updated; report this as report-only/local unless verified otherwise.",
+            violation,
+        )
+    if violation == "production_ready_claim_conflicts_with_ledger":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_PRODUCTION_READY_CONFLICT",
+            "production_changed",
+            _first_claim_phrase(report_text, ("production ready", "ready for production", "production-ready", "可生产")),
+            "Production change is not recorded or the ledger is blocked; do not claim production readiness.",
+            violation,
+        )
+    if violation == "all_phases_complete_claim_conflicts_with_subtasks":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_SUBTASK_CONFLICT",
+            "subtask_statuses",
+            _first_claim_phrase(report_text, ("all phases complete", "all stages complete", "all subtasks complete", "所有阶段完成")),
+            "One or more subtasks are not completed; report partial/incomplete status.",
+            violation,
+        )
+    if violation == "write_claim_conflicts_with_report_only":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_REPORT_ONLY_WRITE_CONFLICT",
+            "report_only",
+            _first_claim_phrase(report_text, ("wrote", "written", "modified", "created", "changed", "patched", "updated file", "files written")),
+            "The task is report-only; do not claim non-report writes.",
+            violation,
+        )
+    if violation == "official_update_claim_conflicts_with_dry_run":
+        return _report_warning(
+            "PASSIVE_FINAL_REPORT_DRY_RUN_OFFICIAL_CONFLICT",
+            "dry_run",
+            _first_claim_phrase(report_text, ("official baseline updated", "official updated", "baseline updated", "official state updated")),
+            "Dry-run tasks cannot update official state.",
+            violation,
+        )
+    return _report_warning(
+        "PASSIVE_FINAL_REPORT_LEDGER_INVARIANT_CONFLICT",
+        "invariant_violations",
+        "",
+        "Revise the report to match the status ledger invariant.",
+        violation,
+    )
+
+
+def _report_warning(code: str, ledger_field: str, offending_phrase: str, safe_interpretation: str, violation: str) -> dict[str, str]:
+    return {
+        "code": code,
+        "ledger_field": ledger_field,
+        "offending_phrase": offending_phrase,
+        "safe_interpretation": safe_interpretation,
+        "violation": violation,
+    }
+
+
+def _first_claim_phrase(text: str, phrases: tuple[str, ...]) -> str:
+    lowered = text.casefold()
+    for phrase in phrases:
+        if phrase.casefold() in lowered:
+            return phrase
+    return ""
+
+
 def _claims_completion(text: str) -> bool:
     return bool(re.search(r"\b(pass|passed|completed|complete|done|finished)\b", text)) or "已完成" in text
 
@@ -507,13 +748,16 @@ def _transient_network(signature: str) -> bool:
 __all__ = [
     "ConsistencyDecision",
     "PermissionDecision",
+    "RemoteSyncDecision",
     "SKILL_TRIGGER_RULES",
     "StatusLedger",
     "VerificationDecision",
     "WatchdogDecision",
+    "build_final_report_consistency_warnings",
     "check_final_report_consistency",
     "check_verification_freshness",
     "classify_action_permission",
+    "classify_remote_sync_safety",
     "classify_skill_triggers",
     "classify_watchdog_state",
     "initialize_status_ledger",

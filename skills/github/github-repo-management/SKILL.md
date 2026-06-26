@@ -207,7 +207,8 @@ git remote add upstream https://github.com/owner/repo-name.git
 git fetch upstream
 git checkout main
 git merge upstream/main
-git push origin main
+# Push only after the Remote Sync Safety Gate proves the selected fork remote is writable.
+git push <authorized-fork-remote> main
 ```
 
 **With gh (shortcut):**
