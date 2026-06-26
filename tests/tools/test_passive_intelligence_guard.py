@@ -3,14 +3,20 @@ from __future__ import annotations
 import json
 
 from tools.passive_intelligence_guard import (
+    build_document_validation_observer_plan,
     build_document_validation_warning,
     build_final_report_consistency_warnings,
+    build_long_run_observer_plan,
+    build_pdf_validation_command_plan,
+    build_watchdog_poll_plan,
     check_final_report_consistency,
     check_verification_freshness,
     classify_action_permission,
     classify_document_validation_requirements,
+    classify_document_validation_trigger,
     classify_error_kind,
     classify_long_run_event,
+    classify_long_run_trigger,
     classify_pdf_validation_result,
     classify_remote_sync_safety,
     classify_skill_triggers,
@@ -21,7 +27,9 @@ from tools.passive_intelligence_guard import (
     inspect_pdf_binary_signatures,
     safe_document_validation_summary,
     safe_long_run_status_summary,
+    summarize_document_validation_plan,
     summarize_document_validation_batch,
+    summarize_long_run_observer_plan,
     update_status_ledger,
 )
 from tools.task_engine_runner import task_engine_runner
@@ -853,3 +861,191 @@ def test_warn_mode_reports_long_run_watchdog_without_blocking():
     assert result["status"] == "ok"
     assert watchdog["decision"]["should_inspect"] is True
     assert watchdog["warning_only"] is True
+
+
+def test_document_task_builds_plan_without_executing_commands():
+    plan = build_document_validation_observer_plan("Validate report.pdf render before saying it is valid.")
+
+    assert plan.triggered is True
+    assert plan.files == ("report.pdf",)
+    assert plan.command_plan
+    assert all(command.executes_by_default is False for command in plan.command_plan)
+    assert all(command.destructive is False for command in plan.command_plan)
+    assert "run only explicitly authorized validation checks" in plan.next_safe_action.casefold()
+
+
+def test_preview_intended_use_requires_target_app_check():
+    plan = build_document_validation_observer_plan(
+        "Check report.pdf works in macOS Preview.",
+        intended_use="macOS Preview compatibility",
+    )
+
+    assert "macos_preview_compatibility" in plan.required_checks
+    assert "qlmanage_preview" in plan.platform_specific_checks
+    assert any(command.platform == "macos" for command in plan.command_plan)
+
+
+def test_verify_all_pdfs_adds_per_file_ledger_requirement():
+    plan = build_document_validation_observer_plan("Verify all PDFs a.pdf b.pdf and report all valid.")
+
+    assert plan.files == ("a.pdf", "b.pdf")
+    assert "per_file_validation_ledger" in plan.required_checks
+    assert "all files valid" in plan.prohibited_claims
+
+
+def test_zero_corrupted_claim_is_prohibited_without_full_checks():
+    plan = build_document_validation_observer_plan("Verify PDFs and report 0 corrupted.")
+
+    assert "0 corrupted" in plan.prohibited_claims
+    assert plan.warning_if_checks_missing == "Missing required checks must be reported as unknown/warning, not pass."
+
+
+def test_parser_only_safe_claim_ceiling_is_parser_readable():
+    plan = build_document_validation_observer_plan("PyMuPDF parser passed for report.pdf.")
+
+    assert plan.safe_claim_ceiling == "parser_readable"
+
+
+def test_unknown_files_requires_inventory_before_validation():
+    plan = build_document_validation_observer_plan("Verify all PDFs are not corrupted.")
+
+    assert plan.triggered is True
+    assert plan.files == ()
+    assert "file_inventory" in plan.required_checks
+    assert "file inventory is required" in summarize_document_validation_plan(plan).casefold()
+
+
+def test_pdf_validation_command_plan_is_non_executing_preview_only():
+    command_plan = build_pdf_validation_command_plan("report.pdf", platform="macos", target_app="Preview")
+
+    assert command_plan
+    assert all(command.executes_by_default is False for command in command_plan)
+    assert all(command.destructive is False for command in command_plan)
+    assert any("qlmanage" in command.command_preview for command in command_plan)
+
+
+def test_document_validation_trigger_detects_overclaim_terms():
+    assert classify_document_validation_trigger("Need 0 corrupted PDFs and Preview validation") is True
+
+
+def test_codex_task_triggers_watchdog_plan():
+    plan = build_long_run_observer_plan("Codex handoff is running silently.")
+
+    assert plan.triggered is True
+    assert plan.owner_tool == "codex_handoff"
+    assert plan.stage_name == "codex_handoff"
+
+
+def test_timeout_task_triggers_watchdog_plan():
+    assert classify_long_run_trigger("Process timeout with no output") is True
+    plan = build_long_run_observer_plan("Process timeout with no output")
+
+    assert plan.triggered is True
+    assert "timeout_mentioned" in plan.trigger_reasons
+
+
+def test_watchdog_plan_requires_phase_last_output_retry_fields():
+    plan = build_long_run_observer_plan("GPT Bridge subprocess no output", owner_tool="gpt_bridge")
+    required = set(plan.poll_plan.required_status_fields)
+
+    assert {"phase", "last_output_at", "retry_count", "error_signature", "next_safe_action"} <= required
+    assert tuple(plan.heartbeat_fields) == plan.poll_plan.required_status_fields
+
+
+def test_running_waiting_partial_cannot_claim_pass():
+    plan = build_long_run_observer_plan("Subprocess is waiting and partial output exists.")
+
+    assert "PASS" in plan.prohibited_claims
+    assert "serialize_running_as_pass" in plan.poll_plan.blocked_actions
+
+
+def test_owner_tool_stage_uses_timeout_policy():
+    plan = build_long_run_observer_plan(
+        "Decision external calibration is silent.",
+        owner_tool="agy",
+        stage_name="decision_external_calibration",
+    )
+
+    assert plan.timeout_policy.stage_name == "decision_external_calibration"
+    assert plan.poll_plan.hard_timeout == get_stage_timeout_policy("decision_external_calibration", "agy").hard_timeout
+
+
+def test_unknown_stage_uses_conservative_observer_policy():
+    plan = build_long_run_observer_plan("Unknown subprocess is running.", stage_name="unknown_stage")
+
+    assert plan.timeout_policy.stage_name == "generic_subprocess"
+    assert plan.poll_plan.hard_timeout == get_stage_timeout_policy("generic_subprocess").hard_timeout
+
+
+def test_watchdog_poll_plan_has_safe_and_blocked_actions():
+    poll_plan = build_watchdog_poll_plan(get_stage_timeout_policy("codex_handoff"))
+
+    assert "wait" in poll_plan.safe_actions
+    assert "blind_retry" in poll_plan.blocked_actions
+    assert "force_push" in poll_plan.blocked_actions
+
+
+def test_long_run_observer_summary_is_warning_only_language():
+    plan = build_long_run_observer_plan("AGY timeout with no output")
+
+    assert "warning-only" in summarize_long_run_observer_plan(plan)
+
+
+def test_default_mode_no_observer_metadata():
+    default = json.loads(
+        task_engine_runner(
+            query="Validate report.pdf and monitor Codex timeout.",
+            mode="DECISION",
+            action="contract",
+        )
+    )
+
+    assert "passive_intelligence_guard" not in default
+
+
+def test_debug_mode_includes_observer_plans():
+    result = json.loads(
+        task_engine_runner(
+            query="Validate report.pdf in Preview and monitor Codex timeout.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="debug",
+        )
+    )
+
+    observers = result["passive_intelligence_guard"]["observer_plans"]
+    assert "document_validation" in observers
+    assert "long_run_watchdog" in observers
+    assert observers["document_validation"]["plan"]["command_plan"][0]["executes_by_default"] is False
+
+
+def test_warn_mode_surfaces_observer_warnings_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="Verify all PDFs and report 0 corrupted while Codex is waiting with no output but PASS.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+        )
+    )
+
+    guard = result["passive_intelligence_guard"]
+    assert result["status"] == "ok"
+    assert guard["observer_plans"]["document_validation"]["warnings"]
+    assert guard["observer_plans"]["long_run_watchdog"]["warnings"]
+
+
+def test_block_destructive_mode_still_blocks_force_push_only_without_observer_expansion():
+    result = json.loads(
+        task_engine_runner(
+            query="Validate report.pdf and monitor Codex timeout.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_guard_action={"command": "git push --force origin main"},
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "git_force_push_blocked"
+    assert "observer_plans" not in result["passive_intelligence_guard"]

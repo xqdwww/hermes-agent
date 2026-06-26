@@ -184,6 +184,61 @@ class LongRunState:
     incomplete_phases: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ValidationCommandPlan:
+    check_name: str
+    command_preview: str
+    executes_by_default: bool
+    destructive: bool
+    platform: str
+    required_for_claim_level: str
+    fallback_if_unavailable: str
+
+
+@dataclass(frozen=True)
+class DocumentValidationObserverPlan:
+    triggered: bool
+    trigger_reasons: tuple[str, ...]
+    files: tuple[str, ...]
+    intended_use: str
+    required_checks: tuple[str, ...]
+    optional_checks: tuple[str, ...]
+    platform_specific_checks: tuple[str, ...]
+    command_plan: tuple[ValidationCommandPlan, ...]
+    prohibited_claims: tuple[str, ...]
+    safe_claim_ceiling: str
+    next_safe_action: str
+    warning_if_checks_missing: str
+
+
+@dataclass(frozen=True)
+class WatchdogPollPlan:
+    inspect_after_silence: int
+    soft_timeout: int
+    hard_timeout: int
+    retry_limit_same_error: int
+    retry_limit_total: int
+    required_status_fields: tuple[str, ...]
+    safe_actions: tuple[str, ...]
+    blocked_actions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LongRunObserverPlan:
+    triggered: bool
+    trigger_reasons: tuple[str, ...]
+    owner_tool: str
+    stage_name: str
+    timeout_policy: TimeoutPolicy
+    heartbeat_fields: tuple[str, ...]
+    poll_plan: WatchdogPollPlan
+    retry_policy: str
+    blocked_conditions: tuple[str, ...]
+    partial_output_policy: str
+    prohibited_claims: tuple[str, ...]
+    next_safe_action: str
+
+
 def classify_skill_triggers(user_request: str) -> list[str]:
     haystack = (user_request or "").casefold()
     return [
@@ -465,6 +520,254 @@ def classify_remote_sync_safety(state: dict[str, Any]) -> RemoteSyncDecision:
         not branch_allowed,
         "Push only the authorized remote/branch, then verify before tag push." if branch_allowed else "Ask for explicit remote authorization before pushing.",
         tuple(dict.fromkeys(warnings)),
+    )
+
+
+def classify_document_validation_trigger(task_text: str) -> bool:
+    text = (task_text or "").casefold()
+    terms = (
+        "pdf",
+        "ocr",
+        "render",
+        "preview",
+        "quicklook",
+        "qlmanage",
+        "pymupdf",
+        "pdfinfo",
+        "corrupted",
+        "0 corrupted",
+        "zero corrupted",
+        "all valid",
+        "verify all pdf",
+        "文件完整性",
+        "截断",
+    )
+    return any(term in text for term in terms)
+
+
+def build_document_validation_observer_plan(
+    task_text: str,
+    files: list[str] | tuple[str, ...] | None = None,
+    intended_use: str | None = None,
+) -> DocumentValidationObserverPlan:
+    text = task_text or ""
+    lowered = text.casefold()
+    explicit_files = tuple(str(item) for item in files or ())
+    inferred_files = tuple(_infer_document_paths(text)) if not explicit_files else explicit_files
+    intended = intended_use or _infer_document_intended_use(text)
+    triggered = classify_document_validation_trigger(text) or bool(inferred_files)
+    reasons = _document_trigger_reasons(text, inferred_files)
+    batch = _is_batch_document_request(lowered, inferred_files)
+
+    requirements = [
+        classify_document_validation_requirements(path or "document.pdf", intended)
+        for path in (inferred_files or ("document.pdf",))
+    ]
+    required_checks = _merge_tuple_values(*(item.required_checks for item in requirements))
+    optional_checks = _merge_tuple_values(*(item.optional_checks for item in requirements))
+    platform_checks = _merge_tuple_values(*(item.platform_specific_checks for item in requirements))
+    if batch:
+        required_checks = _append_unique(required_checks, "per_file_validation_ledger")
+    if not inferred_files:
+        required_checks = _append_unique(required_checks, "file_inventory")
+    prohibited = _document_prohibited_claims(lowered, batch)
+    safe_claim_ceiling = "parser_readable" if _parser_only_claim_context(lowered) else "binary_only"
+    if not inferred_files:
+        next_action = "Inventory the target files before claiming validation status."
+    else:
+        next_action = "Run only explicitly authorized validation checks and record per-file results before making claims."
+    warning = "Missing required checks must be reported as unknown/warning, not pass."
+    command_plan = tuple(
+        command
+        for path in (inferred_files or ("<inventory-required>",))
+        for command in build_pdf_validation_command_plan(path, platform=_infer_platform(lowered), target_app=_infer_target_app(lowered))
+    )
+    return DocumentValidationObserverPlan(
+        triggered=triggered,
+        trigger_reasons=reasons,
+        files=inferred_files,
+        intended_use=intended,
+        required_checks=required_checks,
+        optional_checks=optional_checks,
+        platform_specific_checks=platform_checks,
+        command_plan=command_plan,
+        prohibited_claims=prohibited,
+        safe_claim_ceiling=safe_claim_ceiling,
+        next_safe_action=next_action,
+        warning_if_checks_missing=warning,
+    )
+
+
+def build_pdf_validation_command_plan(
+    file_path: str,
+    platform: str | None = None,
+    target_app: str | None = None,
+) -> list[ValidationCommandPlan]:
+    path = file_path or "<file>"
+    normalized_platform = (platform or "portable").strip().casefold() or "portable"
+    target = (target_app or "").strip().casefold()
+    plans = [
+        ValidationCommandPlan(
+            "binary_signature",
+            f"inspect_pdf_binary_signatures({path!r})",
+            False,
+            False,
+            "portable",
+            "structurally_validated",
+            "Report binary signature as unknown if the file cannot be read.",
+        ),
+        ValidationCommandPlan(
+            "parser_readable",
+            f"python -c \"import pymupdf; pymupdf.open({path!r}).close()\"",
+            False,
+            False,
+            "portable",
+            "parser_readable",
+            "Do not claim full validity; parser-readable is the ceiling.",
+        ),
+        ValidationCommandPlan(
+            "render_check",
+            f"pdf-render-smoke --no-open-gui {path!r}",
+            False,
+            False,
+            "portable",
+            "rendered",
+            "If renderer is unavailable, report render compatibility as unknown.",
+        ),
+    ]
+    if normalized_platform in {"macos", "darwin"} or target in {"preview", "quicklook"}:
+        plans.extend(
+            [
+                ValidationCommandPlan(
+                    "macos_metadata_check",
+                    f"mdls {path!r}",
+                    False,
+                    False,
+                    "macos",
+                    "target_app_validated",
+                    "If mdls is unavailable, report macOS metadata compatibility as unknown.",
+                ),
+                ValidationCommandPlan(
+                    "quicklook_thumbnail_check",
+                    f"qlmanage -t -s 1 -o <tmpdir> {path!r}",
+                    False,
+                    False,
+                    "macos",
+                    "target_app_validated",
+                    "If QuickLook tooling is unavailable, do not claim Preview compatibility.",
+                ),
+            ]
+        )
+    return plans
+
+
+def summarize_document_validation_plan(plan: DocumentValidationObserverPlan) -> str:
+    if not plan.triggered:
+        return "No document validation observer plan is required."
+    if not plan.files:
+        return "Document validation is triggered, but file inventory is required before validation claims."
+    return f"Document validation observer plan is warning-only; safe claim ceiling before checks: {plan.safe_claim_ceiling}."
+
+
+def classify_long_run_trigger(task_text: str) -> bool:
+    text = (task_text or "").casefold()
+    terms = (
+        "codex",
+        "gpt bridge",
+        "agy",
+        "browser gui",
+        "batch download",
+        "subprocess",
+        "timeout",
+        "stuck",
+        "silent",
+        "no output",
+        "waiting",
+        "running",
+        "long-running",
+        "long running",
+        "卡住",
+        "等待",
+        "没返回",
+    )
+    return any(term in text for term in terms)
+
+
+def build_long_run_observer_plan(
+    task_text: str,
+    owner_tool: str | None = None,
+    stage_name: str | None = None,
+) -> LongRunObserverPlan:
+    text = task_text or ""
+    owner = _infer_owner_tool(text, owner_tool)
+    stage = _infer_stage_name(text, stage_name, owner)
+    triggered = classify_long_run_trigger(text) or bool(owner_tool or stage_name)
+    reasons = _long_run_trigger_reasons(text, owner, stage)
+    policy = get_stage_timeout_policy(stage, owner)
+    poll_plan = build_watchdog_poll_plan(policy)
+    return LongRunObserverPlan(
+        triggered=triggered,
+        trigger_reasons=reasons,
+        owner_tool=owner,
+        stage_name=stage,
+        timeout_policy=policy,
+        heartbeat_fields=(
+            "phase",
+            "started_at",
+            "last_output_at",
+            "elapsed",
+            "silence_seconds",
+            "process_status",
+            "retry_count",
+            "error_signature",
+            "next_safe_action",
+        ),
+        poll_plan=poll_plan,
+        retry_policy="Retry only transient network/timeout errors within per-stage policy; block repeated or owner-action errors.",
+        blocked_conditions=(
+            "auth_error",
+            "session_error",
+            "quota_error",
+            "permission_error",
+            "path_error",
+            "remote_ahead_or_diverged",
+            "same_error_repeated_limit",
+        ),
+        partial_output_policy="Timeout with partial output is partial, not completed.",
+        prohibited_claims=("PASS", "completed", "done", "success"),
+        next_safe_action="Observe status fields and classify wait/inspect/retry/block; do not start, kill, or retry processes from the observer plan.",
+    )
+
+
+def build_watchdog_poll_plan(policy: TimeoutPolicy) -> WatchdogPollPlan:
+    return WatchdogPollPlan(
+        inspect_after_silence=policy.inspect_after_silence,
+        soft_timeout=policy.soft_timeout,
+        hard_timeout=policy.hard_timeout,
+        retry_limit_same_error=policy.retry_limit_same_error,
+        retry_limit_total=policy.retry_limit_total,
+        required_status_fields=(
+            "phase",
+            "started_at",
+            "last_output_at",
+            "elapsed",
+            "silence_seconds",
+            "process_status",
+            "retry_count",
+            "error_signature",
+            "next_safe_action",
+        ),
+        safe_actions=("wait", "inspect", "mark_partial", "block_with_reason", "ask_owner"),
+        blocked_actions=("kill_process", "blind_retry", "force_push", "serialize_running_as_pass"),
+    )
+
+
+def summarize_long_run_observer_plan(plan: LongRunObserverPlan) -> str:
+    if not plan.triggered:
+        return "No long-run observer plan is required."
+    return (
+        f"Long-run observer plan is warning-only for {plan.stage_name}; "
+        f"inspect after {plan.poll_plan.inspect_after_silence}s silence and never report running/waiting/partial as PASS."
     )
 
 
@@ -1230,27 +1533,178 @@ def _explicit_blocking_state(state: LongRunState) -> bool:
     )
 
 
+def _infer_document_paths(text: str) -> list[str]:
+    candidates = re.findall(r"(?<![\w/.-])(?:[A-Za-z0-9_./-]+?\.(?:pdf|PDF))(?![\w.-])", text or "")
+    cleaned: list[str] = []
+    for candidate in candidates:
+        value = candidate.strip().strip("`'\".,;:()[]{}")
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return cleaned
+
+
+def _infer_document_intended_use(text: str) -> str:
+    lowered = (text or "").casefold()
+    parts: list[str] = []
+    if "preview" in lowered or "quicklook" in lowered or "macos" in lowered:
+        parts.append("macOS Preview compatibility")
+    if "0 corrupted" in lowered or "zero corrupted" in lowered or "all valid" in lowered or "verify all" in lowered:
+        parts.append("complete batch validation")
+    if "render" in lowered:
+        parts.append("render validation")
+    return "; ".join(parts)
+
+
+def _document_trigger_reasons(text: str, files: tuple[str, ...]) -> tuple[str, ...]:
+    lowered = (text or "").casefold()
+    reasons: list[str] = []
+    if files:
+        reasons.append("document_files_detected")
+    for term, reason in (
+        ("pdf", "pdf_task"),
+        ("ocr", "ocr_task"),
+        ("render", "render_check_requested"),
+        ("preview", "target_app_preview_requested"),
+        ("qlmanage", "quicklook_check_requested"),
+        ("pymupdf", "parser_check_mentioned"),
+        ("0 corrupted", "zero_corrupted_claim_risk"),
+        ("zero corrupted", "zero_corrupted_claim_risk"),
+        ("all valid", "all_valid_claim_risk"),
+        ("verify all", "batch_validation_requested"),
+        ("文件完整性", "document_integrity_requested"),
+        ("截断", "truncation_risk_requested"),
+    ):
+        if term in lowered:
+            reasons.append(reason)
+    return tuple(dict.fromkeys(reasons))
+
+
+def _is_batch_document_request(lowered_text: str, files: tuple[str, ...]) -> bool:
+    return len(files) > 1 or any(term in lowered_text for term in ("all pdf", "all valid", "0 corrupted", "zero corrupted", "batch", "verify all"))
+
+
+def _infer_platform(lowered_text: str) -> str:
+    if "macos" in lowered_text or "preview" in lowered_text or "quicklook" in lowered_text or "qlmanage" in lowered_text:
+        return "macos"
+    return "portable"
+
+
+def _infer_target_app(lowered_text: str) -> str:
+    if "preview" in lowered_text:
+        return "preview"
+    if "quicklook" in lowered_text or "qlmanage" in lowered_text:
+        return "quicklook"
+    return ""
+
+
+def _document_prohibited_claims(lowered_text: str, batch: bool) -> tuple[str, ...]:
+    claims = ["PDF fully valid", "fully valid PDF", "0 corrupted", "zero corrupted", "all valid"]
+    if "preview" in lowered_text or "quicklook" in lowered_text:
+        claims.extend(["Preview compatible", "target-app compatible"])
+    if batch:
+        claims.extend(["all files valid", "batch fully valid"])
+    return tuple(dict.fromkeys(claims))
+
+
+def _parser_only_claim_context(lowered_text: str) -> bool:
+    parser_terms = ("pymupdf", "parser", "parser-readable", "parser readable")
+    full_check_terms = ("render", "preview", "quicklook", "binary signature", "eof", "target app")
+    return any(term in lowered_text for term in parser_terms) and not any(term in lowered_text for term in full_check_terms)
+
+
+def _merge_tuple_values(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    result: tuple[str, ...] = ()
+    for group in groups:
+        for item in group:
+            result = _append_unique(result, item)
+    return result
+
+
+def _infer_owner_tool(text: str, owner_tool: str | None) -> str:
+    if owner_tool:
+        return owner_tool.strip().casefold().replace("-", "_")
+    lowered = (text or "").casefold()
+    if "codex" in lowered:
+        return "codex_handoff"
+    if "gpt bridge" in lowered:
+        return "gpt_bridge"
+    if "agy" in lowered:
+        return "agy"
+    if "browser gui" in lowered or "openclaw" in lowered:
+        return "browser_gui"
+    if "batch download" in lowered or "download" in lowered:
+        return "batch_download"
+    if "subprocess" in lowered:
+        return "generic_subprocess"
+    return "generic_subprocess"
+
+
+def _infer_stage_name(text: str, stage_name: str | None, owner: str) -> str:
+    if stage_name:
+        return stage_name.strip().casefold().replace("-", "_")
+    lowered = (text or "").casefold()
+    if "external_calibration" in lowered or "external calibration" in lowered:
+        return "decision_external_calibration"
+    if "intelligence_layer" in lowered or "intelligence layer" in lowered:
+        return "research_decision_intelligence_layer"
+    return owner or "generic_subprocess"
+
+
+def _long_run_trigger_reasons(text: str, owner: str, stage: str) -> tuple[str, ...]:
+    lowered = (text or "").casefold()
+    reasons: list[str] = []
+    if owner and owner != "generic_subprocess":
+        reasons.append(f"owner_tool:{owner}")
+    if stage and stage != owner:
+        reasons.append(f"stage:{stage}")
+    for term, reason in (
+        ("timeout", "timeout_mentioned"),
+        ("stuck", "stuck_mentioned"),
+        ("silent", "silence_mentioned"),
+        ("no output", "no_output_mentioned"),
+        ("waiting", "waiting_mentioned"),
+        ("running", "running_mentioned"),
+        ("subprocess", "subprocess_mentioned"),
+        ("卡住", "stuck_mentioned"),
+        ("等待", "waiting_mentioned"),
+        ("没返回", "no_output_mentioned"),
+    ):
+        if term in lowered:
+            reasons.append(reason)
+    return tuple(dict.fromkeys(reasons))
+
+
 __all__ = [
     "ConsistencyDecision",
     "DocumentValidationDecision",
+    "DocumentValidationObserverPlan",
     "DocumentValidationPlan",
     "LongRunState",
+    "LongRunObserverPlan",
     "PermissionDecision",
     "PdfSignatureResult",
     "RemoteSyncDecision",
     "SKILL_TRIGGER_RULES",
     "StatusLedger",
     "TimeoutPolicy",
+    "ValidationCommandPlan",
     "VerificationDecision",
     "WatchdogDecision",
+    "WatchdogPollPlan",
+    "build_document_validation_observer_plan",
     "build_document_validation_warning",
+    "build_long_run_observer_plan",
+    "build_pdf_validation_command_plan",
+    "build_watchdog_poll_plan",
     "build_final_report_consistency_warnings",
     "check_final_report_consistency",
     "check_verification_freshness",
     "classify_action_permission",
+    "classify_document_validation_trigger",
     "classify_document_validation_requirements",
     "classify_error_kind",
     "classify_long_run_event",
+    "classify_long_run_trigger",
     "classify_pdf_validation_result",
     "classify_remote_sync_safety",
     "classify_skill_triggers",
@@ -1261,7 +1715,9 @@ __all__ = [
     "inspect_pdf_binary_signatures",
     "safe_document_validation_summary",
     "safe_long_run_status_summary",
+    "summarize_document_validation_plan",
     "summarize_document_validation_batch",
+    "summarize_long_run_observer_plan",
     "update_long_run_ledger",
     "update_status_ledger",
 ]

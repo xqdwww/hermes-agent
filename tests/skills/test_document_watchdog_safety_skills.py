@@ -16,6 +16,8 @@ def test_document_validation_claim_safety_lesson_is_documented():
     assert "Target app compatibility must be checked" in text
     assert "Unknown or missing checks must be reported as unknown/warning, not pass" in text
     assert '"0 corrupted"' in text
+    assert "passive observer plan" in text
+    assert "claim ceiling to parser-readable" in text
 
 
 def test_long_run_watchdog_safety_lesson_is_documented():
@@ -29,3 +31,5 @@ def test_long_run_watchdog_safety_lesson_is_documented():
     assert "do not use one universal short timeout" in text
     assert "running or waiting task must not be serialized as PASS" in text
     assert "do not force push by default" in text
+    assert "passive watchdog observer plan" in text
+    assert "without starting, killing, or retrying processes" in text

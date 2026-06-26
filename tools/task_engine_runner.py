@@ -28,8 +28,10 @@ from tools.task_engine_contracts import (
     validate_pipeline,
 )
 from tools.passive_intelligence_guard import (
+    build_document_validation_observer_plan,
     build_document_validation_warning,
     build_final_report_consistency_warnings,
+    build_long_run_observer_plan,
     check_final_report_consistency,
     classify_action_permission,
     classify_document_validation_requirements,
@@ -40,6 +42,8 @@ from tools.passive_intelligence_guard import (
     initialize_status_ledger,
     safe_document_validation_summary,
     safe_long_run_status_summary,
+    summarize_document_validation_plan,
+    summarize_long_run_observer_plan,
 )
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
@@ -718,6 +722,10 @@ def _attach_passive_guard_metadata(
             "warnings": list(warnings),
             "warning_only": True,
         }
+    if guard_mode in {"debug", "warn"}:
+        observer_metadata = _build_passive_observer_metadata(query=query, guard_mode=guard_mode)
+        if observer_metadata:
+            payload["passive_intelligence_guard"]["observer_plans"] = observer_metadata
     if isinstance(document_validation, dict):
         payload["passive_intelligence_guard"]["document_validation"] = _build_document_validation_metadata(
             document_validation,
@@ -803,6 +811,73 @@ def _build_document_validation_metadata(document_validation: dict[str, Any], *, 
         "summary": safe_document_validation_summary(decision),
         "warning_only": True,
     }
+
+
+def _build_passive_observer_metadata(*, query: str, guard_mode: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    document_plan = build_document_validation_observer_plan(query)
+    if document_plan.triggered:
+        metadata["document_validation"] = {
+            "plan": asdict(document_plan),
+            "summary": summarize_document_validation_plan(document_plan),
+            "warnings": _observer_document_warnings(document_plan, query) if guard_mode == "warn" else [],
+            "warning_only": True,
+        }
+    long_run_plan = build_long_run_observer_plan(query)
+    if long_run_plan.triggered:
+        metadata["long_run_watchdog"] = {
+            "plan": asdict(long_run_plan),
+            "summary": summarize_long_run_observer_plan(long_run_plan),
+            "warnings": _observer_long_run_warnings(long_run_plan, query) if guard_mode == "warn" else [],
+            "warning_only": True,
+        }
+    return metadata
+
+
+def _observer_document_warnings(plan: Any, query: str) -> list[dict[str, str]]:
+    lowered = (query or "").casefold()
+    warnings: list[dict[str, str]] = []
+    for claim in plan.prohibited_claims:
+        if claim.casefold() in lowered:
+            warnings.append(
+                {
+                    "code": "PASSIVE_DOCUMENT_OBSERVER_OVERCLAIM_RISK",
+                    "offending_phrase": claim,
+                    "safe_interpretation": plan.warning_if_checks_missing,
+                }
+            )
+    if not plan.files:
+        warnings.append(
+            {
+                "code": "PASSIVE_DOCUMENT_OBSERVER_FILE_INVENTORY_REQUIRED",
+                "offending_phrase": "",
+                "safe_interpretation": plan.next_safe_action,
+            }
+        )
+    return warnings
+
+
+def _observer_long_run_warnings(plan: Any, query: str) -> list[dict[str, str]]:
+    lowered = (query or "").casefold()
+    warnings: list[dict[str, str]] = []
+    for claim in plan.prohibited_claims:
+        if re.search(rf"\b{re.escape(claim.casefold())}\b", lowered):
+            warnings.append(
+                {
+                    "code": "PASSIVE_LONG_RUN_OBSERVER_COMPLETION_OVERCLAIM_RISK",
+                    "offending_phrase": claim,
+                    "safe_interpretation": plan.partial_output_policy,
+                }
+            )
+    if any(term in lowered for term in ("timeout", "stuck", "silent", "no output", "waiting", "running", "卡住", "等待", "没返回")):
+        warnings.append(
+            {
+                "code": "PASSIVE_LONG_RUN_OBSERVER_STATUS_REQUIRED",
+                "offending_phrase": "",
+                "safe_interpretation": "Collect phase, last output time, elapsed time, retry count, and next safe action before reporting completion.",
+            }
+        )
+    return warnings
 
 
 def _build_long_run_watchdog_metadata(watchdog_state: dict[str, Any]) -> dict[str, Any]:

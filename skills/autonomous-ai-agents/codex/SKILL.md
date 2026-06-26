@@ -78,6 +78,7 @@ process(action="kill", session_id="<id>")
 - A running or waiting task must not be serialized as PASS.
 - If a branch push fails because a remote is ahead or diverged, block and inspect; do not force push by default.
 - Permission denied on `origin` is not authorization to fallback to `fork`; ask for explicit remote authorization.
+- Use a passive watchdog observer plan before long-run closure claims: collect phase, started_at, last_output_at, elapsed, silence_seconds, process_status, retry_count, error_signature, and next_safe_action without starting, killing, or retrying processes.
 
 ## Key Flags
 

@@ -29,6 +29,7 @@ Extraction success is not full document validity.
 - Unknown or missing checks must be reported as unknown/warning, not pass.
 - Do not claim "PDF fully valid", "all valid", or "0 corrupted" unless binary signature, required parser, required render, and required target-app checks passed for every file in scope.
 - Report per-file failures and unknowns separately from aggregate counts.
+- Use a passive observer plan before validation-heavy claims: inventory files, list required checks, keep command previews non-executing, and set the claim ceiling to parser-readable until stronger checks pass.
 
 ## Step 1: Remote URL Available?
 
