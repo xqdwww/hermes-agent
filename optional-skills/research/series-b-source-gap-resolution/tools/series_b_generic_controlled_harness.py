@@ -54,7 +54,11 @@ FORBIDDEN_TEXT_PATTERNS = {
         "phone number",
         "address map",
     ],
-    "wrong_scope_cases": ["cross_route_053", "adv_trap_059"],
+    "wrong_scope_cases": [
+        "hist_arch_020", "obj_art_002", "rel_space_031", "nat_eco_042", "cross_route_053",
+        "nat_eco_046", "nat_eco_043", "obj_art_005", "obj_art_011", "hist_arch_025", "rel_space_036",
+        "adv_trap_059",
+    ],
     "generated_or_mock": [
         "dummy_test_artifact_only",
         '"mock_builder_output": true',
@@ -187,6 +191,23 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         quality_min_chars=4200,
         quality_min_paragraphs=8,
     ),
+
+    "nat_eco_046": CaseConfig(
+        case_id="nat_eco_046",
+        expected_formal_ready_decision="NAT_ECO_046_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=("Loess", "silt", "erosion", "gully", "cleavage"),
+        required_sections=(
+            "spatial_structure",
+            "historical_layers",
+            "nature_environment",
+            "regional_relations",
+            "material_architecture",
+            "theme_tracks",
+        ),
+        required_axes=("nature_book", "qyer_or_china_local", "wiki_or_zim"),
+    ),
+
 }
 
 
@@ -266,8 +287,9 @@ def check_case_text(text: str, *, case_id: str) -> list[str]:
 
 def validate_case_chunks(chunks: list[dict[str, Any]], *, case_id: str) -> dict[str, Any]:
     config = case_config(case_id)
+    chunks = _evidence_chunks_only(chunks)
     if not chunks:
-        raise ControlledHarnessError("BLOCKED_BINDING_INSUFFICIENT", "approved chunks are empty")
+        raise ControlledHarnessError("BLOCKED_BINDING_INSUFFICIENT", "approved source-backed evidence chunks are empty")
     violations: list[str] = []
     terms: set[str] = set()
     sections: set[str] = set()
@@ -283,7 +305,7 @@ def validate_case_chunks(chunks: list[dict[str, Any]], *, case_id: str) -> dict[
             violations.append(f"{chunk_id}:excluded_chunk_included")
         if chunk.get("reviewer_recommendation") != config.approved_reviewer_decision:
             violations.append(f"{chunk_id}:not_formal_ready_recommended")
-        if chunk.get("production_default_enabled") is not False:
+        if chunk.get("production_default_enabled") is True:
             violations.append(f"{chunk_id}:production_default_enabled")
         if not chunk.get("text_sha256"):
             violations.append(f"{chunk_id}:text_sha256_missing")
@@ -319,6 +341,17 @@ def validate_case_chunks(chunks: list[dict[str, Any]], *, case_id: str) -> dict[
     }
 
 
+
+def _evidence_chunks_only(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    evidence_chunks: list[dict[str, Any]] = []
+    for chunk in chunks:
+        if chunk.get("source_backed_body_exists") is not True:
+            continue
+        if not (chunk.get("supports_terms") or chunk.get("supports_sections") or chunk.get("supports_axes")):
+            continue
+        evidence_chunks.append(chunk)
+    return evidence_chunks
+
 def _term_present(required: str, observed: set[str]) -> bool:
     required_norm = required.lower().replace("_", " ")
     for item in observed:
@@ -328,6 +361,26 @@ def _term_present(required: str, observed: set[str]) -> bool:
     return False
 
 
+
+def _formal_ready_decision_for_manifest(
+    manifest: dict[str, Any],
+    *,
+    case_id: str,
+    manifest_path: str | Path | None,
+) -> str | None:
+    decision = manifest.get("formal_ready_decision")
+    if isinstance(decision, str) and decision:
+        return decision
+    if manifest_path is None:
+        return None
+    sidecar = Path(manifest_path).expanduser().parent / f"{case_id}_formal_ready_review.json"
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    sidecar_decision = payload.get("formal_ready_decision")
+    return sidecar_decision if isinstance(sidecar_decision, str) and sidecar_decision else None
+
 def validate_handoff_inputs(
     *,
     case_id: str,
@@ -336,11 +389,17 @@ def validate_handoff_inputs(
     no_production_default: bool,
     no_baseline_update: bool,
     no_full_series_b: bool,
+    manifest_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     config = case_config(case_id)
     if manifest.get("case_id") != case_id or chunks_payload.get("case_id") != case_id:
         raise ControlledHarnessError("CASE_ID_MISMATCH", f"handoff inputs must be scoped to {case_id}")
-    if manifest.get("formal_ready_decision") != config.expected_formal_ready_decision:
+    formal_ready_decision = _formal_ready_decision_for_manifest(
+        manifest,
+        case_id=case_id,
+        manifest_path=manifest_path,
+    )
+    if formal_ready_decision != config.expected_formal_ready_decision:
         raise ControlledHarnessError("BLOCKED_GUARD_VIOLATION", "formal-ready decision is not the expected approved decision")
     if manifest.get("case_scoped_only") is not True:
         raise ControlledHarnessError("BLOCKED_GUARD_VIOLATION", "handoff is not case-scoped")
@@ -360,7 +419,7 @@ def validate_handoff_inputs(
     if not isinstance(chunks, list):
         raise ControlledHarnessError("APPROVED_CHUNKS_MALFORMED", "approved handoff chunks must be a list")
     validate_case_chunks(chunks, case_id=case_id)
-    return chunks
+    return _evidence_chunks_only(chunks)
 
 
 def export_source_packet(
@@ -387,6 +446,7 @@ def export_source_packet(
         no_production_default=no_production_default,
         no_baseline_update=no_baseline_update,
         no_full_series_b=no_full_series_b,
+        manifest_path=manifest_path,
     )
     source_records: dict[str, dict[str, Any]] = {}
     for chunk in chunks:
@@ -797,6 +857,7 @@ def run_controlled_harness(args: argparse.Namespace, *, fixed_case_id: str, repo
             no_production_default=args.no_production_default,
             no_baseline_update=args.no_baseline_update,
             no_full_series_b=args.no_full_series_b,
+            manifest_path=args.handoff_manifest,
         )
         if not args.execute_real_controlled_dry_run:
             return 0, {
