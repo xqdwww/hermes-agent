@@ -26,6 +26,7 @@ from tools.task_engine_contracts import (
     normalize_mode,
     validate_pipeline,
 )
+from tools.passive_intelligence_guard import classify_skill_triggers
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
     run_decision_final_smoke,
@@ -166,6 +167,11 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "description": "Explicitly allow archived RESEARCH_DECISION real execution. Defaults to false.",
                     "default": False,
                 },
+                "passive_guard_debug": {
+                    "type": "boolean",
+                    "description": "Opt-in debug report of deterministic passive-intelligence guard trigger matches.",
+                    "default": False,
+                },
             },
             "required": ["query"],
         },
@@ -182,6 +188,7 @@ def task_engine_runner(
     base_dir: str | None = None,
     research_packet_path: str | None = None,
     allow_archived_research_decision: bool = False,
+    passive_guard_debug: bool = False,
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
@@ -209,13 +216,15 @@ def task_engine_runner(
         action = _full_action_for_mode(resolved_mode)
 
     if action == "contract":
+        payload = {
+            "status": "ok",
+            "mode": resolved_mode,
+            "contract": build_engine_contract(resolved_mode, query),
+            "schema": canonical_schema(resolved_mode),
+        }
+        _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
         return json.dumps(
-            {
-                "status": "ok",
-                "mode": resolved_mode,
-                "contract": build_engine_contract(resolved_mode, query),
-                "schema": canonical_schema(resolved_mode),
-            },
+            payload,
             ensure_ascii=False,
             indent=2,
         )
@@ -227,12 +236,14 @@ def task_engine_runner(
         return json.dumps(run_omlx_preflight(), ensure_ascii=False, indent=2)
 
     if action == "dry-run":
+        payload = {
+            "status": "ok",
+            "mode": resolved_mode,
+            "plan": build_dry_run_plan(resolved_mode, base_dir=base_dir),
+        }
+        _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
         return json.dumps(
-            {
-                "status": "ok",
-                "mode": resolved_mode,
-                "plan": build_dry_run_plan(resolved_mode, base_dir=base_dir),
-            },
+            payload,
             ensure_ascii=False,
             indent=2,
         )
@@ -556,6 +567,16 @@ def task_engine_runner(
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _attach_passive_guard_debug(payload: dict[str, Any], *, query: str, enabled: bool) -> None:
+    if not enabled:
+        return
+    payload["passive_intelligence_guard"] = {
+        "skill_triggers": classify_skill_triggers(query),
+        "debug_only": True,
+        "production_behavior_change": False,
+    }
 
 
 def _resolve_mode(mode: str, query: str) -> str | None:
