@@ -1,4 +1,14 @@
 {
+  "explicit_integration_policy": {
+    "explicit_production_integration_allowed": true,
+    "global_default_enabled_required": false,
+    "official_baseline_write_enabled_required": false,
+    "production_default_manifest_write_allowed": false,
+    "production_default_scope": "explicit_series_b_target_only",
+    "source_data_write_enabled_required": false,
+    "vector_write_enabled_required": false,
+    "write_targets_required": []
+  },
   "no_default_integration_policy": {
     "production_default_manifest_integration_performed": false,
     "production_default_write_allowed_by_this_layer": false,
@@ -9,8 +19,17 @@
     "classification": {
       "const": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
     },
+    "explicit_production_integration_enabled": {
+      "type": "boolean"
+    },
     "full_series_b_required_before_release": {
       "const": true
+    },
+    "global_default_enabled": {
+      "const": false
+    },
+    "integration_manifest_file": {
+      "type": "string"
     },
     "layer_id": {
       "const": "series_b_production_target_v1"
@@ -22,6 +41,14 @@
       "const": false
     },
     "production_default_enabled": {
+      "const": false
+    },
+    "production_default_scope": {
+      "enum": [
+        "explicit_series_b_target_only"
+      ]
+    },
+    "production_release_ready": {
       "const": false
     },
     "push_tag_required_separate_authorization": {

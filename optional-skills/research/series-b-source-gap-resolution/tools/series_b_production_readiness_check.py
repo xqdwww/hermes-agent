@@ -33,7 +33,11 @@ def build_readiness_report(manifest_path: str | Path = DEFAULT_TARGET_MANIFEST) 
         "source_state_manifest_check": "PASS_READ_ONLY_NON_DEFAULT",
         "schema_validator_check": "PASS_PRESENT_READABLE",
         "caveat_preservation": "PASS",
+        "production_target_layer_integrated": validation["production_target_layer_integrated"],
+        "explicit_production_integration_enabled": validation["explicit_production_integration_enabled"],
+        "production_default_scope": validation["production_default_scope"],
         "production_default_enabled": False,
+        "global_default_enabled": False,
         "requires_explicit_integration": True,
         "write_targets": [],
         "vector_write_enabled": False,
@@ -45,6 +49,7 @@ def build_readiness_report(manifest_path: str | Path = DEFAULT_TARGET_MANIFEST) 
         "full_series_b_run_performed": False,
         "push_performed": False,
         "tag_created": False,
+        "release_performed": False,
     }
 
 

@@ -1,0 +1,49 @@
+{
+  "caveat_cases": [
+    "obj_art_003",
+    "obj_art_007",
+    "nat_eco_039",
+    "obj_art_010",
+    "hist_arch_024"
+  ],
+  "classification": "EXPLICIT_SERIES_B_PRODUCTION_INTEGRATION_PATH",
+  "explicit_production_integration_enabled": true,
+  "full_series_b_required_before_release": true,
+  "full_series_b_run_performed": false,
+  "global_default_enabled": false,
+  "integration_id": "series_b_explicit_production_integration_v1",
+  "notes": [
+    "This integration path is explicit to Series B only.",
+    "It is not a global production default registration.",
+    "It authorizes no source/vector/official baseline writes.",
+    "Push, tag, and release remain separately unauthorized."
+  ],
+  "official_baseline_file": "../official/series_b_official_baseline_current.json",
+  "official_baseline_ref": "39/60",
+  "official_baseline_write_enabled": false,
+  "production_default_enabled": false,
+  "production_default_manifest_modified": false,
+  "production_default_scope": "explicit_series_b_target_only",
+  "production_vector_index_write_enabled": false,
+  "push_enabled": false,
+  "release_enabled": false,
+  "release_ready": false,
+  "rollback_files": [
+    "optional-skills/research/series-b-source-gap-resolution/production/series_b_production_integration.json",
+    "optional-skills/research/series-b-source-gap-resolution/production/series_b_production_target_manifest.json",
+    "optional-skills/research/series-b-source-gap-resolution/production/series_b_production_readiness.json",
+    "optional-skills/research/series-b-source-gap-resolution/tools/series_b_production_target_loader.py",
+    "optional-skills/research/series-b-source-gap-resolution/tools/series_b_production_readiness_check.py",
+    "optional-skills/research/series-b-source-gap-resolution/tools/run_series_b_production_smoke.py"
+  ],
+  "schema_version": "series_b_production_integration.v1",
+  "series_b_target_available_for_production": true,
+  "smoke_test_required": true,
+  "source_data_write_enabled": false,
+  "source_state_manifest_file": "../official/series_b_source_state_manifest.json",
+  "tag_enabled": false,
+  "target_layer_id": "series_b_production_target_v1",
+  "target_manifest_file": "series_b_production_target_manifest.json",
+  "vector_write_enabled": false,
+  "write_targets": []
+}

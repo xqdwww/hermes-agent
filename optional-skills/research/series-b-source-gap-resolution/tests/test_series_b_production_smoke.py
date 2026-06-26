@@ -23,7 +23,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _guard_args(tmp: str) -> list[str]:
-    return ["--no-production-default-write", "--no-vector-write", "--no-source-write", "--output-dir", tmp]
+    return ["--no-vector-write", "--no-source-write", "--output-dir", tmp]
 
 
 def test_smoke_helper_help() -> None:
@@ -40,12 +40,12 @@ def test_smoke_helper_refuses_repo_internal_output_dir() -> None:
     assert payload["result_enum"] == "PRODUCTION_SMOKE_OUTPUT_DIR_INSIDE_REPO"
 
 
-def test_smoke_helper_requires_no_write_flags() -> None:
+def test_smoke_helper_requires_vector_source_no_write_flags() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        proc = _run(["--check-baseline", "--no-vector-write", "--no-source-write", "--output-dir", tmp])
+        proc = _run(["--check-baseline", "--output-dir", tmp])
         assert proc.returncode != 0
         payload = json.loads(proc.stdout)
-        assert payload["result_enum"] == "PRODUCTION_SMOKE_DEFAULT_WRITE_RISK"
+        assert payload["result_enum"] == "PRODUCTION_SMOKE_VECTOR_WRITE_RISK"
 
 
 def test_smoke_helper_no_mutation_mode_works() -> None:
@@ -58,16 +58,18 @@ def test_smoke_helper_no_mutation_mode_works() -> None:
             check_loader=True,
             dry_run_one_case=True,
             check_no_mutation=True,
-            no_production_default_write=True,
+            no_production_default_write=False,
             no_vector_write=True,
             no_source_write=True,
         )
         assert status == 0, payload
-        assert payload["result_enum"] == "PRODUCTION_SMOKE_DRY_RUN_PASS"
+        assert payload["result_enum"] == "PRODUCTION_SMOKE_TEST_PASS"
         assert payload["no_mutation_check"] == "PASS"
+        assert payload["production_target_layer_integrated"] is True
+        assert payload["production_default_scope"] == "explicit_series_b_target_only"
         assert payload["production_default_manifest_integration_performed"] is False
         assert payload["official_baseline_modified"] is False
-        assert payload["full_series_b_run_performed"] is False
+        assert payload["source_vector_mutation_performed"] is False
         assert payload["checks"]["baseline"]["official_baseline_current"] == "39/60"
         assert payload["checks"]["dry_run_one_case"]["dossier_generated"] is False
 
@@ -84,14 +86,14 @@ def test_cli_smoke_writes_repo_external_artifact() -> None:
         ])
         assert proc.returncode == 0, proc.stderr + proc.stdout
         payload = json.loads(proc.stdout)
-        assert payload["result_enum"] == "PRODUCTION_SMOKE_DRY_RUN_PASS"
-        assert (Path(tmp) / "series_b_production_smoke_dry_run.json").exists()
+        assert payload["result_enum"] == "PRODUCTION_SMOKE_TEST_PASS"
+        assert (Path(tmp) / "series_b_production_smoke_test.json").exists()
 
 
 def run_tests() -> None:
     test_smoke_helper_help()
     test_smoke_helper_refuses_repo_internal_output_dir()
-    test_smoke_helper_requires_no_write_flags()
+    test_smoke_helper_requires_vector_source_no_write_flags()
     test_smoke_helper_no_mutation_mode_works()
     test_cli_smoke_writes_repo_external_artifact()
 

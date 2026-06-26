@@ -6,17 +6,24 @@
     "obj_art_010",
     "hist_arch_024"
   ],
+  "explicit_production_integration_enabled": true,
   "full_series_b_required_before_release": true,
+  "global_default_enabled": false,
   "layer_id": "series_b_production_target_v1",
   "notes": [
     "This readiness artifact describes the explicit target layer only.",
     "It does not register the target layer as production default.",
-    "It does not authorize push, tag, release, vector writes, source writes, or full Series B execution."
+    "It does not authorize push, tag, release, vector writes, source writes, or full Series B execution.",
+    "Explicit Series B production integration path is present, but release/push/tag remain unauthorized."
   ],
   "official_baseline_ref": "39/60",
   "production_default_enabled": false,
   "production_default_integrated": false,
-  "readiness_status": "TARGET_LAYER_READY_NOT_INTEGRATED",
+  "production_default_scope": "explicit_series_b_target_only",
+  "production_readiness_verdict": "READY_WITH_FULL_SERIES_B_SMOKE_REQUIRED",
+  "production_release_ready": false,
+  "production_target_layer_integrated": true,
+  "readiness_status": "EXPLICIT_PRODUCTION_INTEGRATED_NOT_RELEASED",
   "requires_explicit_integration": true,
   "schema_version": "series_b_production_readiness.v1",
   "smoke_test_required": true

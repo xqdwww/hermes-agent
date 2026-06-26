@@ -19,8 +19,8 @@ from series_b_production_readiness_check import build_readiness_report
 from series_b_production_target_loader import DEFAULT_TARGET_MANIFEST, ProductionTargetLayerError, load_explicit_production_target, sha256_file
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-RESULT_PASS = "PRODUCTION_SMOKE_DRY_RUN_PASS"
-RESULT_BLOCKED = "PRODUCTION_SMOKE_DRY_RUN_BLOCKED"
+RESULT_PASS = "PRODUCTION_SMOKE_TEST_PASS"
+RESULT_BLOCKED = "PRODUCTION_SMOKE_TEST_BLOCKED"
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -64,6 +64,7 @@ def _sensitive_hashes(resolved_paths: dict[str, str]) -> dict[str, str]:
         "source_state_manifest_file",
         "schema_file",
         "validator_file",
+        "integration_manifest_file",
     ]
     return {key: sha256_file(resolved_paths[key]) for key in keys if key in resolved_paths and Path(resolved_paths[key]).is_file()}
 
@@ -82,6 +83,8 @@ def _dry_run_one_case(resolved_paths: dict[str, str]) -> dict[str, Any]:
         "dossier_generated": False,
         "retrieval_executed": False,
         "production_default_written": False,
+        "production_vector_written": False,
+        "source_data_written": False,
     }
 
 
@@ -99,8 +102,6 @@ def run_smoke(
     no_source_write: bool,
 ) -> tuple[int, dict[str, Any]]:
     try:
-        if not no_production_default_write:
-            raise ProductionTargetLayerError("PRODUCTION_SMOKE_DEFAULT_WRITE_RISK", "--no-production-default-write is required")
         if not no_vector_write:
             raise ProductionTargetLayerError("PRODUCTION_SMOKE_VECTOR_WRITE_RISK", "--no-vector-write is required")
         if not no_source_write:
@@ -113,9 +114,21 @@ def run_smoke(
         before_hashes = _sensitive_hashes(validation["resolved_paths"])
         checks: dict[str, Any] = {}
         if check_manifest:
-            checks["manifest"] = {"status": "PASS", "layer_id": validation["layer_id"], "manifest_path": validation["manifest_path"]}
+            checks["manifest"] = {
+                "status": "PASS",
+                "layer_id": validation["layer_id"],
+                "manifest_path": validation["manifest_path"],
+                "integration_manifest_path": validation["integration"]["integration_manifest_path"],
+                "production_default_scope": validation["production_default_scope"],
+            }
         if check_loader:
-            checks["loader"] = {"status": "PASS", "resolved_config_read_only": True, "write_targets": validation["write_targets"]}
+            checks["loader"] = {
+                "status": "PASS",
+                "resolved_config_read_only": True,
+                "write_targets": validation["write_targets"],
+                "production_target_layer_integrated": validation["production_target_layer_integrated"],
+                "global_default_enabled": validation["global_default_enabled"],
+            }
         if check_baseline:
             checks["baseline"] = {"status": "PASS", "official_baseline_current": validation["official_baseline_ref"]}
         if dry_run_one_case:
@@ -139,20 +152,28 @@ def run_smoke(
             "post_hashes": after_hashes,
             "pre_repo_status": before_status,
             "post_repo_status": after_status,
+            "production_target_layer_integrated": validation["production_target_layer_integrated"],
+            "production_default_scope": validation["production_default_scope"],
             "production_default_manifest_integration_performed": False,
+            "production_default_write_performed": False,
             "official_baseline_modified": False,
+            "source_vector_mutation_performed": False,
             "full_series_b_run_performed": False,
             "push_performed": False,
             "tag_created": False,
+            "release_performed": False,
         }
-        (target_output / "series_b_production_smoke_dry_run.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        (target_output / "series_b_production_smoke_dry_run.md").write_text(
-            "# Series B Production Smoke Dry Run\n\n"
+        (target_output / "series_b_production_smoke_test.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (target_output / "series_b_production_smoke_test.md").write_text(
+            "# Series B Production Smoke Test\n\n"
             f"result: `{payload['result_enum']}`\n\n"
             f"official_baseline_current: `{validation['official_baseline_ref']}`\n\n"
+            f"production_target_layer_integrated: `{validation['production_target_layer_integrated']}`\n\n"
+            f"production_default_scope: `{validation['production_default_scope']}`\n\n"
             f"no_mutation_check: `{payload['no_mutation_check']}`\n\n"
             "production_default_manifest_integration_performed: false\n"
             "official_baseline_modified: false\n"
+            "source_vector_mutation_performed: false\n"
             "full_series_b_run_performed: false\n",
             encoding="utf-8",
         )
@@ -164,14 +185,16 @@ def run_smoke(
             "message": exc.message,
             "production_default_manifest_integration_performed": False,
             "official_baseline_modified": False,
+            "source_vector_mutation_performed": False,
             "full_series_b_run_performed": False,
             "push_performed": False,
             "tag_created": False,
+            "release_performed": False,
         }
         try:
             target_output = _validate_output_dir(output_dir)
             target_output.mkdir(parents=True, exist_ok=True)
-            (target_output / "series_b_production_smoke_dry_run.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            (target_output / "series_b_production_smoke_test.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         except Exception:
             pass
         return 2, payload

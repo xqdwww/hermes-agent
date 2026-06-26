@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit non-default Series B production target loader."""
+"""Explicit Series B production target loader."""
 
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ DEFAULT_TARGET_MANIFEST = SERIES_B_ROOT / "production/series_b_production_target
 EXPECTED_LAYER_ID = "series_b_production_target_v1"
 EXPECTED_SCHEMA_VERSION = "series_b_production_target_manifest.v1"
 EXPECTED_CLASSIFICATION = "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
+EXPECTED_INTEGRATION_SCHEMA = "series_b_production_integration.v1"
+EXPECTED_INTEGRATION_CLASSIFICATION = "EXPLICIT_SERIES_B_PRODUCTION_INTEGRATION_PATH"
 EXPECTED_BASELINE = "39/60"
+EXPECTED_SCOPE = "explicit_series_b_target_only"
 REQUIRED_CAVEAT_CASES = {"obj_art_003", "obj_art_007", "nat_eco_039", "obj_art_010", "hist_arch_024"}
 
 
@@ -86,6 +89,65 @@ def _assert_true(payload: dict[str, Any], key: str, error_code: str) -> None:
         raise ProductionTargetLayerError(error_code, f"{key} must be true")
 
 
+def _validate_no_write_policy(payload: dict[str, Any], *, context: str) -> None:
+    _assert_false(payload, "vector_write_enabled", f"{context}_VECTOR_WRITE_RISK")
+    _assert_false(payload, "source_data_write_enabled", f"{context}_SOURCE_WRITE_RISK")
+    _assert_false(payload, "official_baseline_write_enabled", f"{context}_BASELINE_WRITE_RISK")
+    if payload.get("write_targets") != []:
+        raise ProductionTargetLayerError(f"{context}_WRITE_TARGET_RISK", "write_targets must be empty")
+
+
+def validate_production_integration_manifest(integration_path: str | Path, *, target_manifest_path: str | Path) -> dict[str, Any]:
+    path = Path(integration_path).expanduser().resolve(strict=False)
+    if not path.exists() or not path.is_file():
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_MANIFEST_MISSING", f"integration manifest missing: {path}")
+    payload = load_json(path)
+    if payload.get("schema_version") != EXPECTED_INTEGRATION_SCHEMA:
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_SCHEMA_INVALID", "unsupported integration manifest schema")
+    if payload.get("classification") != EXPECTED_INTEGRATION_CLASSIFICATION:
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_CLASSIFICATION_INVALID", "unexpected integration classification")
+    if payload.get("target_layer_id") != EXPECTED_LAYER_ID:
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_TARGET_INVALID", "integration target_layer_id mismatch")
+    _assert_true(payload, "explicit_production_integration_enabled", "PRODUCTION_INTEGRATION_NOT_ENABLED")
+    if payload.get("production_default_scope") != EXPECTED_SCOPE:
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_SCOPE_INVALID", "production default scope must be explicit_series_b_target_only")
+    _assert_false(payload, "global_default_enabled", "PRODUCTION_INTEGRATION_GLOBAL_DEFAULT_RISK")
+    _assert_false(payload, "production_default_enabled", "PRODUCTION_INTEGRATION_GLOBAL_DEFAULT_RISK")
+    _assert_false(payload, "production_default_manifest_modified", "PRODUCTION_INTEGRATION_DEFAULT_MANIFEST_WRITE_RISK")
+    _assert_false(payload, "production_vector_index_write_enabled", "PRODUCTION_INTEGRATION_VECTOR_WRITE_RISK")
+    _assert_false(payload, "push_enabled", "PRODUCTION_INTEGRATION_PUSH_RISK")
+    _assert_false(payload, "tag_enabled", "PRODUCTION_INTEGRATION_TAG_RISK")
+    _assert_false(payload, "release_enabled", "PRODUCTION_INTEGRATION_RELEASE_RISK")
+    _validate_no_write_policy(payload, context="PRODUCTION_INTEGRATION")
+    if payload.get("official_baseline_ref") != EXPECTED_BASELINE:
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_BASELINE_INVALID", "integration must reference 39/60 baseline")
+    caveats = set(payload.get("caveat_cases") or [])
+    if not REQUIRED_CAVEAT_CASES.issubset(caveats):
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_CAVEAT_MISSING", "integration manifest missing required caveat cases")
+    raw_target = payload.get("target_manifest_file")
+    if not raw_target:
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_TARGET_MISSING", "missing target_manifest_file")
+    target_ref = _resolve_layer_path(raw_target, manifest_path=path)
+    if target_ref != Path(target_manifest_path).expanduser().resolve(strict=False):
+        raise ProductionTargetLayerError("PRODUCTION_INTEGRATION_TARGET_INVALID", "target_manifest_file does not match loaded target")
+    return {
+        "status": "PASS",
+        "integration_manifest_path": str(path),
+        "integration_manifest_sha256": sha256_file(path),
+        "integration_id": payload.get("integration_id"),
+        "explicit_production_integration_enabled": True,
+        "production_target_layer_integrated": True,
+        "production_default_scope": EXPECTED_SCOPE,
+        "global_default_enabled": False,
+        "production_default_manifest_modified": False,
+        "write_targets": [],
+        "vector_write_enabled": False,
+        "source_data_write_enabled": False,
+        "official_baseline_write_enabled": False,
+        "release_ready": payload.get("release_ready") is True,
+    }
+
+
 def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARGET_MANIFEST) -> dict[str, Any]:
     target = Path(manifest_path).expanduser().resolve(strict=False)
     if not target.exists() or not target.is_file():
@@ -101,15 +163,17 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
         raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_BASELINE_INVALID", "official baseline ref must be 39/60")
 
     _assert_false(manifest, "production_default_enabled", "PRODUCTION_TARGET_LAYER_DEFAULT_RISK")
+    _assert_false(manifest, "global_default_enabled", "PRODUCTION_TARGET_LAYER_GLOBAL_DEFAULT_RISK")
     _assert_true(manifest, "requires_explicit_integration", "PRODUCTION_TARGET_LAYER_EXPLICIT_GATE_REQUIRED")
-    _assert_false(manifest, "vector_write_enabled", "PRODUCTION_TARGET_LAYER_VECTOR_WRITE_RISK")
-    _assert_false(manifest, "source_data_write_enabled", "PRODUCTION_TARGET_LAYER_SOURCE_WRITE_RISK")
-    _assert_false(manifest, "official_baseline_write_enabled", "PRODUCTION_TARGET_LAYER_BASELINE_WRITE_RISK")
+    _assert_false(manifest, "production_release_ready", "PRODUCTION_TARGET_LAYER_RELEASE_RISK")
+    _assert_true(manifest, "release_requires_separate_authorization", "PRODUCTION_TARGET_LAYER_RELEASE_AUTH_REQUIRED")
+    _assert_true(manifest, "explicit_production_integration_enabled", "PRODUCTION_TARGET_LAYER_INTEGRATION_NOT_ENABLED")
+    if manifest.get("production_default_scope") != EXPECTED_SCOPE:
+        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_SCOPE_INVALID", "production default scope must be explicit_series_b_target_only")
+    _validate_no_write_policy(manifest, context="PRODUCTION_TARGET_LAYER")
     _assert_true(manifest, "smoke_test_required", "PRODUCTION_TARGET_LAYER_SMOKE_REQUIRED")
     _assert_true(manifest, "full_series_b_required_before_release", "PRODUCTION_TARGET_LAYER_FULL_SERIES_B_GATE_REQUIRED")
     _assert_true(manifest, "push_tag_required_separate_authorization", "PRODUCTION_TARGET_LAYER_PUSH_TAG_GATE_REQUIRED")
-    if manifest.get("write_targets") != []:
-        raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_WRITE_TARGET_RISK", "write_targets must be empty")
 
     caveats = set(manifest.get("caveat_cases") or [])
     missing_caveats = sorted(REQUIRED_CAVEAT_CASES - caveats)
@@ -124,6 +188,7 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
         "source_state_manifest_file",
         "schema_file",
         "validator_file",
+        "integration_manifest_file",
     ):
         raw = manifest.get(key)
         if not raw:
@@ -156,6 +221,7 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
     if dataset.get("classification") != "CANONICAL_OFFICIAL_DATASET_V1" or dataset.get("case_count") != 60:
         raise ProductionTargetLayerError("PRODUCTION_TARGET_LAYER_DATASET_INVALID", "official dataset must be canonical 60-case dataset")
 
+    integration = validate_production_integration_manifest(resolved["integration_manifest_file"], target_manifest_path=target)
     resolved_hashes = {key: sha256_file(value) for key, value in resolved.items() if Path(value).is_file()}
     return {
         "status": "PASS",
@@ -165,21 +231,28 @@ def validate_production_target_manifest(manifest_path: str | Path = DEFAULT_TARG
         "layer_id": manifest["layer_id"],
         "official_baseline_ref": manifest["official_baseline_ref"],
         "production_default_enabled": False,
+        "global_default_enabled": False,
         "requires_explicit_integration": True,
+        "explicit_production_integration_enabled": True,
+        "production_target_layer_integrated": True,
+        "production_default_scope": EXPECTED_SCOPE,
         "write_targets": [],
         "vector_write_enabled": False,
         "source_data_write_enabled": False,
         "official_baseline_write_enabled": False,
+        "release_ready": False,
         "caveat_cases": sorted(caveats),
         "resolved_paths": resolved,
         "resolved_hashes": resolved_hashes,
+        "integration": integration,
         "repo_status": _repo_status(),
     }
 
 
 def load_explicit_production_target(manifest_path: str | Path = DEFAULT_TARGET_MANIFEST) -> dict[str, Any]:
-    """Load and validate an explicit non-default production target layer."""
+    """Load and validate the explicit Series B production target layer."""
 
     validation = validate_production_target_manifest(manifest_path)
     manifest = load_json(validation["manifest_path"])
-    return {"manifest": manifest, "validation": validation}
+    integration = load_json(validation["resolved_paths"]["integration_manifest_file"])
+    return {"manifest": manifest, "integration": integration, "validation": validation}
