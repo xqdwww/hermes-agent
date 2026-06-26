@@ -156,6 +156,37 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_sections=("spatial_structure", "nature_environment", "theme_tracks"),
         required_axes=("context_sources", "wiki_or_zim"),
     ),
+
+    "cross_route_053": CaseConfig(
+        case_id="cross_route_053",
+        expected_formal_ready_decision="CROSS_ROUTE_053_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=(
+            "Maya",
+            "Maya lowlands",
+            "chultun",
+            "cistern",
+            "swamp",
+            "swamp farming",
+            "raised agricultural beds",
+            "raised field",
+            "karst",
+            "limestone",
+            "cenote",
+            "Yucatán Peninsula",
+            "hydrology",
+        ),
+        required_sections=(
+            "historical_context",
+            "natural_processes",
+            "regional_relations",
+            "material_architecture",
+            "theme_tracks",
+        ),
+        required_axes=("nature_book", "geography / karst-hydrology", "archaeology_book"),
+        quality_min_chars=4200,
+        quality_min_paragraphs=8,
+    ),
 }
 
 
@@ -220,7 +251,11 @@ def _contains_any(text: str, variants: list[str]) -> bool:
 def check_case_text(text: str, *, case_id: str) -> list[str]:
     violations: list[str] = []
     for label, patterns in FORBIDDEN_TEXT_PATTERNS.items():
-        if _contains_any(text, patterns):
+        active_patterns = [
+            pattern for pattern in patterns
+            if not (label == "wrong_scope_cases" and pattern == case_id)
+        ]
+        if _contains_any(text, active_patterns):
             violations.append(label)
     if "readme counted as evidence" in text.lower():
         violations.append("readme_or_title_only")
@@ -320,6 +355,8 @@ def validate_handoff_inputs(
     if manifest.get("separate_execution_next_step_allowed") is not True:
         raise ControlledHarnessError("BLOCKED_GUARD_VIOLATION", "separate execution authorization marker missing")
     chunks = chunks_payload.get("handoff_chunks")
+    if chunks is None:
+        chunks = chunks_payload.get("approved_chunks")
     if not isinstance(chunks, list):
         raise ControlledHarnessError("APPROVED_CHUNKS_MALFORMED", "approved handoff chunks must be a list")
     validate_case_chunks(chunks, case_id=case_id)
