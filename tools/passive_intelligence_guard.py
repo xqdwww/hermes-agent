@@ -975,7 +975,15 @@ def apply_passive_runtime_event(
                 files_written = list(_append_unique(tuple(files_written), path))
             file_mutations.append({"event_id": runtime_event.event_id, "path": path, "operation": operation})
             latest_modification_event_id = runtime_event.event_id
-            verification_status = "stale" if latest_verification_event_id is not None else "required"
+            if latest_verification_event_id is not None:
+                verification_status = "stale"
+                add_warning(
+                    "PASSIVE_RUNTIME_VERIFICATION_STALE",
+                    "A file mutation after verification makes the prior verification stale.",
+                    ledger_field="verification_status",
+                )
+            else:
+                verification_status = "required"
             add_forbidden("verified", "no changes after verification")
             if report_only and not _runtime_report_artifact_path(path):
                 production_changed = True
@@ -1060,6 +1068,11 @@ def apply_passive_runtime_event(
             overall_status = "partial"
             partial_reasons = list(_append_unique(tuple(partial_reasons), decision.blocked_reason or "long_run_partial"))
             add_forbidden("PASS", "completed")
+            add_warning(
+                "PASSIVE_RUNTIME_LONG_RUN_PARTIAL",
+                safe_long_run_status_summary(decision),
+                ledger_field="overall_status",
+            )
         if decision.should_block:
             overall_status = "blocked"
             blocked_reason = blocked_reason or decision.blocked_reason or "long_run_blocked"
@@ -1438,6 +1451,55 @@ def build_passive_events_from_runner_context(context: dict[str, Any]) -> list[Pa
                 "remote_sync",
                 task_id,
                 {"operation": "official_update", "dry_run": True, "official_updated": True},
+            )
+        )
+        next_id += 1
+
+    process_keys = {
+        "process_status",
+        "elapsed_seconds",
+        "silence_seconds",
+        "expected_silence_budget",
+        "hard_timeout",
+        "retry_count_same_error",
+        "retry_count_total",
+        "last_error_signature",
+        "current_error_signature",
+        "partial_output_present",
+        "partial_output",
+        "output_freshness",
+        "auth_state",
+        "quota_state",
+        "path_state",
+        "permission_state",
+        "owner_tool",
+        "stage_name",
+    }
+    if any(key in data for key in process_keys):
+        events.append(
+            _runtime_event(
+                next_id,
+                "process_status",
+                task_id,
+                {
+                    "owner_tool": str(data.get("owner_tool") or ""),
+                    "stage_name": str(data.get("stage_name") or ""),
+                    "process_status": str(data.get("process_status") or data.get("status") or ""),
+                    "elapsed_seconds": _optional_float(data.get("elapsed_seconds")),
+                    "silence_seconds": _optional_float(data.get("silence_seconds")),
+                    "expected_silence_budget": _optional_float(data.get("expected_silence_budget")),
+                    "hard_timeout": _optional_float(data.get("hard_timeout")),
+                    "retry_count_same_error": _optional_int(data.get("retry_count_same_error")) or 0,
+                    "retry_count_total": _optional_int(data.get("retry_count_total")) or 0,
+                    "last_error_signature": str(data.get("last_error_signature") or ""),
+                    "current_error_signature": str(data.get("current_error_signature") or ""),
+                    "partial_output_present": bool(data.get("partial_output_present") or data.get("partial_output")),
+                    "output_freshness": str(data.get("output_freshness") or ""),
+                    "auth_state": str(data.get("auth_state") or ""),
+                    "quota_state": str(data.get("quota_state") or ""),
+                    "path_state": str(data.get("path_state") or ""),
+                    "permission_state": str(data.get("permission_state") or ""),
+                },
             )
         )
         next_id += 1

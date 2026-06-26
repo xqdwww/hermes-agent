@@ -1084,6 +1084,7 @@ def test_file_write_makes_prior_verification_stale():
 
     assert ledger.verification_status == "stale"
     assert ledger.latest_modification_event_id == 2
+    assert any(item["code"] == "PASSIVE_RUNTIME_VERIFICATION_STALE" for item in ledger.warnings)
 
 
 def test_verification_after_write_restores_verified_state():
@@ -1384,6 +1385,7 @@ def test_timeout_partial_output_sets_partial():
 
     assert ledger.overall_status == "partial"
     assert classify_ledger_completion_state(ledger).can_report_completed is False
+    assert any(item["code"] == "PASSIVE_RUNTIME_LONG_RUN_PARTIAL" for item in ledger.warnings)
 
 
 def test_repeated_permission_error_sets_blocked():
@@ -1850,6 +1852,29 @@ def test_long_run_trigger_without_process_status_warns_at_boundary():
 
     runtime = result["passive_intelligence_guard"]["runtime_ledger"]
     assert any(item["code"] == "PASSIVE_RUNTIME_WATCHDOG_STATUS_REQUIRED" for item in runtime["warnings"])
+
+
+def test_timeout_partial_context_at_boundary_sets_partial_warning():
+    result = json.loads(
+        task_engine_runner(
+            query="Codex timeout with partial output reported as PASS.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_context={
+                "runner": {
+                    "process_status": "timeout",
+                    "partial_output_present": True,
+                },
+                "report": {"report_text": "PASS completed."},
+            },
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["ledger"]["overall_status"] == "partial"
+    assert any(item["code"] == "PASSIVE_RUNTIME_LONG_RUN_PARTIAL" for item in runtime["warnings"])
+    assert any(item["code"] == "PASSIVE_RUNTIME_COMPLETION_CONFLICT" for item in runtime["warnings"])
 
 
 def test_block_destructive_mode_does_not_expand_to_warning_only_ledger_findings():
