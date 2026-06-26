@@ -9128,7 +9128,7 @@ def _research_decision_user_facing_report(query: str, packet: dict[str, Any], *,
         lines.extend([
             "",
             "## 证据使用边界",
-            research_note,
+            _natural_language_packet_caveat(research_source) if _raw_packet_metadata_leakage_failures(research_source, allow_claim_table=False) else research_note,
         ])
     if calibration_note:
         lines.extend([
@@ -9400,6 +9400,14 @@ def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
         "Stage records",
         "阶段记录",
         "unavailability",
+        "Compact basis",
+        "compact basis",
+        "raw evidence snippet",
+        "evidence snippet",
+        "Defect Type",
+        "Direct gaps include",
+        "Structured gaps",
+        "requires_full_text_verification",
     )
     for line in (text or "").splitlines():
         if any(term in line for term in blocked_line_terms):
@@ -9849,10 +9857,65 @@ def _top_k_answer_lines(query: str, body: str, combined: str) -> list[str]:
     lines: list[str] = []
     for index in range(count):
         base = bases[index % len(bases)]
-        lines.append(
-            f"{index + 1}. {tier} {base}：针对{focus}，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。"
-        )
+        lines.append(_top_k_specific_item_line(index + 1, tier, base, query, body, combined, focus_terms))
     return lines
+
+
+def _top_k_specific_item_line(
+    index: int,
+    tier: str,
+    base: str,
+    query: str,
+    body: str,
+    combined: str,
+    focus_terms: list[str],
+) -> str:
+    value = "\n".join((query, body, combined))
+    focus = ", ".join(focus_terms[:3]) if focus_terms else "该对象"
+    body_lower = body.lower()
+    if "gate" in body_lower:
+        details = [
+            ("先按市场状态和样本外窗口切开信号，避免把单一行情里的胜率当成稳定 edge", "跨年度/OOS 收益和回撤改善", "walk-forward 后排序坍塌或只在样本内有效"),
+            ("把成交量、价格确认、流动性、停牌和容量纳入可交易性过滤，防止纸面收益无法成交", "换手、滑点和容量约束后仍有净收益", "交易成本或薄流动性吞掉收益"),
+            ("限制连续亏损、行业/市值暴露和极端热度，先保护回撤而不是追求更多信号", "OOS 最大回撤下降且收益没有过度牺牲", "回撤只在训练集改善"),
+            ("识别拥挤和过热后的反转风险，避免 hot momentum 只捕捉短期噪声", "拥挤度下降后信号仍有效", "涨停、停牌或幸存者偏差解释了收益"),
+            ("冻结参数和复盘口径，避免每轮回测后隐性调参", "规则变更有记录且下一窗口验证", "人工改规则后收益才出现"),
+        ]
+    elif any(term in body for term in ("使用场景", "用途")) or "ai tutor" in value.lower():
+        if any(term in body for term in ("危险", "依赖", "风险", "错误")):
+            details = [
+                ("外包启动会让孩子等工具给第一步，削弱自己读题、列步骤和开始任务的能力", "无 AI 时也能写出第一步", "没有提示就不开题"),
+                ("外包检查会让答案看似流畅但错误没有被孩子发现，尤其会遮住数学步骤漏洞", "孩子能指出至少一个可能错点", "只接受 AI 的最终答案"),
+                ("外包错因归纳会让复盘变成抄解释，下一次仍不知道自己错在概念、审题还是计算", "孩子能写出下一次检查点", "同类错误反复出现"),
+                ("外包阅读拓展会把生成材料当事实，削弱区分原文、补充材料和个人推断的习惯", "孩子能标注信息来源", "无法说清哪些来自原文"),
+                ("外包写作表达会让文本更顺但个人观点、证据选择和修改理由变少", "保留首稿并能说明修改原因", "只比较润色程度"),
+            ]
+        else:
+            details = [
+                ("让孩子先说出自己的理解，再用 AI 找缺口，重点是纠正误解而不是直接听答案", "能复述概念并解释一个反例", "离开 AI 后仍不会讲清步骤"),
+                ("按当天错因生成少量同型题，题量小但反馈快，避免机械刷题", "相似题正确率和订正质量提高", "只追求题量或答案速度"),
+                ("把错题归因到概念、步骤、审题或计算，再要求孩子写下一次检查点", "同类错误减少并能提前自查", "复盘变成抄 AI 解释"),
+                ("用阅读优势做背景拓展和多材料比较，但保留事实核查", "能区分原文事实、AI 补充和自己的推断", "把生成材料当事实"),
+                ("写作辅助只用于提纲、改写对比和修改理由，不替代首稿", "保留个人首稿并能说明修改原因", "文本变流畅但观点和证据空心化"),
+            ]
+    elif "规划错误" in body or "路线" in value:
+        details = [
+            ("把路线拉得过长导致老人和孩子每天恢复不足", "连续两天仍有余力和稳定睡眠", "为了打卡牺牲休息"),
+            ("低估天气、道路和景区变动带来的改线成本", "临近核验后仍有替代点和住宿", "实时信息变化后没有备选"),
+            ("住宿频繁变动让全家恢复质量下降", "关键节点连续住两晚以上", "每天赶路和换酒店"),
+            ("只按自然景观排序而忽略亲子体验和老人舒适度", "孩子和老人都有低强度参与方式", "核心景点需要高强度体力"),
+            ("用满行程挤掉安全冗余", "每天有可取消模块", "天气或身体状态变差仍必须赶路"),
+        ]
+    else:
+        details = [
+            (f"先验证{focus}里最能改变结论的瓶颈，避免平均用力", "该瓶颈可被独立测量", "验证结果不改变下一步动作"),
+            (f"保留低成本、可回滚试点，把{focus}的推断转成观察指标", "试点能产生付费、留存、质量或成本证据", "只有表面活跃没有实质改善"),
+            (f"设置停止条件，防止{focus}在证据薄弱时扩大投入", "反证信号出现时能暂停", "继续投入只靠叙事支撑"),
+            (f"比较替代路径，避免把单一路线当默认答案", "替代方案在成本和风险上被同口径比较", "跳过反事实比较"),
+            (f"把长期判断降为待验证假设，持续复核关键变量", "关键变量连续改善", "趋势放缓或约束增强"),
+        ]
+    mechanism, trigger, falsifier = details[(index - 1) % len(details)]
+    return f"{index}. {tier} {base}：{mechanism}。触发条件：{trigger}。反证信号：{falsifier}。执行边界：只在该项能被独立复核并改变下一步行动时扩大。"
 
 def _ranking_answer_lines(query: str, body: str, combined: str) -> list[str]:
     items = _ranking_items_from_question(body) or _ranking_items_from_question(query)
@@ -10072,6 +10135,9 @@ def _final_user_facing_quality_failures(packet: dict[str, Any], text: str) -> li
     if _query_requests_evidence_tiers(query) or PROFILE_FORESIGHT_MECHANISM in profiles:
         failures.extend(_evidence_tagging_substance_failures(value))
     failures.extend(_case_anchor_usage_failures(query, value))
+    failures.extend(_anchor_stuffed_final_failures(query, value))
+    failures.extend(_repeated_boilerplate_final_failures(value))
+    failures.extend(_cross_domain_residue_failures(query, value))
     failures.extend(_calibration_implementation_failures(str(packet.get("external_calibration_hard_constraints") or ""), value))
     return failures
 
@@ -10236,11 +10302,17 @@ def _raw_packet_metadata_leakage_failures(text: str, *, allow_claim_table: bool 
         "profile_acceptance_requirements",
         "evidence_packet_ready_for_decision",
         "verification_required",
+        "requires_full_text_verification",
         "evidence_gaps:",
         "handoff_caveats:",
         "audit_summary:",
         "accepted compact packet",
         "decision handoff",
+        "compact basis",
+        "raw evidence snippet",
+        "evidence snippet",
+        "direct gaps include",
+        "structured gaps:",
         "## evidence_strength",
         "## claim_table",
         "## controversy",
@@ -10296,6 +10368,16 @@ def _raw_packet_metadata_leakage_failures(text: str, *, allow_claim_table: bool 
         "缺陷清单",
     )
     failures: list[str] = []
+    if "compact basis" in lowered:
+        failures.append("raw_compact_basis_leakage")
+    if "raw evidence snippet" in lowered or "evidence snippet" in lowered:
+        failures.append("raw_evidence_snippet_leakage")
+    if "direct gaps include" in lowered or "structured gaps:" in lowered:
+        failures.append("direct_gaps_raw_dump")
+    if re.search(r"defect\s+type", value, flags=re.I) or re.search(r"DEFECT", value):
+        failures.append("raw_defect_metadata_leakage")
+    if re.search(r"Description\s*[:：]", value) and re.search(r"defect|misclassification|evidence misallocation", value, flags=re.I):
+        failures.append("raw_defect_metadata_leakage")
     for term in raw_terms:
         if term in lowered:
             failures.append("raw_packet_metadata_leakage:" + term)
@@ -10504,6 +10586,8 @@ def _answer_obligation_specificity_failures(query: str, text: str, enumerated: l
 
 def _template_like_final(text: str, query: str) -> bool:
     value = text or ""
+    if _repeated_boilerplate_final_failures(value) or _anchor_stuffed_final_failures(query, value):
+        return True
     filler_hits = sum(value.count(phrase) for phrase in _generic_filler_phrases())
     if filler_hits < 4:
         return False
@@ -10573,6 +10657,105 @@ def _template_like_section(section: str, units: list[str]) -> bool:
     if filler_hits < 2:
         return False
     return _domain_unit_hit_count(value, units) == 0 or len(_list_item_bodies(value)) == 0
+
+
+def _anchor_stuffed_final_failures(query: str, text: str) -> list[str]:
+    value = text or ""
+    failures: list[str] = []
+    long_targets = re.findall(r"针对([^。；;\n]{30,240}?)(?:，|,)先说明适用前提", value)
+    normalized_targets = [re.sub(r"\s+", "", target) for target in long_targets]
+    repeated_long_targets = len(normalized_targets) >= 2 and (len(set(normalized_targets)) < len(normalized_targets) or max(map(len, normalized_targets), default=0) >= 30)
+    if repeated_long_targets:
+        failures.append("anchor_stuffed_final")
+    anchor_intro = re.search(r"本回答围绕用户问题中的关键对象和约束展开[:：]([^。\n]{80,})", value)
+    if anchor_intro and value.count("先说明适用前提、验证方法和执行边界") >= 2:
+        failures.append("anchor_stuffed_final")
+    query_units = _obligation_required_domain_units(query, query)
+    if len(query_units) >= 5:
+        high_anchor_repetition = sum(value.count(unit) for unit in query_units if unit)
+        judgment_units = sum(value.count(term) for term in ("因为", "机制", "触发条件", "反证信号", "验证", "执行规则", "优先"))
+        if high_anchor_repetition >= max(18, len(query_units) * 3) and judgment_units < high_anchor_repetition // 2:
+            failures.append("anchor_stuffed_final")
+    return list(dict.fromkeys(failures))
+
+
+def _repeated_boilerplate_final_failures(text: str) -> list[str]:
+    value = text or ""
+    boilerplate_phrases = (
+        "先说明适用前提、验证方法和执行边界",
+        "触发条件是相关前提被当前材料支持",
+        "失效条件 / 反证信号是事实核验",
+        "成本、时点、留存、交易成本或替代方案",
+        "事实核验、成本、时点、留存",
+    )
+    if any(value.count(phrase) >= 2 for phrase in boilerplate_phrases):
+        return ["repeated_boilerplate_final"]
+    items = _list_item_bodies(value)
+    if len(items) < 4:
+        return []
+    skeletons: list[str] = []
+    for item in items:
+        skeleton = re.sub(r"^\s*\d{1,2}[.)、]\s*", "", item)
+        skeleton = re.sub(r"\[[^\]]{1,20}\]", "", skeleton)
+        skeleton = re.sub(r"[^：:。；;]{1,36}[：:]", "X：", skeleton, count=1)
+        skeleton = re.sub(r"[A-Za-z0-9_+./-]+", "A", skeleton)
+        skeleton = re.sub(r"[\u4e00-\u9fff]{2,8}", "中", skeleton)
+        skeleton = re.sub(r"\s+", "", skeleton)
+        if len(skeleton) >= 24:
+            skeletons.append(skeleton[:180])
+    if len(skeletons) >= 4 and len(set(skeletons)) <= max(1, len(skeletons) // 3):
+        return ["repeated_topn_template", "repeated_boilerplate_final"]
+    return []
+
+
+def _cross_domain_residue_failures(query: str, text: str) -> list[str]:
+    query_value = query or ""
+    value = text or ""
+    lowered = value.lower()
+    allows_analogy = any(term in query_value or term in value for term in ("类比", "analog", "跨域比较"))
+    if allows_analogy:
+        return []
+    failures: list[str] = []
+    if any(term in query_value for term in ("AI tutor", "阅读强", "数学", "写作辅助", "10 岁孩子", "家长")):
+        if any(term in value or term in lowered for term in ("交易成本", "滑点", "回撤", "样本外", "trading", "drawdown")):
+            failures.append("cross_domain_residue:education_trading")
+    if any(term in query_value for term in ("A 股", "swing trading", "因子", "回测", "gate")):
+        if any(term in value for term in ("医疗诊断", "心理诊断", "儿童学习路径", "家长可执行原则")):
+            failures.append("cross_domain_residue:finance_education")
+    if any(term in query_value for term in ("自驾", "住宿", "路线", "路况", "营业时间")):
+        if any(term in value or term in lowered for term in ("PMF", "plg", "GTM", "销售转化", "founder-led")):
+            failures.append("cross_domain_residue:travel_business")
+    if any(term in query_value for term in ("B2B", "SaaS", "GTM", "founder-led", "PMF", "runway")):
+        if any(term in value for term in ("路况", "营业时间", "景区开放", "天气和安全冗余")):
+            failures.append("cross_domain_residue:business_travel")
+    return failures
+
+
+def _final_controller_review_quality_assessment(query: str, text: str) -> dict[str, Any]:
+    failures = _final_user_facing_quality_failures({"mode": ENGINE_RESEARCH_DECISION, "query": query, "output_quality_profile": []}, text)
+    raw_leakage = [failure for failure in failures if "raw_" in failure or "metadata_leakage" in failure or "direct_gaps_raw_dump" in failure]
+    repeated = [failure for failure in failures if "boilerplate" in failure or "template" in failure or "anchor_stuffed" in failure]
+    cross_domain = [failure for failure in failures if failure.startswith("cross_domain_residue")]
+    specificity = 8.0
+    template_risk = 3.0
+    if raw_leakage:
+        specificity -= 3.0
+        template_risk += 2.0
+    if repeated:
+        specificity -= 2.5
+        template_risk += 3.0
+    if cross_domain:
+        specificity -= 1.5
+        template_risk += 1.0
+    specificity = max(0.0, min(10.0, specificity))
+    template_risk = max(0.0, min(10.0, template_risk))
+    return {
+        "final_answer_specificity": specificity,
+        "domain_specificity": max(0.0, specificity - (1.0 if cross_domain else 0.0)),
+        "template_likeness_risk": template_risk,
+        "worth_counting_as_pass": not failures and specificity >= 6.5 and template_risk <= 5.0,
+        "failure_tokens": failures,
+    }
 
 
 def _domain_unit_hit_count(text: str, units: list[str]) -> int:

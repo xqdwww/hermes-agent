@@ -9372,6 +9372,189 @@ def _assert_final_quality_rejects(packet: dict, text: str, expected_token: str |
         raise AssertionError("final quality gate should reject adversarial output")
 
 
+
+
+def test_final_blocks_raw_compact_basis_bad():
+    query = "请判断一个金融因子系统下一步应该优先工程化哪些 gate。"
+    bad = "# 最终答案\n\n## 证据使用边界\nCompact basis: ### Research Evidence Synthesis 这里是内部证据压缩材料。"
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_compact_basis_leakage")
+
+
+def test_final_blocks_defect_type_bad():
+    query = "请判断一个金融因子系统下一步应该优先工程化哪些 gate。"
+    bad = "# 最终答案\n\n## 证据使用边界\nDEFECT\nDefect Type: Misclassification / Evidence Misallocation."
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_defect_metadata_leakage")
+
+
+def test_final_blocks_direct_gaps_raw_dump_bad():
+    query = "请判断一个金融因子系统下一步应该优先工程化哪些 gate。"
+    bad = (
+        "# 最终答案\n\n## 证据使用边界\n"
+        "Direct gaps include missing long-horizon evidence. Structured gaps: requires_full_text_verification."
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "direct_gaps_raw_dump")
+
+
+def test_final_blocks_anchor_stuffed_boilerplate_bad():
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径。"
+    )
+    repeated = (
+        "针对讲解、练习生成、错题复盘、阅读拓展、写作辅助、阅读强、10 岁、AI、数学、写作，"
+        "先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，"
+        "失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。"
+    )
+    bad = "\n".join([
+        "# 最终答案",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解：" + repeated,
+        "2. 练习生成：" + repeated,
+        "3. 错题复盘：" + repeated,
+        "4. 阅读拓展：" + repeated,
+        "5. 写作辅助：" + repeated,
+        "## 2. 最危险的 5 个依赖路径",
+        "1. 过度依赖：" + repeated,
+        "2. 缺少复盘：" + repeated,
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "anchor_stuffed_final")
+
+
+def test_final_blocks_repeated_topn_template_bad():
+    query = "请判断一个教育 AI 使用方案：\n1. AI tutor 最有价值的 Top 5 使用场景；"
+    template = "先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持；失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。"
+    bad = "\n".join([
+        "# 最终答案",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解：" + template,
+        "2. 练习生成：" + template,
+        "3. 错题复盘：" + template,
+        "4. 阅读拓展：" + template,
+        "5. 写作辅助：" + template,
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "repeated_boilerplate_final")
+
+
+def test_final_blocks_cross_domain_residue_bad():
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径。"
+    )
+    bad = "\n".join([
+        "# 最终答案",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解：用孩子自己的复述检查理解。触发条件是能解释步骤。反证信号是只能背答案。",
+        "2. 练习生成：少量同型题复盘。触发条件是错因减少。反证信号是交易成本、滑点、回撤和样本外表现恶化。",
+        "3. 错题复盘：记录错误类型。触发条件是能自查。反证信号是离开 AI 不会订正。",
+        "4. 阅读拓展：区分原文和补充。触发条件是能核验事实。反证信号是把生成内容当事实。",
+        "5. 写作辅助：保留首稿。触发条件是能说明修改理由。反证信号是观点空心化。",
+        "## 2. 最危险的 5 个依赖路径",
+        "1. 外包启动：孩子不再自己开始任务。反证信号是无 AI 仍能启动。",
+        "2. 外包检查：孩子不再核对答案。反证信号是能指出错误。",
+        "3. 外包表达：孩子只复制文本。反证信号是能保留自己的理由。",
+        "4. 外包排序：孩子不会决定先后。反证信号是能解释优先级。",
+        "5. 外包复盘：孩子跳过错因。反证信号是能写出下一次检查点。",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "cross_domain_residue")
+
+
+def test_final_allows_domain_specific_topn_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径。"
+    )
+    text = "\n".join([
+        "# 最终答案",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解后的自述验证：孩子先讲自己的理解，AI 只指出缺口。触发条件是能复述概念；反证信号是离开 AI 仍不会讲步骤。",
+        "2. 练习生成后的错因复盘：按当天错因生成 3-5 道同型题。触发条件是相似题正确率提高；反证信号是只刷题不订正。",
+        "3. 错题复盘后的迁移：把错因归到概念、步骤、审题或计算。触发条件是下一次能提前检查；反证信号是重复同类错。",
+        "4. 阅读拓展后的事实核查：用阅读优势比较原文和 AI 补充。触发条件是能标出来源；反证信号是把生成内容当事实。",
+        "5. 写作辅助后的独立改写：保留首稿、修改稿和修改理由。触发条件是观点更清楚；反证信号是文字流畅但理由变少。",
+        "## 2. 最危险的 5 个依赖路径",
+        "1. 外包启动：孩子等 AI 给第一步。反证信号是无 AI 仍能开题。",
+        "2. 外包检查：孩子跳过验算。反证信号是能自己指出错误。",
+        "3. 外包表达：孩子复制成熟句子。反证信号是能说出自己的理由。",
+        "4. 外包排序：孩子不判断先后。反证信号是能解释为什么先做数学基础。",
+        "5. 外包复盘：孩子只看答案。反证信号是能写下一次检查点。",
+        "## 证据强度、争议点、证据缺口",
+        "证据强度：中。争议点：孩子具体错误类型和课堂要求会改变使用比例。证据缺口：缺少该孩子长期使用记录。",
+    ])
+
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case01_finance_live_bad_regression():
+    query = (
+        "我有一个 A 股日线/周线 swing trading 因子系统，当前候选信号包括 trend-following、repair/rebound、hot momentum、volume-price confirmation。请判断：\n"
+        "1. 最该优先工程化的 Top 3 gate；\n2. 哪些信号最容易在回测中虚高；\n3. 应该如何设计 walk-forward / out-of-sample 验证。"
+    )
+    bad = (
+        "# 研究决策最终报告\n\n## 问题锚点与适用边界\n本回答围绕用户问题中的关键对象和约束展开：A 股、日线、周线、swing trading、gate、Top 3、回测。\n\n"
+        "## 1. 最该优先工程化的 Top 3 gate\n"
+        "1. 适用环境 gate：针对trend-following、repair、rebound、hot momentum、volume-price confirmation、A 股日线/周线 swing trading 因子系统，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。\n"
+        "2. 成交约束 gate：针对trend-following、repair、rebound、hot momentum、volume-price confirmation、A 股日线/周线 swing trading 因子系统，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。\n"
+        "## 证据使用边界\n证据材料 Direct gaps include missing long-horizon evidence. Structured gaps: requires_full_text_verification. Compact basis: --- **Defect Type:** Misclassification / Evidence Misallocation **Description:** DEFECT text."
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_compact_basis_leakage")
+
+
+def test_case06_education_live_bad_regression():
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。家长想知道应该把 AI 用在讲解、练习生成、错题复盘、阅读拓展还是写作辅助。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径；\n3. 阅读、数学、写作、AI 工具的优先级。"
+    )
+    repeated = "针对讲解、练习生成、错题复盘、阅读拓展、写作辅助、阅读强、10 岁、AI、数学、写作，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。"
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解：" + repeated,
+        "2. 练习生成：" + repeated,
+        "3. 错题复盘：" + repeated,
+        "4. 阅读拓展：" + repeated,
+        "5. 写作辅助：" + repeated,
+        "## 证据使用边界",
+        "证据材料 Compact basis: ### Research Evidence Synthesis raw evidence snippet",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_compact_basis_leakage")
+
+
+def test_review_scoring_penalizes_anchor_stuffing_bad():
+    import tools.task_engine_executors as executors
+
+    query = "请判断一个教育 AI 使用方案：\n1. AI tutor 最有价值的 Top 5 使用场景；"
+    bad = "\n".join([
+        "# 最终答案",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解：针对讲解、练习生成、错题复盘、阅读拓展、写作辅助、阅读强、10 岁、AI、数学、写作，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。",
+        "2. 练习生成：针对讲解、练习生成、错题复盘、阅读拓展、写作辅助、阅读强、10 岁、AI、数学、写作，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。",
+        "3. 错题复盘：针对讲解、练习生成、错题复盘、阅读拓展、写作辅助、阅读强、10 岁、AI、数学、写作，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查，失效条件 / 反证信号是事实核验、成本、时点、留存、交易成本或替代方案与预期相反。",
+    ])
+
+    assessment = executors._final_controller_review_quality_assessment(query, bad)
+
+    assert assessment["final_answer_specificity"] < 6.0
+    assert assessment["template_likeness_risk"] > 6.0
+    assert assessment["worth_counting_as_pass"] is False
+    assert any("anchor_stuffed_final" in token or "repeated_boilerplate_final" in token for token in assessment["failure_tokens"])
+
+
+def test_internal_leakage_regression():
+    query = "请判断一个决策。"
+    bad = "Handoff caveats: L1-L4 L2.5 gaps.md Audit Finding calibration report 收敛判断.md 阶段14 accepted: true checked_stages research_packet_profile"
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_packet_metadata_leakage")
+
 def _adversarial_surface_terms() -> str:
     return " ".join(
         [
