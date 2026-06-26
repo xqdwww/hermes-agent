@@ -780,7 +780,16 @@ def _attach_passive_guard_metadata(
     runtime_metadata = _build_passive_runtime_metadata(
         runtime_events=runtime_events,
         runtime_ledger=runtime_ledger,
-        passive_context=passive_context,
+        passive_context=_merge_passive_contexts(
+            _build_report_boundary_passive_context(
+                payload=payload,
+                query=query,
+                mode=mode,
+                action=action,
+                report_text=report_text,
+            ),
+            passive_context,
+        ),
         task_id=f"{normalize_mode(mode).lower()}:{action}",
         guard_mode=guard_mode,
         report_text=report_text,
@@ -989,6 +998,117 @@ def _build_passive_runtime_metadata(
         "warning_only": True,
         "blocks_expanded": False,
     }
+
+
+def _build_report_boundary_passive_context(
+    *,
+    payload: dict[str, Any],
+    query: str,
+    mode: str,
+    action: str,
+    report_text: str | None,
+) -> dict[str, Any]:
+    runner_context: dict[str, Any] = {
+        "task_text": query,
+        "mode": normalize_mode(mode),
+        "action": action,
+        "report_only": action in {"contract", "validate"},
+        "dry_run": action == "dry-run",
+    }
+    files_read = _boundary_string_list(payload.get("files_read"))
+    files_written = _boundary_string_list(payload.get("files_written"))
+    if files_read:
+        runner_context["files_read"] = files_read
+    if files_written:
+        runner_context["files_written"] = files_written
+    for flag in ("production_changed", "official_updated"):
+        if flag in payload:
+            runner_context[flag] = bool(payload.get(flag))
+
+    context: dict[str, Any] = {"runner": runner_context}
+    if report_text:
+        context["report"] = {"report_text": report_text}
+
+    validation = payload.get("validation")
+    if isinstance(validation, dict):
+        context["validation"] = _boundary_validation_context(validation)
+        subtasks = _boundary_subtask_context(validation)
+        if subtasks:
+            context["subtasks"] = subtasks
+    return context
+
+
+def _merge_passive_contexts(boundary_context: dict[str, Any], explicit_context: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(boundary_context or {})
+    if not isinstance(explicit_context, dict):
+        return merged
+    for key, value in explicit_context.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        elif key == "subtasks" and key in merged:
+            merged[key] = _merge_subtask_contexts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_subtask_contexts(boundary_value: Any, explicit_value: Any) -> Any:
+    if isinstance(boundary_value, dict) and isinstance(explicit_value, dict):
+        merged = dict(boundary_value)
+        merged.update(explicit_value)
+        return merged
+    if isinstance(boundary_value, list) and isinstance(explicit_value, list):
+        return [*boundary_value, *explicit_value]
+    return explicit_value
+
+
+def _boundary_validation_context(validation: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    for source, target in (
+        ("latest_write_event_id", "latest_write_event_id"),
+        ("latest_modification_event_id", "latest_modification_event_id"),
+        ("latest_verification_event_id", "latest_verification_event_id"),
+        ("verification_result", "verification_result"),
+        ("verifies_after_event_id", "verifies_after_event_id"),
+    ):
+        if source in validation:
+            context[target] = validation[source]
+    if "valid" in validation:
+        context["verification_result"] = "pass" if validation.get("valid") is True else "failed"
+    if isinstance(validation.get("document_validation_results"), list):
+        context["document_validation_results"] = validation["document_validation_results"]
+    return context
+
+
+def _boundary_subtask_context(validation: dict[str, Any]) -> dict[str, Any]:
+    stages = validation.get("stages") or validation.get("stage_records") or validation.get("subtasks")
+    if not isinstance(stages, list):
+        return {}
+    subtasks: dict[str, Any] = {}
+    for index, item in enumerate(stages, start=1):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("stage_name") or item.get("subtask_id") or item.get("name") or f"stage_{index}")
+        status = str(item.get("status") or item.get("task_status") or "pending")
+        subtasks[name] = {
+            "status": status,
+            "reason": str(item.get("reason") or item.get("blocked_reason") or ""),
+            "accepted_partial": bool(item.get("accepted_partial")),
+        }
+    return subtasks
+
+
+def _boundary_string_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [value]
+    try:
+        return [str(item) for item in value if item is not None and str(item)]
+    except TypeError:
+        return [str(value)]
 
 
 def _derive_passive_runtime_events_from_context(

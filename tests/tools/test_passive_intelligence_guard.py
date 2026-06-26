@@ -1434,7 +1434,7 @@ def test_debug_mode_includes_ledger_metadata_when_events_supplied():
     )
 
     runtime = result["passive_intelligence_guard"]["runtime_ledger"]
-    assert runtime["summary"]["events_seen"] == 1
+    assert runtime["summary"]["events_seen"] >= 1
     assert runtime["ledger"]["verification_status"] == "required"
 
 
@@ -1650,7 +1650,7 @@ def test_debug_mode_context_builds_ledger_metadata():
     )
 
     runtime = result["passive_intelligence_guard"]["runtime_ledger"]
-    assert runtime["derived_event_count"] == 1
+    assert runtime["derived_event_count"] >= 1
     assert runtime["ledger"]["files_written"] == ["tools/source.py"]
 
 
@@ -1688,7 +1688,7 @@ def test_supplied_and_derived_events_merge():
 
     runtime = result["passive_intelligence_guard"]["runtime_ledger"]
     assert runtime["supplied_event_count"] == 1
-    assert runtime["derived_event_count"] == 1
+    assert runtime["derived_event_count"] >= 1
     assert runtime["merged_event_count"] >= 2
     assert "a.md" in runtime["ledger"]["files_read"]
     assert "b.md" in runtime["ledger"]["files_written"]
@@ -1702,6 +1702,163 @@ def test_block_destructive_still_does_not_block_non_destructive_context():
             action="contract",
             passive_guard_mode="block_destructive",
             passive_context={"runner": {"task_text": "Codex stuck with no output"}},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
+
+
+def test_default_off_boundary_output_unchanged():
+    query = "Validate all PDFs and monitor Codex stuck with no output."
+    implicit = json.loads(task_engine_runner(query=query, mode="DECISION", action="contract"))
+    explicit_off = json.loads(
+        task_engine_runner(query=query, mode="DECISION", action="contract", passive_guard_mode="off")
+    )
+
+    assert implicit == explicit_off
+    assert "passive_intelligence_guard" not in explicit_off
+
+
+def test_debug_mode_boundary_auto_derives_ledger_from_context():
+    result = json.loads(
+        task_engine_runner(
+            query="Validate all PDFs before reporting 0 corrupted.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="debug",
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["derived_event_count"] >= 2
+    assert runtime["ledger"]["report_only"] is True
+    assert "document_validation" in {item["event_type"] for item in runtime["ledger"]["file_mutations"]} or (
+        "PASSIVE_RUNTIME_DOCUMENT_CHECKS_INCOMPLETE"
+        in {item["code"] for item in runtime["ledger"]["warnings"]}
+    )
+
+
+def test_warn_mode_boundary_auto_derives_warnings_from_context():
+    result = json.loads(
+        task_engine_runner(
+            query="Validate all PDFs and report 0 corrupted.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert result["status"] == "ok"
+    assert any(item["code"] == "PASSIVE_RUNTIME_DOCUMENT_CHECKS_INCOMPLETE" for item in runtime["warnings"])
+
+
+def test_explicit_passive_context_merges_with_derived_boundary_context():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_context={"runner": {"files_written": ["tools/source.py"]}},
+        )
+    )
+
+    ledger = result["passive_intelligence_guard"]["runtime_ledger"]["ledger"]
+    assert ledger["report_only"] is True
+    assert ledger["files_written"] == ["tools/source.py"]
+    assert any(
+        item["code"] == "PASSIVE_RUNTIME_REPORT_ONLY_WRITE_INVALID"
+        for item in result["passive_intelligence_guard"]["runtime_ledger"]["warnings"]
+    )
+
+
+def test_report_only_with_files_written_warns_in_warn_mode():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_context={"runner": {"files_written": ["tools/source.py"]}},
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["ledger"]["overall_status"] == "blocked"
+    assert any(item["code"] == "PASSIVE_RUNTIME_REPORT_ONLY_WRITE_INVALID" for item in runtime["warnings"])
+
+
+def test_dry_run_with_official_update_warns_in_warn_mode():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="dry-run",
+            passive_guard_mode="warn",
+            passive_context={"runner": {"official_updated": True}},
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["ledger"]["dry_run"] is True
+    assert runtime["ledger"]["overall_status"] == "blocked"
+    assert any(item["code"] == "PASSIVE_RUNTIME_DRY_RUN_OFFICIAL_UPDATE_INVALID" for item in runtime["warnings"])
+
+
+def test_final_report_completed_claim_with_partial_subtask_warns():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_report_text="All phases complete. PASS.",
+            passive_context={"subtasks": {"phase_5": {"status": "partial"}}},
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["ledger"]["overall_status"] == "partial"
+    assert any(item["code"] == "PASSIVE_RUNTIME_COMPLETION_CONFLICT" for item in runtime["warnings"])
+
+
+def test_document_trigger_without_file_inventory_warns_at_boundary():
+    result = json.loads(
+        task_engine_runner(
+            query="Validate all PDFs and report 0 corrupted.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert any(item["code"] == "PASSIVE_RUNTIME_DOCUMENT_CHECKS_INCOMPLETE" for item in runtime["warnings"])
+
+
+def test_long_run_trigger_without_process_status_warns_at_boundary():
+    result = json.loads(
+        task_engine_runner(
+            query="Codex is stuck with no output.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert any(item["code"] == "PASSIVE_RUNTIME_WATCHDOG_STATUS_REQUIRED" for item in runtime["warnings"])
+
+
+def test_block_destructive_mode_does_not_expand_to_warning_only_ledger_findings():
+    result = json.loads(
+        task_engine_runner(
+            query="Codex is stuck with no output.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
         )
     )
 

@@ -1138,6 +1138,28 @@ def apply_passive_runtime_event(
         for warning in ledger_to_final_report_warnings(claim_ledger, claim_text):
             warnings.append(dict(warning))
 
+    elif event_type in {"context_state", "runner_context"}:
+        if payload.get("report_only") is not None:
+            report_only = report_only or bool(payload.get("report_only"))
+        if payload.get("dry_run") is not None:
+            dry_run = dry_run or bool(payload.get("dry_run"))
+        production_changed = production_changed or bool(payload.get("production_changed"))
+        official_updated = official_updated or bool(payload.get("official_updated"))
+        if report_only and production_changed:
+            blocked_reason = blocked_reason or "report_only_production_change"
+            add_warning(
+                "PASSIVE_RUNTIME_REPORT_ONLY_PRODUCTION_CHANGE_INVALID",
+                "Report-only context cannot be treated as production-changing work.",
+                ledger_field="report_only",
+            )
+        if dry_run and official_updated:
+            blocked_reason = blocked_reason or "dry_run_official_update"
+            add_warning(
+                "PASSIVE_RUNTIME_DRY_RUN_OFFICIAL_UPDATE_INVALID",
+                "Dry-run context cannot update official state.",
+                ledger_field="dry_run",
+            )
+
     elif event_type in {"adapter_warning", "context_warning"}:
         warnings.append(
             {
@@ -1374,6 +1396,21 @@ def build_passive_events_from_runner_context(context: dict[str, Any]) -> list[Pa
 
     report_only = bool(data.get("report_only"))
     dry_run = bool(data.get("dry_run"))
+    if any(key in data for key in ("report_only", "dry_run", "production_changed", "official_updated")):
+        events.append(
+            _runtime_event(
+                next_id,
+                "context_state",
+                task_id,
+                {
+                    "report_only": report_only,
+                    "dry_run": dry_run,
+                    "production_changed": bool(data.get("production_changed")),
+                    "official_updated": bool(data.get("official_updated")),
+                },
+            )
+        )
+        next_id += 1
     for path in _coerce_string_list(data.get("files_read")):
         events.append(_runtime_event(next_id, "file_access", task_id, {"operation": "read", "path": path}))
         next_id += 1

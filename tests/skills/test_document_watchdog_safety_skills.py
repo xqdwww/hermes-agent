@@ -20,6 +20,8 @@ def test_document_validation_claim_safety_lesson_is_documented():
     assert "claim ceiling to parser-readable" in text
     assert "document validation claim level must come from those validation events" in text
     assert "missing file inventory or validation checks must remain unknown/warning" in text
+    assert "At supported report boundaries, passive context may be derived automatically" in text
+    assert "ledger warnings are advisory" in text
 
 
 def test_long_run_watchdog_safety_lesson_is_documented():
@@ -39,3 +41,5 @@ def test_long_run_watchdog_safety_lesson_is_documented():
     assert "verification freshness, remote write/tag verification" in text
     assert "Derived passive runtime events from runner/report context are advisory" in text
     assert "missing context must become unknown/warning, not success" in text
+    assert "At supported report boundaries, passive context may be derived automatically" in text
+    assert "default/off mode stays silent" in text

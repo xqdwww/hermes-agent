@@ -81,6 +81,7 @@ process(action="kill", session_id="<id>")
 - Use a passive watchdog observer plan before long-run closure claims: collect phase, started_at, last_output_at, elapsed, silence_seconds, process_status, retry_count, error_signature, and next_safe_action without starting, killing, or retrying processes.
 - When a passive runtime ledger exists, use it as the source of truth for final status claims; record explicit phase status, verification freshness, remote write/tag verification, document claim level, and long-run process state as separate events.
 - Derived passive runtime events from runner/report context are advisory until hard enforcement is explicitly enabled; missing context must become unknown/warning, not success.
+- At supported report boundaries, passive context may be derived automatically in debug/warn modes while default/off mode stays silent.
 
 ## Key Flags
 
