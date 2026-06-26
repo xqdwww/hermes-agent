@@ -1,12 +1,12 @@
 {
   "artifact_role": "official_baseline_ledger",
   "branch": "travel-series-b-validation",
-  "candidate_delta_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-official-candidate-rerun/outputs/series_b_17case_candidate_case_delta_matrix.json",
-  "candidate_delta_matrix_sha256": "1d90299df7d5331d80f0ebc569670382c796a8854af8bb30c669e36487b3e428",
-  "candidate_output_manifest_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-official-candidate-rerun/outputs/execute_candidate/series_b_official_candidate_output_manifest.json",
-  "candidate_output_manifest_sha256": "3d127af1616d1ea3b0eabe5f9df71b188ed738822f68db86964ae8ee96af76d0",
-  "candidate_output_sha256": "a1719d25b91cf8c2d02adca17323340d72eb98ae8fa09a414ddc6726819fa631",
-  "candidate_score_source": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-official-candidate-rerun/outputs/execute_candidate/series_b_official_candidate_output.json",
+  "candidate_delta_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-official-candidate-rerun/outputs/series_b_23case_candidate_case_delta_matrix.json",
+  "candidate_delta_matrix_sha256": "6c5f885bba6dea5e04c2a30a27f3822823da72c6a0908063f9e75ced6a3356eb",
+  "candidate_output_manifest_path": null,
+  "candidate_output_manifest_sha256": null,
+  "candidate_output_sha256": "530bde340e7dae6cef37b4b848f26632a946988dc5692656d79fa98ab19d856b",
+  "candidate_score_source": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-official-candidate-rerun/outputs/series_b_23case_official_candidate_rerun.json",
   "case_count": 60,
   "caveat_cases": [
     "obj_art_003",
@@ -18,7 +18,13 @@
     "hist_arch_020",
     "rel_space_031",
     "nat_eco_042",
-    "cross_route_053"
+    "cross_route_053",
+    "nat_eco_046",
+    "nat_eco_043",
+    "obj_art_005",
+    "obj_art_011",
+    "hist_arch_025",
+    "rel_space_036"
   ],
   "caveat_details": {
     "hist_arch_024": {
@@ -124,6 +130,69 @@
         "cross_route_053 approved with caveat; Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence.",
         "cached Tikal excerpts are supplementary; rejected sources and LP locator are excluded from formal axis evidence."
       ]
+    },
+    "nat_eco_046": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "NAT_ECO_046_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+      "caveats": [
+        "Travel guide pages must not overrule geography/ecology sources.",
+        "Baidu redirects are rejected.",
+        "Natural process / regional relation / ecology grounding remains required and source-scoped."
+      ]
+    },
+    "nat_eco_043": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "NAT_ECO_043_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+      "caveats": [
+        "PDF extraction remains validated/caveated.",
+        "ScienceDirect metadata-only page is not counted unless body/extract exists.",
+        "Geomorphology / hydrology process grounding remains required and source-scoped."
+      ]
+    },
+    "obj_art_005": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "OBJ_ART_005_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+      "caveats": [
+        "Architecture pages are counted only for concept evidence, not listicle-only framing.",
+        "Blocked page is rejected."
+      ]
+    },
+    "obj_art_011": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "OBJ_ART_011_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+      "caveats": [
+        "Architectural order / column / capital / classical context remains source-backed.",
+        "Generic architecture-course filler is not overcounted."
+      ]
+    },
+    "hist_arch_025": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "HIST_ARCH_025_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+      "caveats": [
+        "Historical/archaeological frontier-system evidence remains source-backed.",
+        "Non-institutional pages are supplementary unless source-backed body is strong."
+      ]
+    },
+    "rel_space_036": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "REL_SPACE_036_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+      "caveats": [
+        "UNESCO / Beijing Gov / Wikipedia provide source-scoped religious-spatial grounding.",
+        "TravelChinaGuide remains context/locator unless conceptual content is source-backed.",
+        "Empty page is rejected."
+      ]
     }
   },
   "classification": "OFFICIAL_BASELINE_SCORE",
@@ -131,27 +200,21 @@
   "dataset_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b/optional-skills/research/series-b-source-gap-resolution/official/series_b_official_60case_dataset.json",
   "dataset_sha256": "15568604273ef45660a9811032728e276b992ca8d814dcd7b65ff2d16db6472c",
   "failed_cases": [
-    "obj_art_005",
     "obj_art_008",
-    "obj_art_011",
     "obj_art_012",
     "hist_arch_022",
-    "hist_arch_025",
     "rel_space_028",
     "rel_space_033",
     "rel_space_034",
     "rel_space_035",
-    "rel_space_036",
-    "nat_eco_043",
     "nat_eco_045",
-    "nat_eco_046",
     "cross_route_055",
     "adv_trap_059"
   ],
   "full_series_b_run_performed": false,
   "human_caveats_accepted": true,
-  "human_review_report_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-candidate-human-review/outputs/series_b_17case_candidate_human_review.json",
-  "human_review_report_sha256": "e55ba9a319bfdbbaa0ab0202e7ae47a639bda38f962d435f0e53620842717b73",
+  "human_review_report_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-candidate-human-review/outputs/series_b_23case_candidate_human_review.json",
+  "human_review_report_sha256": "e7e4b198befb64cdff6e86164a38c55854639cc8987206823d06a5f6c07e504f",
   "human_review_verdict": "BASELINE_WRITE_READY_WITH_CAVEATS",
   "ledger_entries": [
     {
@@ -232,36 +295,133 @@
       "source_vector_mutation_performed": false,
       "push_performed": false,
       "tag_created": false
+    },
+    {
+      "entry_type": "OFFICIAL_BASELINE_WRITE",
+      "from_score": "44/60",
+      "to_score": "50/60",
+      "score": "50/60",
+      "prior_score": "44/60",
+      "delta": "+6",
+      "basis": "23-case controlled evidence + no-write candidate rerun + human review",
+      "candidate_source_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-official-candidate-rerun/outputs/series_b_23case_official_candidate_rerun.json",
+      "candidate_source_sha256": "530bde340e7dae6cef37b4b848f26632a946988dc5692656d79fa98ab19d856b",
+      "candidate_delta_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-official-candidate-rerun/outputs/series_b_23case_candidate_case_delta_matrix.json",
+      "candidate_delta_matrix_sha256": "6c5f885bba6dea5e04c2a30a27f3822823da72c6a0908063f9e75ced6a3356eb",
+      "human_review_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-candidate-human-review/outputs/series_b_23case_candidate_human_review.json",
+      "human_review_sha256": "e7e4b198befb64cdff6e86164a38c55854639cc8987206823d06a5f6c07e504f",
+      "controlled_evidence_rollup_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-controlled-evidence-rollup/outputs/series_b_23case_controlled_evidence_rollup.json",
+      "controlled_evidence_rollup_sha256": "649884f6156aa010fd2aeccb6c2b040c96021116c9fa1c6ae201ba9f8ddb7c11",
+      "repo_head": "f17b6d61d73cc62883c1292cbc2e6e05b832eb18",
+      "timestamp": "2026-06-26T23:01:01.729623+00:00",
+      "controlled_evidence_count": 23,
+      "candidate_score_reviewed": "50/60",
+      "candidate_score_accepted_for_baseline": true,
+      "readiness_verdict": "BASELINE_WRITE_READY_WITH_CAVEATS",
+      "newly_countable_cases": [
+        "nat_eco_046",
+        "nat_eco_043",
+        "obj_art_005",
+        "obj_art_011",
+        "hist_arch_025",
+        "rel_space_036"
+      ],
+      "excluded_cases": [
+        "obj_art_008",
+        "obj_art_012",
+        "hist_arch_022",
+        "rel_space_028",
+        "rel_space_033",
+        "rel_space_034",
+        "rel_space_035",
+        "nat_eco_045",
+        "cross_route_055",
+        "adv_trap_059"
+      ],
+      "human_caveats_accepted": true,
+      "caveats": {
+        "score_classification": "50/60 is a human-reviewed official score, not a raw candidate-only score.",
+        "newly_countable_cases": "The six newly countable cases were accepted with caveats from controlled evidence + human review.",
+        "source_caveats": "Weak/context sources must not be overclaimed; rejected sources remain excluded.",
+        "case_caveats": {
+          "nat_eco_046": [
+            "Travel guide pages must not overrule geography/ecology sources.",
+            "Baidu redirects are rejected.",
+            "Natural process / regional relation / ecology grounding remains required and source-scoped."
+          ],
+          "nat_eco_043": [
+            "PDF extraction remains validated/caveated.",
+            "ScienceDirect metadata-only page is not counted unless body/extract exists.",
+            "Geomorphology / hydrology process grounding remains required and source-scoped."
+          ],
+          "obj_art_005": [
+            "Architecture pages are counted only for concept evidence, not listicle-only framing.",
+            "Blocked page is rejected."
+          ],
+          "obj_art_011": [
+            "Architectural order / column / capital / classical context remains source-backed.",
+            "Generic architecture-course filler is not overcounted."
+          ],
+          "hist_arch_025": [
+            "Historical/archaeological frontier-system evidence remains source-backed.",
+            "Non-institutional pages are supplementary unless source-backed body is strong."
+          ],
+          "rel_space_036": [
+            "UNESCO / Beijing Gov / Wikipedia provide source-scoped religious-spatial grounding.",
+            "TravelChinaGuide remains context/locator unless conceptual content is source-backed.",
+            "Empty page is rejected."
+          ]
+        },
+        "adv_trap_059": "policy-gated; not counted; must not be treated as resolved.",
+        "remaining_cases": "remaining 10 cases are not counted.",
+        "runtime_metadata": "runtime / production metadata will be stale until a separate runtime metadata update task runs."
+      },
+      "official_baseline_update_performed": true,
+      "production_default_manifest_integration_performed": false,
+      "runtime_metadata_update_performed": false,
+      "runtime_metadata_update_required": true,
+      "source_vector_mutation_performed": false,
+      "push_performed": false,
+      "tag_push_performed": false,
+      "tag_created": false
     }
   ],
   "newly_passed_delta_cases": [
-    "cross_route_052",
-    "hist_arch_023",
-    "hist_arch_024",
-    "nat_eco_039",
+    "obj_art_002",
     "obj_art_003",
+    "obj_art_005",
     "obj_art_007",
     "obj_art_010",
-    "rel_space_030",
-    "obj_art_002",
+    "obj_art_011",
     "hist_arch_020",
+    "hist_arch_023",
+    "hist_arch_024",
+    "hist_arch_025",
+    "rel_space_030",
     "rel_space_031",
+    "rel_space_036",
+    "nat_eco_039",
     "nat_eco_042",
+    "nat_eco_043",
+    "nat_eco_046",
+    "cross_route_052",
     "cross_route_053"
   ],
-  "official_delta_vs_prior": "+5",
-  "official_failed_cases": 16,
-  "official_passed_cases": 44,
-  "official_score": "44/60",
+  "official_delta_vs_prior": "+6",
+  "official_failed_cases": 10,
+  "official_passed_cases": 50,
+  "official_score": "50/60",
   "passed_cases": [
     "obj_art_001",
     "obj_art_002",
     "obj_art_003",
     "obj_art_004",
+    "obj_art_005",
     "obj_art_006",
     "obj_art_007",
     "obj_art_009",
     "obj_art_010",
+    "obj_art_011",
     "obj_art_013",
     "obj_art_014",
     "obj_art_015",
@@ -273,19 +433,23 @@
     "hist_arch_021",
     "hist_arch_023",
     "hist_arch_024",
+    "hist_arch_025",
     "hist_arch_026",
     "hist_arch_027",
     "rel_space_029",
     "rel_space_030",
     "rel_space_031",
     "rel_space_032",
+    "rel_space_036",
     "rel_space_037",
     "nat_eco_038",
     "nat_eco_039",
     "nat_eco_040",
     "nat_eco_041",
     "nat_eco_042",
+    "nat_eco_043",
     "nat_eco_044",
+    "nat_eco_046",
     "nat_eco_047",
     "cross_route_048",
     "cross_route_049",
@@ -299,55 +463,52 @@
     "adv_trap_058",
     "adv_trap_060"
   ],
-  "prior_failed_cases": 21,
+  "prior_failed_cases": 16,
   "prior_frozen_ledger_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b/optional-skills/research/series-b-source-gap-resolution/official/series_b_frozen_baseline_ledger.json",
   "prior_frozen_ledger_sha256": "a1d92e79953f50f219e37b2b714b7d3465cc7a1d280b1dba2a535256123179d3",
-  "prior_passed_cases": 39,
-  "prior_score": "39/60",
+  "prior_passed_cases": 44,
+  "prior_score": "44/60",
   "production_default_integrated": false,
   "production_default_manifest_integration_performed": false,
   "push_performed": false,
   "release_performed": false,
-  "repo_head_at_write": "6e1dc2486d61d8700cf298062a272557039bf964",
+  "repo_head_at_write": "f17b6d61d73cc62883c1292cbc2e6e05b832eb18",
   "repo_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b",
-  "schema_version": "series_b_official_baseline_44_write.v1",
+  "schema_version": "series_b_official_baseline_50_write.v1",
   "series": "Travel / Series B",
   "tag_created": false,
-  "write_timestamp": "2026-06-26T16:15:23.566331+00:00",
-  "controlled_evidence_count": 17,
-  "controlled_evidence_rollup_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-controlled-evidence-rollup/outputs/series_b_17case_controlled_evidence_rollup.json",
-  "controlled_evidence_rollup_sha256": "ead32808d87d0550f37c74f07acf8daa6a768ad7a1850d8f81a8c6adf31b23a0",
-  "human_review_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-17case-candidate-human-review/outputs/series_b_44of60_candidate_case_review_matrix.json",
-  "human_review_matrix_sha256": "a420da0da756415d6494be5e02fd485f6d2d7de5a6d3178c11924feec479da84",
-  "candidate_score_reviewed": "44/60",
+  "write_timestamp": "2026-06-26T23:01:01.729623+00:00",
+  "controlled_evidence_count": 23,
+  "controlled_evidence_rollup_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-controlled-evidence-rollup/outputs/series_b_23case_controlled_evidence_rollup.json",
+  "controlled_evidence_rollup_sha256": "649884f6156aa010fd2aeccb6c2b040c96021116c9fa1c6ae201ba9f8ddb7c11",
+  "human_review_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-23case-candidate-human-review/outputs/series_b_50of60_candidate_case_review_matrix.json",
+  "human_review_matrix_sha256": "8ece157f7c37019e51b4e146cbf2f2069e37a4fe45fcbb78b034e2da11a009bd",
+  "candidate_score_reviewed": "50/60",
   "candidate_score_accepted_for_baseline": true,
-  "recommended_official_score": "44/60",
+  "recommended_official_score": "50/60",
   "baseline_write_readiness_verdict": "BASELINE_WRITE_READY_WITH_CAVEATS",
-  "previous_official_score": "39/60",
+  "previous_official_score": "44/60",
   "newly_countable_cases": [
-    "obj_art_002",
-    "hist_arch_020",
-    "rel_space_031",
-    "nat_eco_042",
-    "cross_route_053"
+    "nat_eco_046",
+    "nat_eco_043",
+    "obj_art_005",
+    "obj_art_011",
+    "hist_arch_025",
+    "rel_space_036"
   ],
   "remaining_failed_or_deferred_cases": [
-    "obj_art_005",
     "obj_art_008",
-    "obj_art_011",
     "obj_art_012",
     "hist_arch_022",
-    "hist_arch_025",
     "rel_space_028",
     "rel_space_033",
     "rel_space_034",
     "rel_space_035",
-    "rel_space_036",
-    "nat_eco_043",
     "nat_eco_045",
-    "nat_eco_046",
     "cross_route_055",
     "adv_trap_059"
   ],
-  "adv_trap_059_status": "DEFERRED_POLICY_AND_MATERIAL_GAP"
+  "adv_trap_059_status": "POLICY_GATED_NOT_COUNTED",
+  "runtime_metadata_update_required": true,
+  "runtime_metadata_update_performed": false
 }
