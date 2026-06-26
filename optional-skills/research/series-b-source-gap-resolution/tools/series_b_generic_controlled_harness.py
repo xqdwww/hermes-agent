@@ -137,6 +137,25 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_sections=("spatial_structure", "nature_environment", "theme_tracks"),
         required_axes=("context_sources", "wiki_or_zim"),
     ),
+
+    "nat_eco_042": CaseConfig(
+        case_id="nat_eco_042",
+        expected_formal_ready_decision="NAT_ECO_042_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=(
+            "mangrove",
+            "mangrove_root",
+            "aerial_root",
+            "pneumatophore",
+            "Avicennia",
+            "vivipary",
+            "intertidal",
+            "salt_exclusion",
+            "substrate",
+        ),
+        required_sections=("spatial_structure", "nature_environment", "theme_tracks"),
+        required_axes=("context_sources", "wiki_or_zim"),
+    ),
 }
 
 
