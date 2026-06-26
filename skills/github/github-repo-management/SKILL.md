@@ -1,6 +1,6 @@
 ---
 name: github-repo-management
-description: "Clone/create/fork repos; manage remotes, releases."
+description: "Clone/create/fork repos; manage remotes, safe remote sync, releases."
 version: 1.1.0
 author: Hermes Agent
 license: MIT
@@ -18,6 +18,26 @@ Create, clone, fork, configure, and manage GitHub repositories. Each section sho
 ## Prerequisites
 
 - Authenticated with GitHub (see `github-auth` skill)
+
+## Remote Sync Safety Gate
+
+Before pushing a branch or tag, prove the remote target instead of inferring it.
+
+- Audit repo path, current branch, HEAD, remotes, upstream, remote branch presence, and whether write success is actually proven.
+- Distinguish local commit, local tag, remote branch push, remote tag push, read access, and write access.
+- Do not count `git ls-remote` success as write permission. It proves read access only.
+- Do not count local commit reports or local tag reports as remote push/tag success.
+- Do not assume `origin` is writable just because it is readable.
+- In the Hermes agent repo family, prior proven successful branch/tag pushes used `fork`, not `origin`; prior `origin` writes to `NousResearch/hermes-agent.git` failed for the `xqdwww` account.
+- If `origin` write is not proven and `fork` write is proven, ask for explicit remote authorization, or use `fork` only when the user explicitly authorizes `fork`.
+- Do not fallback between `origin`, `fork`, or `upstream` without explicit authorization.
+- No force push by default, including `--force` and `--force-with-lease`.
+- Do not create a new remote branch unless the user explicitly authorizes creating that exact remote branch.
+- Do not push a tag until the intended branch push has verified on the selected remote.
+- Local tag existence does not imply the tag exists on the remote; verify remote tag state separately.
+- If a push fails, classify the failure before retrying: permission denied, host key verification, SSH session closed, remote rejected, or remote ahead/diverged.
+- If using GitHub SSH over port 443, the SSH endpoint is `ssh.github.com:443`. `github.com:443` is not the GitHub SSH endpoint.
+- Avoid `HostName` alias tricks for push retries unless host key handling is already verified. Prefer a direct URL such as `ssh://git@ssh.github.com:443/OWNER/REPO.git` when appropriate and authorized.
 
 ### Setup
 
