@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "case_id": {
+      "type": "string"
+    },
+    "caveats": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "file_size": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generated_summary": {
+      "type": "boolean"
+    },
+    "has_source_backed_body": {
+      "type": "boolean"
+    },
+    "is_cloudflare_or_interstitial": {
+      "type": "boolean"
+    },
+    "is_readme_summary": {
+      "type": "boolean"
+    },
+    "readable": {
+      "type": "boolean"
+    },
+    "rejection_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_file": {
+      "type": "string"
+    },
+    "source_hash": {
+      "type": "string"
+    },
+    "source_origin": {
+      "type": "string"
+    },
+    "source_type": {
+      "type": "string"
+    },
+    "supports_required_axes": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "supports_required_sections": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "supports_required_terms": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "text_extractable": {
+      "type": "boolean"
+    },
+    "title_only": {
+      "type": "boolean"
+    },
+    "usable_or_rejected": {
+      "enum": [
+        "usable",
+        "rejected",
+        "usable_with_caveat"
+      ],
+      "type": "string"
+    },
+    "very_short": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "case_id",
+    "source_file",
+    "source_origin",
+    "source_type",
+    "source_hash",
+    "file_size",
+    "readable",
+    "text_extractable",
+    "is_cloudflare_or_interstitial",
+    "is_readme_summary",
+    "title_only",
+    "very_short",
+    "generated_summary",
+    "has_source_backed_body",
+    "supports_required_terms",
+    "supports_required_axes",
+    "supports_required_sections",
+    "usable_or_rejected",
+    "caveats"
+  ],
+  "title": "Source Validation Manifest",
+  "type": "object"
+}
