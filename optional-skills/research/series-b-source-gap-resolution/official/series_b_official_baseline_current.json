@@ -1,0 +1,171 @@
+{
+  "artifact_role": "current_official_baseline_score",
+  "branch": "travel-series-b-validation",
+  "candidate_delta_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-official-input-layer/outputs/series_b_official_candidate_case_delta_matrix.json",
+  "candidate_delta_matrix_sha256": "67ba56fe0bebbd4247841d9934eb56cf8cdc8ed41ec51a89b4e4e3764c8ababa",
+  "candidate_output_manifest_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-official-input-layer/outputs/series_b_official_candidate_output_manifest.json",
+  "candidate_output_manifest_sha256": "23b65e038915999dbde009a65974d494a9d5e89fd9b5411b17ae9bf35d1a648c",
+  "candidate_output_sha256": "127f78f827cc6483e92e9ab8ea937209a9351ec4413d80ceb9ea0f1113e0805f",
+  "candidate_score_source": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-official-input-layer/outputs/series_b_official_candidate_execute_after_input_layer.json",
+  "case_count": 60,
+  "caveat_cases": [
+    "obj_art_003",
+    "obj_art_007",
+    "nat_eco_039",
+    "obj_art_010",
+    "hist_arch_024"
+  ],
+  "caveat_details": {
+    "hist_arch_024": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "caveats": [
+        "legacy approved controlled evidence; not a per-case new-pipeline archive",
+        "not official baseline improvement"
+      ],
+      "controlled_case_result": "PASS_CONTROLLED_EVIDENCE_LEGACY",
+      "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+      "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+    },
+    "nat_eco_039": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "caveats": [
+        "legacy approved controlled evidence; not a per-case new-pipeline archive",
+        "not official baseline improvement"
+      ],
+      "controlled_case_result": "PASS_CONTROLLED_EVIDENCE_LEGACY",
+      "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+      "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+    },
+    "obj_art_003": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "caveats": [
+        "archaeology_book not hard-required by current manifest; downgrade if future official case-rule trace requires it"
+      ],
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+      "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+    },
+    "obj_art_007": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "caveats": [
+        "page-binding caveat preserved; 0/0 chunks traced by chunk_id / section locator / text_sha256, not precise page claims"
+      ],
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+      "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+    },
+    "obj_art_010": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "caveats": [
+        "legacy approved controlled evidence; not a per-case new-pipeline archive",
+        "not official baseline improvement"
+      ],
+      "controlled_case_result": "PASS_CONTROLLED_EVIDENCE_LEGACY",
+      "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+      "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+    }
+  },
+  "classification": "OFFICIAL_BASELINE_SCORE",
+  "controlled_evidence_line_distinction": "Controlled dry-run evidence remains provenance for candidate deltas; this artifact is the authorized official baseline score write.",
+  "dataset_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b/optional-skills/research/series-b-source-gap-resolution/official/series_b_official_60case_dataset.json",
+  "dataset_sha256": "15568604273ef45660a9811032728e276b992ca8d814dcd7b65ff2d16db6472c",
+  "failed_cases": [
+    "obj_art_002",
+    "obj_art_005",
+    "obj_art_008",
+    "obj_art_011",
+    "obj_art_012",
+    "hist_arch_020",
+    "hist_arch_022",
+    "hist_arch_025",
+    "rel_space_028",
+    "rel_space_031",
+    "rel_space_033",
+    "rel_space_034",
+    "rel_space_035",
+    "rel_space_036",
+    "nat_eco_042",
+    "nat_eco_043",
+    "nat_eco_045",
+    "nat_eco_046",
+    "cross_route_053",
+    "cross_route_055",
+    "adv_trap_059"
+  ],
+  "full_series_b_run_performed": false,
+  "human_caveats_accepted": true,
+  "human_review_report_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-official-candidate-human-review/outputs/series_b_official_candidate_human_review.json",
+  "human_review_report_sha256": "1f19edbd9ea3ca8d109faabe6ca7cc1de60876e474c76695981cdeb4b586945c",
+  "human_review_verdict": "READY_WITH_HUMAN_REVIEW_CAVEATS",
+  "is_current_official_baseline": true,
+  "newly_passed_delta_cases": [
+    "cross_route_052",
+    "hist_arch_023",
+    "hist_arch_024",
+    "nat_eco_039",
+    "obj_art_003",
+    "obj_art_007",
+    "obj_art_010",
+    "rel_space_030"
+  ],
+  "official_delta_vs_prior": "+8",
+  "official_failed_cases": 21,
+  "official_passed_cases": 39,
+  "official_score": "39/60",
+  "passed_cases": [
+    "obj_art_001",
+    "obj_art_003",
+    "obj_art_004",
+    "obj_art_006",
+    "obj_art_007",
+    "obj_art_009",
+    "obj_art_010",
+    "obj_art_013",
+    "obj_art_014",
+    "obj_art_015",
+    "hist_arch_016",
+    "hist_arch_017",
+    "hist_arch_018",
+    "hist_arch_019",
+    "hist_arch_021",
+    "hist_arch_023",
+    "hist_arch_024",
+    "hist_arch_026",
+    "hist_arch_027",
+    "rel_space_029",
+    "rel_space_030",
+    "rel_space_032",
+    "rel_space_037",
+    "nat_eco_038",
+    "nat_eco_039",
+    "nat_eco_040",
+    "nat_eco_041",
+    "nat_eco_044",
+    "nat_eco_047",
+    "cross_route_048",
+    "cross_route_049",
+    "cross_route_050",
+    "cross_route_051",
+    "cross_route_052",
+    "cross_route_054",
+    "adv_trap_056",
+    "adv_trap_057",
+    "adv_trap_058",
+    "adv_trap_060"
+  ],
+  "prior_failed_cases": 29,
+  "prior_frozen_ledger_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b/optional-skills/research/series-b-source-gap-resolution/official/series_b_frozen_baseline_ledger.json",
+  "prior_frozen_ledger_sha256": "a1d92e79953f50f219e37b2b714b7d3465cc7a1d280b1dba2a535256123179d3",
+  "prior_passed_cases": 31,
+  "prior_score": "31/60",
+  "production_default_integrated": false,
+  "production_default_manifest_integration_performed": false,
+  "push_performed": false,
+  "release_performed": false,
+  "repo_head_at_write": "2f66cd2e5212add76164d78ff7d36d409e8f2735",
+  "repo_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b",
+  "schema_version": "series_b_official_baseline_write.v1",
+  "series": "Travel / Series B",
+  "tag_created": false,
+  "write_timestamp": "2026-06-26T01:50:49.893965+00:00"
+}
