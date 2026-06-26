@@ -10041,6 +10041,25 @@ def _raw_packet_metadata_leakage_failures(text: str, *, allow_claim_table: bool 
         "do not treat as high-confidence fact",
         "controversy remains where",
     )
+    calibration_meta_terms = (
+        "this calibration assesses",
+        "calibration assesses",
+        "calibration report",
+        "calibrated assessment",
+        "audit findings",
+        "audit finding",
+        "critical defects",
+        "defect list",
+        "defects remain",
+        "constraints, defects",
+        "stage 14",
+        "convergence judgment",
+        "收敛判断.md",
+        "校准报告",
+        "外部校准",
+        "审计发现",
+        "缺陷清单",
+    )
     failures: list[str] = []
     for term in raw_terms:
         if term in lowered:
@@ -10048,8 +10067,13 @@ def _raw_packet_metadata_leakage_failures(text: str, *, allow_claim_table: bool 
     for term in handoff_terms:
         if term in lowered:
             failures.append("internal_handoff_metadata_leakage:" + term)
+    for term in calibration_meta_terms:
+        if term in lowered or term in value:
+            failures.append("internal_calibration_metadata_leakage:" + term)
     if re.search(r"\bL[1-5](?:\s*[-–]\s*L[1-5]|\.\d)?\b", value):
         failures.append("internal_handoff_metadata_leakage:stage_label")
+    if re.search(r"(?:阶段\s*14|阶段14|第\s*14\s*阶段|stage\s*14)", value, flags=re.I):
+        failures.append("internal_calibration_metadata_leakage:stage_14")
     if not allow_claim_table:
         for term in (
             "source_id",
@@ -10080,7 +10104,12 @@ def _line_carries_evidence_caveat_semantics(text: str) -> bool:
             "snippet",
             "defect",
             "audit",
+            "calibration",
             "controversy",
+            "defects",
+            "校准",
+            "审计",
+            "缺陷",
             "证据缺口",
             "核验",
             "不确定",
