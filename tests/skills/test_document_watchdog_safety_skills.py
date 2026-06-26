@@ -19,6 +19,7 @@ def test_document_validation_claim_safety_lesson_is_documented():
     assert "passive observer plan" in text
     assert "claim ceiling to parser-readable" in text
     assert "document validation claim level must come from those validation events" in text
+    assert "missing file inventory or validation checks must remain unknown/warning" in text
 
 
 def test_long_run_watchdog_safety_lesson_is_documented():
@@ -36,3 +37,5 @@ def test_long_run_watchdog_safety_lesson_is_documented():
     assert "without starting, killing, or retrying processes" in text
     assert "passive runtime ledger exists" in text
     assert "verification freshness, remote write/tag verification" in text
+    assert "Derived passive runtime events from runner/report context are advisory" in text
+    assert "missing context must become unknown/warning, not success" in text

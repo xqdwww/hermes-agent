@@ -32,6 +32,11 @@ from tools.passive_intelligence_guard import (
     build_document_validation_warning,
     build_final_report_consistency_warnings,
     build_long_run_observer_plan,
+    build_passive_events_from_report_context,
+    build_passive_events_from_remote_sync_context,
+    build_passive_events_from_runner_context,
+    build_passive_events_from_subtask_context,
+    build_passive_events_from_validation_context,
     build_passive_runtime_ledger,
     check_final_report_consistency,
     classify_action_permission,
@@ -44,6 +49,7 @@ from tools.passive_intelligence_guard import (
     get_stage_timeout_policy,
     initialize_status_ledger,
     ledger_to_final_report_warnings,
+    merge_supplied_and_derived_passive_events,
     safe_document_validation_summary,
     safe_long_run_status_summary,
     summarize_document_validation_plan,
@@ -229,6 +235,10 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "type": "object",
                     "description": "Optional caller-provided passive runtime ledger snapshot for debug/warn metadata.",
                 },
+                "passive_context": {
+                    "type": "object",
+                    "description": "Optional nested runner/report/validation/remote/subtasks context for deriving passive runtime events in non-off modes.",
+                },
             },
             "required": ["query"],
         },
@@ -254,6 +264,7 @@ def task_engine_runner(
     passive_guard_watchdog_state: dict[str, Any] | None = None,
     passive_runtime_events: list[dict[str, Any]] | None = None,
     passive_runtime_ledger: dict[str, Any] | None = None,
+    passive_context: dict[str, Any] | None = None,
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
@@ -292,6 +303,7 @@ def task_engine_runner(
         passive_guard_watchdog_state=passive_guard_watchdog_state,
         passive_runtime_events=passive_runtime_events,
         passive_runtime_ledger=passive_runtime_ledger,
+        passive_context=passive_context,
     )
     if pre_action_block is not None:
         return json.dumps(pre_action_block, ensure_ascii=False, indent=2)
@@ -316,6 +328,7 @@ def task_engine_runner(
             watchdog_state=passive_guard_watchdog_state,
             runtime_events=passive_runtime_events,
             runtime_ledger=passive_runtime_ledger,
+            passive_context=passive_context,
         )
         return json.dumps(
             payload,
@@ -348,6 +361,7 @@ def task_engine_runner(
             watchdog_state=passive_guard_watchdog_state,
             runtime_events=passive_runtime_events,
             runtime_ledger=passive_runtime_ledger,
+            passive_context=passive_context,
         )
         return json.dumps(
             payload,
@@ -672,6 +686,7 @@ def task_engine_runner(
             watchdog_state=passive_guard_watchdog_state,
             runtime_events=passive_runtime_events,
             runtime_ledger=passive_runtime_ledger,
+            passive_context=passive_context,
         )
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -694,6 +709,7 @@ def task_engine_runner(
         watchdog_state=passive_guard_watchdog_state,
         runtime_events=passive_runtime_events,
         runtime_ledger=passive_runtime_ledger,
+        passive_context=passive_context,
     )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -721,6 +737,7 @@ def _attach_passive_guard_metadata(
     watchdog_state: dict[str, Any] | None = None,
     runtime_events: list[dict[str, Any]] | None = None,
     runtime_ledger: dict[str, Any] | None = None,
+    passive_context: dict[str, Any] | None = None,
 ) -> None:
     if guard_mode == "off":
         return
@@ -763,6 +780,7 @@ def _attach_passive_guard_metadata(
     runtime_metadata = _build_passive_runtime_metadata(
         runtime_events=runtime_events,
         runtime_ledger=runtime_ledger,
+        passive_context=passive_context,
         task_id=f"{normalize_mode(mode).lower()}:{action}",
         guard_mode=guard_mode,
         report_text=report_text,
@@ -783,6 +801,7 @@ def _passive_guard_pre_action_block(
     passive_guard_watchdog_state: dict[str, Any] | None = None,
     passive_runtime_events: list[dict[str, Any]] | None = None,
     passive_runtime_ledger: dict[str, Any] | None = None,
+    passive_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if guard_mode != "block_destructive" or not isinstance(passive_guard_action, dict):
         return None
@@ -808,6 +827,7 @@ def _passive_guard_pre_action_block(
         watchdog_state=passive_guard_watchdog_state,
         runtime_events=passive_runtime_events,
         runtime_ledger=passive_runtime_ledger,
+        passive_context=passive_context,
     )
     return payload
 
@@ -938,15 +958,22 @@ def _build_passive_runtime_metadata(
     *,
     runtime_events: list[dict[str, Any]] | None,
     runtime_ledger: dict[str, Any] | None,
+    passive_context: dict[str, Any] | None,
     task_id: str,
     guard_mode: str,
     report_text: str | None,
 ) -> dict[str, Any]:
-    if not runtime_events and not isinstance(runtime_ledger, dict):
+    derived_events = _derive_passive_runtime_events_from_context(
+        passive_context=passive_context,
+        task_id=task_id,
+        report_text=report_text,
+    )
+    merged_events = merge_supplied_and_derived_passive_events(runtime_events or (), derived_events)
+    if not merged_events and not isinstance(runtime_ledger, dict):
         return {}
     ledger = (
-        build_passive_runtime_ledger(runtime_events or (), task_id=task_id, mode=guard_mode)
-        if runtime_events
+        build_passive_runtime_ledger(merged_events, task_id=task_id, mode=guard_mode)
+        if merged_events
         else coerce_passive_runtime_ledger(runtime_ledger, task_id=task_id, mode=guard_mode)
     )
     decision = classify_ledger_completion_state(ledger)
@@ -956,9 +983,58 @@ def _build_passive_runtime_metadata(
         "ledger": asdict(ledger),
         "decision": asdict(decision),
         "warnings": warnings,
+        "supplied_event_count": len(runtime_events or ()),
+        "derived_event_count": len(derived_events),
+        "merged_event_count": len(merged_events),
         "warning_only": True,
         "blocks_expanded": False,
     }
+
+
+def _derive_passive_runtime_events_from_context(
+    *,
+    passive_context: dict[str, Any] | None,
+    task_id: str,
+    report_text: str | None,
+) -> list[Any]:
+    context = passive_context if isinstance(passive_context, dict) else {}
+    derived: list[Any] = []
+
+    runner_context = dict(context.get("runner") or {}) if isinstance(context.get("runner"), dict) else {}
+    if runner_context:
+        runner_context.setdefault("task_id", task_id)
+        derived.extend(build_passive_events_from_runner_context(runner_context))
+
+    report_context = dict(context.get("report") or {}) if isinstance(context.get("report"), dict) else {}
+    if report_text and "report_text" not in report_context:
+        report_context["report_text"] = report_text
+    if report_context:
+        report_context.setdefault("task_id", task_id)
+        derived.extend(build_passive_events_from_report_context(report_context))
+
+    validation_context = dict(context.get("validation") or {}) if isinstance(context.get("validation"), dict) else {}
+    if validation_context:
+        validation_context.setdefault("task_id", task_id)
+        derived.extend(build_passive_events_from_validation_context(validation_context))
+
+    remote_context = dict(context.get("remote") or {}) if isinstance(context.get("remote"), dict) else {}
+    if remote_context:
+        remote_context.setdefault("task_id", task_id)
+        derived.extend(build_passive_events_from_remote_sync_context(remote_context))
+
+    if "subtasks" in context:
+        derived.extend(build_passive_events_from_subtask_context(context.get("subtasks")))
+
+    document_context = dict(context.get("document") or {}) if isinstance(context.get("document"), dict) else {}
+    if document_context:
+        document_context.setdefault("task_id", task_id)
+        derived.extend(build_passive_events_from_runner_context(document_context))
+
+    long_run_context = dict(context.get("long_run") or {}) if isinstance(context.get("long_run"), dict) else {}
+    if long_run_context:
+        long_run_context.setdefault("task_id", task_id)
+        derived.extend(build_passive_events_from_runner_context(long_run_context))
+    return derived
 
 
 def _resolve_mode(mode: str, query: str) -> str | None:
@@ -1210,6 +1286,7 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         passive_guard_watchdog_state=args.get("passive_guard_watchdog_state"),
         passive_runtime_events=args.get("passive_runtime_events"),
         passive_runtime_ledger=args.get("passive_runtime_ledger"),
+        passive_context=args.get("passive_context"),
     )
 
 

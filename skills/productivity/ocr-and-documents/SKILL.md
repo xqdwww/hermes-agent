@@ -31,6 +31,7 @@ Extraction success is not full document validity.
 - Report per-file failures and unknowns separately from aggregate counts.
 - Use a passive observer plan before validation-heavy claims: inventory files, list required checks, keep command previews non-executing, and set the claim ceiling to parser-readable until stronger checks pass.
 - When passive runtime ledger events exist, document validation claim level must come from those validation events; do not reconstruct "all valid" or target-app compatibility from memory.
+- When runner/report context is converted into passive ledger events, missing file inventory or validation checks must remain unknown/warning until explicit evidence is supplied.
 
 ## Step 1: Remote URL Available?
 

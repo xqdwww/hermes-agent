@@ -1134,8 +1134,20 @@ def apply_passive_runtime_event(
 
     elif event_type in {"report_claim", "claim", "final_report_claim"}:
         claim_text = str(payload.get("claim_text") or payload.get("text") or "")
-        for warning in ledger_to_final_report_warnings(ledger, claim_text):
+        claim_ledger = replace(ledger, warnings=())
+        for warning in ledger_to_final_report_warnings(claim_ledger, claim_text):
             warnings.append(dict(warning))
+
+    elif event_type in {"adapter_warning", "context_warning"}:
+        warnings.append(
+            {
+                "code": str(payload.get("code") or "PASSIVE_RUNTIME_CONTEXT_WARNING"),
+                "ledger_field": str(payload.get("ledger_field") or ""),
+                "event_id": str(runtime_event.event_id),
+                "offending_phrase": str(payload.get("offending_phrase") or ""),
+                "safe_interpretation": str(payload.get("safe_interpretation") or "Treat missing context as unknown, not success."),
+            }
+        )
 
     if payload.get("task_status") or payload.get("overall_status"):
         overall_status = _coerce_status(payload.get("task_status") or payload.get("overall_status"))
@@ -1352,6 +1364,313 @@ def ledger_to_final_report_warnings(
             "Dry-run ledger state cannot update official state.",
         )
     return warnings
+
+
+def build_passive_events_from_runner_context(context: dict[str, Any]) -> list[PassiveRuntimeEvent]:
+    data = context if isinstance(context, dict) else {}
+    task_id = str(data.get("task_id") or "")
+    events: list[PassiveRuntimeEvent] = []
+    next_id = 1
+
+    report_only = bool(data.get("report_only"))
+    dry_run = bool(data.get("dry_run"))
+    for path in _coerce_string_list(data.get("files_read")):
+        events.append(_runtime_event(next_id, "file_access", task_id, {"operation": "read", "path": path}))
+        next_id += 1
+    for operation, key in (("write", "files_written"), ("delete", "files_deleted"), ("move", "files_moved"), ("copy", "files_copied")):
+        for path in _coerce_string_list(data.get(key)):
+            events.append(
+                _runtime_event(
+                    next_id,
+                    "file_access",
+                    task_id,
+                    {
+                        "operation": operation,
+                        "path": path,
+                        "report_only": report_only,
+                        "dry_run": dry_run,
+                    },
+                )
+            )
+            next_id += 1
+
+    if dry_run and bool(data.get("official_updated")):
+        events.append(
+            _runtime_event(
+                next_id,
+                "remote_sync",
+                task_id,
+                {"operation": "official_update", "dry_run": True, "official_updated": True},
+            )
+        )
+        next_id += 1
+
+    latest_write = _optional_int(data.get("latest_write_event_id") or data.get("latest_modification_event_id"))
+    latest_verification = _optional_int(data.get("latest_verification_event_id"))
+    if latest_write is not None and not any(event.event_id == latest_write for event in events):
+        events.append(
+            _runtime_event(
+                latest_write,
+                "file_access",
+                task_id,
+                {
+                    "operation": "write",
+                    "path": str(data.get("latest_write_path") or data.get("latest_modification_path") or "unknown"),
+                    "report_only": report_only,
+                    "dry_run": dry_run,
+                },
+            )
+        )
+    if latest_verification is not None:
+        events.append(
+            _runtime_event(
+                latest_verification,
+                "verification",
+                task_id,
+                {
+                    "result": str(data.get("latest_verification_result") or "pass"),
+                    "verifies_after_event_id": _optional_int(data.get("verifies_after_event_id")),
+                    "stale_if_before_event_id": latest_write,
+                },
+            )
+        )
+
+    task_text = str(data.get("task_text") or data.get("query") or "")
+    files = _coerce_string_list(data.get("files") or data.get("file_inventory"))
+    if task_text and classify_document_validation_trigger(task_text) and not files:
+        events.append(
+            _runtime_event(
+                _next_event_id(events),
+                "document_validation",
+                task_id,
+                {
+                    "status": "unknown",
+                    "checks_missing": ["file_inventory"],
+                    "safe_claim_level": "binary_only",
+                },
+            )
+        )
+    if task_text and classify_long_run_trigger(task_text) and not any(
+        key in data for key in ("process_status", "last_output_at", "silence_seconds", "elapsed_seconds")
+    ):
+        events.append(
+            _runtime_event(
+                _next_event_id(events),
+                "adapter_warning",
+                task_id,
+                {
+                    "code": "PASSIVE_RUNTIME_WATCHDOG_STATUS_REQUIRED",
+                    "ledger_field": "overall_status",
+                    "safe_interpretation": "Collect process_status, last_output_at, elapsed, silence_seconds, retry_count, and next_safe_action before reporting completion.",
+                },
+            )
+        )
+    return _sort_runtime_events(events)
+
+
+def build_passive_events_from_report_context(report_context: dict[str, Any]) -> list[PassiveRuntimeEvent]:
+    data = report_context if isinstance(report_context, dict) else {}
+    report_text = str(data.get("report_text") or data.get("final_report_text") or data.get("text") or "")
+    task_id = str(data.get("task_id") or "")
+    return [
+        _runtime_event(event.event_id, "report_claim", task_id, asdict(event))
+        for event in extract_report_claim_events(report_text, task_id=task_id)
+    ]
+
+
+def build_passive_events_from_validation_context(validation_context: dict[str, Any]) -> list[PassiveRuntimeEvent]:
+    data = validation_context if isinstance(validation_context, dict) else {}
+    task_id = str(data.get("task_id") or "")
+    events: list[PassiveRuntimeEvent] = []
+    latest_write = _optional_int(data.get("latest_write_event_id") or data.get("latest_modification_event_id"))
+    latest_verification = _optional_int(data.get("latest_verification_event_id"))
+    if latest_write is not None:
+        events.append(
+            _runtime_event(
+                latest_write,
+                "file_access",
+                task_id,
+                {"operation": "write", "path": str(data.get("latest_write_path") or "unknown")},
+            )
+        )
+    if latest_verification is not None:
+        events.append(
+            _runtime_event(
+                latest_verification,
+                "verification",
+                task_id,
+                {
+                    "result": str(data.get("verification_result") or data.get("result") or "pass"),
+                    "verifies_after_event_id": _optional_int(data.get("verifies_after_event_id")),
+                    "stale_if_before_event_id": latest_write,
+                },
+            )
+        )
+    for item in _coerce_dict_list(data.get("document_validation_results")):
+        events.append(_runtime_event(_next_event_id(events), "document_validation", task_id, item))
+    return _sort_runtime_events(events)
+
+
+def build_passive_events_from_remote_sync_context(remote_context: dict[str, Any]) -> list[PassiveRuntimeEvent]:
+    data = remote_context if isinstance(remote_context, dict) else {}
+    task_id = str(data.get("task_id") or "")
+    events: list[PassiveRuntimeEvent] = []
+    if bool(data.get("ls_remote_success") or data.get("read_access")):
+        events.append(
+            _runtime_event(
+                1,
+                "remote_sync",
+                task_id,
+                {
+                    "operation": "ls_remote",
+                    "remote": str(data.get("remote") or ""),
+                    "branch": str(data.get("branch") or ""),
+                    "read_access": True,
+                },
+            )
+        )
+    if bool(data.get("write_attempted") or data.get("branch_push_attempted") or data.get("write_success")):
+        events.append(
+            _runtime_event(
+                _next_event_id(events),
+                "remote_sync",
+                task_id,
+                {
+                    "operation": "branch_push",
+                    "remote": str(data.get("remote") or ""),
+                    "branch": str(data.get("branch") or ""),
+                    "write_attempted": bool(data.get("write_attempted") or data.get("branch_push_attempted")),
+                    "write_success": bool(data.get("write_success")),
+                    "verified": bool(data.get("write_verified") or data.get("branch_verified")),
+                    "remote_head_before": str(data.get("remote_head_before") or ""),
+                    "remote_head_after": str(data.get("remote_head_after") or ""),
+                },
+            )
+        )
+    local_tag = str(data.get("local_tag") or "")
+    remote_tag_verified = bool(data.get("remote_tag_verified") or data.get("tag_verified"))
+    if local_tag and not remote_tag_verified:
+        events.append(
+            _runtime_event(
+                _next_event_id(events),
+                "remote_sync",
+                task_id,
+                {"operation": "local_tag", "tag": local_tag, "tag_verified": False},
+            )
+        )
+    if bool(data.get("tag_pushed") or remote_tag_verified):
+        events.append(
+            _runtime_event(
+                _next_event_id(events),
+                "remote_sync",
+                task_id,
+                {
+                    "operation": "tag_push",
+                    "tag_pushed": bool(data.get("tag_pushed") or remote_tag_verified),
+                    "tag_verified": remote_tag_verified,
+                },
+            )
+        )
+    if bool(data.get("official_updated")) or bool(data.get("dry_run")):
+        events.append(
+            _runtime_event(
+                _next_event_id(events),
+                "remote_sync",
+                task_id,
+                {
+                    "operation": "official_update",
+                    "dry_run": bool(data.get("dry_run")),
+                    "official_updated": bool(data.get("official_updated")),
+                },
+            )
+        )
+    return _sort_runtime_events(events)
+
+
+def build_passive_events_from_subtask_context(subtasks: dict[str, Any] | list[Any] | tuple[Any, ...]) -> list[PassiveRuntimeEvent]:
+    events: list[PassiveRuntimeEvent] = []
+    for item in _iter_subtask_items(subtasks):
+        events.append(_runtime_event(len(events) + 1, "subtask_status", str(item.get("task_id") or ""), item))
+    return events
+
+
+def merge_supplied_and_derived_passive_events(
+    supplied_events: Any,
+    derived_events: Any,
+) -> list[PassiveRuntimeEvent]:
+    supplied = _normalize_runtime_event_sequence(supplied_events)
+    derived = _normalize_runtime_event_sequence(derived_events)
+    merged: list[PassiveRuntimeEvent] = []
+    used_ids: set[int] = set()
+    supplied_ids: set[int] = set()
+    next_id = 1
+
+    for event in supplied:
+        event_id = event.event_id if event.event_id > 0 else next_id
+        while event_id in used_ids:
+            event_id += 1
+        normalized = replace(event, event_id=event_id)
+        merged.append(normalized)
+        used_ids.add(event_id)
+        supplied_ids.add(event_id)
+        next_id = max(next_id, event_id + 1)
+
+    for event in _sort_runtime_events(derived):
+        event_id = event.event_id if event.event_id > 0 else next_id
+        if event_id in supplied_ids:
+            warning_id = _next_available_event_id(used_ids, next_id)
+            warning = _runtime_event(
+                warning_id,
+                "adapter_warning",
+                event.task_id,
+                {
+                    "code": "PASSIVE_RUNTIME_EVENT_ID_CONFLICT",
+                    "ledger_field": "events_seen",
+                    "safe_interpretation": "Supplied event id was preserved; derived event was re-numbered.",
+                    "conflicting_event_id": event.event_id,
+                },
+            )
+            merged.append(warning)
+            used_ids.add(warning_id)
+            next_id = max(next_id, warning_id + 1)
+        if event_id in used_ids:
+            event_id = _next_available_event_id(used_ids, next_id)
+        normalized = replace(event, event_id=event_id)
+        merged.append(normalized)
+        used_ids.add(event_id)
+        next_id = max(next_id, event_id + 1)
+    return merged
+
+
+def extract_report_claim_events(report_text: str, task_id: str | None = None) -> list[ReportClaimEvent]:
+    text = report_text or ""
+    lowered = text.casefold()
+    claims: list[tuple[str, str, str]] = []
+    for claim_type, pattern, phrase in (
+        ("pass", r"\bpass\b", "PASS"),
+        ("completed", r"\b(completed|complete|done|finished)\b", "completed"),
+        ("verified", r"\bverified\b", "verified"),
+        ("pushed", r"\b(pushed|remote synced|synced to remote)\b", "pushed"),
+        ("tag_synced", r"\b(tag pushed|remote tag|tag synced)\b", "tag pushed"),
+        ("official_updated", r"\b(official updated|baseline updated|official baseline)\b", "official updated"),
+        ("production_changed", r"\b(production changed|updated production)\b", "production changed"),
+        ("all_valid", r"\ball valid\b", "all valid"),
+        ("zero_corrupted", r"\b(0 corrupted|zero corrupted)\b", "0 corrupted"),
+        ("all_phases_complete", r"\ball phases complete\b", "all phases complete"),
+    ):
+        if re.search(pattern, lowered):
+            claims.append((claim_type, phrase, phrase))
+    return [
+        ReportClaimEvent(
+            event_id=index,
+            claim_text=phrase,
+            claim_type=claim_type,
+            referenced_status="",
+            confidence="conservative",
+            needs_ledger_check=True,
+        )
+        for index, (claim_type, phrase, _claim) in enumerate(claims, start=1)
+    ]
 
 
 def classify_document_validation_requirements(file_path: str, intended_use: str | None = None) -> DocumentValidationPlan:
@@ -2264,6 +2583,100 @@ def _coerce_passive_guard_mode(mode: str) -> str:
     return normalized
 
 
+def _runtime_event(event_id: int, event_type: str, task_id: str, payload: dict[str, Any]) -> PassiveRuntimeEvent:
+    return PassiveRuntimeEvent(
+        event_id=event_id,
+        event_type=event_type,
+        task_id=task_id,
+        payload=dict(payload),
+    )
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [str(item) for item in value.values() if item is not None and str(item)]
+    try:
+        return [str(item) for item in value if item is not None and str(item)]
+    except TypeError:
+        return [str(value)]
+
+
+def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    if isinstance(value, dict):
+        return [dict(value)]
+    result: list[dict[str, Any]] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return []
+    for item in iterator:
+        if isinstance(item, dict):
+            result.append(dict(item))
+    return result
+
+
+def _iter_subtask_items(subtasks: dict[str, Any] | list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
+    if isinstance(subtasks, dict):
+        items: list[dict[str, Any]] = []
+        for key, value in subtasks.items():
+            data = dict(value) if isinstance(value, dict) else {"status": value}
+            data.setdefault("subtask_id", str(key))
+            items.append(data)
+        return items
+    result: list[dict[str, Any]] = []
+    if isinstance(subtasks, (list, tuple)):
+        for index, item in enumerate(subtasks, start=1):
+            data = dict(item) if isinstance(item, dict) else {"status": item}
+            data.setdefault("subtask_id", str(data.get("id") or data.get("phase") or f"subtask_{index}"))
+            result.append(data)
+    return result
+
+
+def _normalize_runtime_event_sequence(value: Any) -> list[PassiveRuntimeEvent]:
+    if value is None:
+        return []
+    if isinstance(value, (PassiveRuntimeEvent, FileAccessEvent, VerificationEvent, SubtaskStatusEvent, ProcessStatusEvent, DocumentValidationEvent, RemoteSyncEvent, ReportClaimEvent)):
+        return [_coerce_passive_runtime_event(value)]
+    if isinstance(value, dict):
+        return [_coerce_passive_runtime_event(value)]
+    events: list[PassiveRuntimeEvent] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return []
+    for item in iterator:
+        events.append(_coerce_passive_runtime_event(item))
+    return events
+
+
+def _sort_runtime_events(events: list[PassiveRuntimeEvent]) -> list[PassiveRuntimeEvent]:
+    return sorted(
+        events,
+        key=lambda event: (
+            event.event_id if event.event_id > 0 else 10**9,
+            event.event_type,
+            repr(sorted(event.payload.items())),
+        ),
+    )
+
+
+def _next_event_id(events: list[PassiveRuntimeEvent]) -> int:
+    return max((event.event_id for event in events), default=0) + 1
+
+
+def _next_available_event_id(used_ids: set[int], start: int) -> int:
+    candidate = max(start, 1)
+    while candidate in used_ids:
+        candidate += 1
+    return candidate
+
+
 def _coerce_passive_runtime_event(event: PassiveRuntimeEvent | dict[str, Any]) -> PassiveRuntimeEvent:
     if isinstance(event, PassiveRuntimeEvent):
         return event
@@ -2465,6 +2878,11 @@ __all__ = [
     "WatchdogDecision",
     "WatchdogPollPlan",
     "apply_passive_runtime_event",
+    "build_passive_events_from_report_context",
+    "build_passive_events_from_remote_sync_context",
+    "build_passive_events_from_runner_context",
+    "build_passive_events_from_subtask_context",
+    "build_passive_events_from_validation_context",
     "build_passive_runtime_ledger",
     "build_document_validation_observer_plan",
     "build_document_validation_warning",
@@ -2487,11 +2905,13 @@ __all__ = [
     "classify_watchdog_state",
     "coerce_passive_runtime_ledger",
     "compute_retry_signature",
+    "extract_report_claim_events",
     "get_stage_timeout_policy",
     "initialize_passive_runtime_ledger",
     "initialize_status_ledger",
     "inspect_pdf_binary_signatures",
     "ledger_to_final_report_warnings",
+    "merge_supplied_and_derived_passive_events",
     "safe_document_validation_summary",
     "safe_long_run_status_summary",
     "summarize_passive_runtime_ledger",

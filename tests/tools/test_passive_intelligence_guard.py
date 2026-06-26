@@ -7,6 +7,11 @@ from tools.passive_intelligence_guard import (
     build_document_validation_warning,
     build_final_report_consistency_warnings,
     build_long_run_observer_plan,
+    build_passive_events_from_remote_sync_context,
+    build_passive_events_from_report_context,
+    build_passive_events_from_runner_context,
+    build_passive_events_from_subtask_context,
+    build_passive_events_from_validation_context,
     build_passive_runtime_ledger,
     build_pdf_validation_command_plan,
     build_watchdog_poll_plan,
@@ -24,11 +29,13 @@ from tools.passive_intelligence_guard import (
     classify_skill_triggers,
     classify_watchdog_state,
     compute_retry_signature,
+    extract_report_claim_events,
     get_stage_timeout_policy,
     initialize_passive_runtime_ledger,
     initialize_status_ledger,
     inspect_pdf_binary_signatures,
     ledger_to_final_report_warnings,
+    merge_supplied_and_derived_passive_events,
     safe_document_validation_summary,
     safe_long_run_status_summary,
     summarize_document_validation_plan,
@@ -1474,3 +1481,229 @@ def test_block_destructive_mode_still_only_blocks_destructive_rules():
     assert warning_only["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
     assert blocked["status"] == "blocked"
     assert blocked["blocked_reason"] == "git_force_push_blocked"
+
+
+def test_report_only_non_report_write_context_emits_invalid_event():
+    events = build_passive_events_from_runner_context(
+        {"task_id": "t1", "report_only": True, "files_written": ["tools/source.py"]}
+    )
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert ledger.report_only is True
+    assert ledger.overall_status == "blocked"
+    assert any(item["code"] == "PASSIVE_RUNTIME_REPORT_ONLY_WRITE_INVALID" for item in ledger.warnings)
+
+
+def test_dry_run_official_update_context_emits_invalid_event():
+    events = build_passive_events_from_runner_context({"task_id": "t1", "dry_run": True, "official_updated": True})
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert ledger.dry_run is True
+    assert ledger.official_updated is True
+    assert ledger.overall_status == "blocked"
+
+
+def test_ls_remote_context_emits_read_not_write():
+    events = build_passive_events_from_remote_sync_context({"task_id": "t1", "ls_remote_success": True})
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert events[0].payload["read_access"] is True
+    assert ledger.remote_pushed is False
+    assert any(item["code"] == "PASSIVE_RUNTIME_READ_ACCESS_IS_NOT_WRITE_ACCESS" for item in ledger.warnings)
+
+
+def test_local_tag_without_remote_verification_emits_local_only_event():
+    events = build_passive_events_from_remote_sync_context({"task_id": "t1", "local_tag": "phase0-ready"})
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert events[0].payload["operation"] == "local_tag"
+    assert ledger.remote_tag_pushed is False
+    assert "remote tag synced" in ledger.forbidden_final_claims
+
+
+def test_subtask_context_emits_per_subtask_events():
+    events = build_passive_events_from_subtask_context(
+        {"phase_1": "completed", "phase_2": {"status": "partial", "reason": "missing artifact"}}
+    )
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert [event.payload["subtask_id"] for event in events] == ["phase_1", "phase_2"]
+    assert ledger.subtasks["phase_2"]["status"] == "partial"
+    assert ledger.overall_status == "partial"
+
+
+def test_write_then_old_verification_context_makes_stale():
+    events = build_passive_events_from_validation_context(
+        {
+            "task_id": "t1",
+            "latest_write_event_id": 5,
+            "latest_verification_event_id": 3,
+            "verification_result": "pass",
+            "verifies_after_event_id": 2,
+        }
+    )
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert [event.event_id for event in events] == [3, 5]
+    assert ledger.verification_status == "stale"
+
+
+def test_document_trigger_without_files_emits_inventory_needed():
+    events = build_passive_events_from_runner_context({"task_id": "t1", "task_text": "Validate all PDFs and report 0 corrupted"})
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert events[0].event_type == "document_validation"
+    assert events[0].payload["checks_missing"] == ["file_inventory"]
+    assert any(item["code"] == "PASSIVE_RUNTIME_DOCUMENT_CHECKS_INCOMPLETE" for item in ledger.warnings)
+
+
+def test_long_run_trigger_without_status_emits_status_needed():
+    events = build_passive_events_from_runner_context({"task_id": "t1", "task_text": "Codex is stuck with no output"})
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    assert events[0].event_type == "adapter_warning"
+    assert any(item["code"] == "PASSIVE_RUNTIME_WATCHDOG_STATUS_REQUIRED" for item in ledger.warnings)
+
+
+def test_supplied_events_win_on_event_id_conflict():
+    supplied = [{"event_id": 1, "event_type": "file_access", "operation": "read", "path": "README.md"}]
+    derived = [{"event_id": 1, "event_type": "file_access", "operation": "write", "path": "tools/source.py"}]
+    merged = merge_supplied_and_derived_passive_events(supplied, derived)
+
+    assert merged[0].event_id == 1
+    assert merged[0].payload["operation"] == "read"
+    assert any(event.event_type == "adapter_warning" for event in merged)
+    assert merged[-1].payload["operation"] == "write"
+    assert merged[-1].event_id != 1
+
+
+def test_merged_events_are_deterministically_ordered():
+    supplied = [{"event_id": 10, "event_type": "verification", "result": "pass"}]
+    derived = [
+        {"event_id": 3, "event_type": "remote_sync", "operation": "ls_remote", "read_access": True},
+        {"event_id": 2, "event_type": "file_access", "operation": "write", "path": "tools/source.py"},
+    ]
+
+    first = merge_supplied_and_derived_passive_events(supplied, derived)
+    second = merge_supplied_and_derived_passive_events(supplied, list(reversed(derived)))
+
+    assert [(event.event_id, event.event_type) for event in first] == [
+        (10, "verification"),
+        (2, "file_access"),
+        (3, "remote_sync"),
+    ]
+    assert [(event.event_id, event.event_type) for event in first] == [
+        (event.event_id, event.event_type) for event in second
+    ]
+
+
+def test_extract_completed_pass_verified_pushed_claims():
+    events = extract_report_claim_events("PASS. Completed, verified, and pushed to remote.", task_id="t1")
+    claim_types = {event.claim_type for event in events}
+
+    assert {"pass", "completed", "verified", "pushed"} <= claim_types
+
+
+def test_extract_zero_corrupted_all_valid_claims():
+    events = extract_report_claim_events("All valid: 0 corrupted.", task_id="t1")
+    claim_types = {event.claim_type for event in events}
+
+    assert {"all_valid", "zero_corrupted"} <= claim_types
+
+
+def test_claim_events_drive_ledger_warnings():
+    events = merge_supplied_and_derived_passive_events(
+        [{"event_id": 1, "event_type": "process_status", "process_status": "running"}],
+        build_passive_events_from_report_context({"task_id": "t1", "report_text": "PASS and pushed."}),
+    )
+    ledger = build_passive_runtime_ledger(events, task_id="t1", mode="warn")
+
+    codes = {item["code"] for item in ledger.warnings}
+    assert "PASSIVE_RUNTIME_COMPLETION_CONFLICT" in codes
+    assert "PASSIVE_RUNTIME_REMOTE_PUSH_CONFLICT" in codes
+
+
+def test_default_off_no_context_no_output_change():
+    implicit = json.loads(task_engine_runner(query="Run DECISION StageRecord", mode="DECISION", action="contract"))
+    with_context = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_context={"runner": {"files_written": ["tools/source.py"]}},
+        )
+    )
+
+    assert implicit == with_context
+    assert "passive_intelligence_guard" not in with_context
+
+
+def test_debug_mode_context_builds_ledger_metadata():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="debug",
+            passive_context={"runner": {"files_written": ["tools/source.py"]}},
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["derived_event_count"] == 1
+    assert runtime["ledger"]["files_written"] == ["tools/source.py"]
+
+
+def test_warn_mode_context_builds_warnings_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_context={
+                "runner": {"task_text": "Codex stuck with no output"},
+                "report": {"report_text": "PASS."},
+            },
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert result["status"] == "ok"
+    assert runtime["warning_only"] is True
+    assert any(item["code"] == "PASSIVE_RUNTIME_WATCHDOG_STATUS_REQUIRED" for item in runtime["warnings"])
+
+
+def test_supplied_and_derived_events_merge():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="debug",
+            passive_runtime_events=[{"event_id": 1, "event_type": "file_access", "operation": "read", "path": "a.md"}],
+            passive_context={"runner": {"files_written": ["b.md"]}},
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["supplied_event_count"] == 1
+    assert runtime["derived_event_count"] == 1
+    assert runtime["merged_event_count"] >= 2
+    assert "a.md" in runtime["ledger"]["files_read"]
+    assert "b.md" in runtime["ledger"]["files_written"]
+
+
+def test_block_destructive_still_does_not_block_non_destructive_context():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_context={"runner": {"task_text": "Codex stuck with no output"}},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
