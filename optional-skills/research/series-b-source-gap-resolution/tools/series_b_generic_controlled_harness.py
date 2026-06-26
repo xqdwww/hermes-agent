@@ -119,6 +119,24 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_sections=("spatial_structure", "historical_layers", "materials_mechanics", "theme_tracks"),
         required_axes=("context_sources", "wiki_or_zim"),
     ),
+
+    "rel_space_031": CaseConfig(
+        case_id="rel_space_031",
+        expected_formal_ready_decision="REL_SPACE_031_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=(
+            "Shinto",
+            "torii",
+            "shimenawa",
+            "sando",
+            "shrine",
+            "sacred_rope",
+            "boundary",
+            "transitional_space",
+        ),
+        required_sections=("spatial_structure", "nature_environment", "theme_tracks"),
+        required_axes=("context_sources", "wiki_or_zim"),
+    ),
 }
 
 
