@@ -208,6 +208,23 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=("nature_book", "qyer_or_china_local", "wiki_or_zim"),
     ),
 
+
+    "nat_eco_043": CaseConfig(
+        case_id="nat_eco_043",
+        expected_formal_ready_decision="NAT_ECO_043_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="PROMOTE_TO_FORMAL_READY_REVIEW",
+        required_terms=("alluvial", "fan", "sediment", "gradient"),
+        required_sections=(
+            "spatial_structure",
+            "historical_layers",
+            "nature_environment",
+            "regional_relations",
+            "material_architecture",
+            "theme_tracks",
+        ),
+        required_axes=("materials_book", "nature_book", "wiki_or_zim"),
+    ),
+
 }
 
 
