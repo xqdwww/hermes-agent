@@ -3,14 +3,25 @@ from __future__ import annotations
 import json
 
 from tools.passive_intelligence_guard import (
+    build_document_validation_warning,
     build_final_report_consistency_warnings,
     check_final_report_consistency,
     check_verification_freshness,
     classify_action_permission,
+    classify_document_validation_requirements,
+    classify_error_kind,
+    classify_long_run_event,
+    classify_pdf_validation_result,
     classify_remote_sync_safety,
     classify_skill_triggers,
     classify_watchdog_state,
+    compute_retry_signature,
+    get_stage_timeout_policy,
     initialize_status_ledger,
+    inspect_pdf_binary_signatures,
+    safe_document_validation_summary,
+    safe_long_run_status_summary,
+    summarize_document_validation_batch,
     update_status_ledger,
 )
 from tools.task_engine_runner import task_engine_runner
@@ -546,3 +557,299 @@ def test_git_remote_sync_terms_trigger_git_safety():
     )
 
     assert triggers == ["git_safety"]
+
+
+def test_parser_pass_only_does_not_allow_fully_valid_claim():
+    decision = classify_pdf_validation_result(
+        {
+            "file_path": "report.pdf",
+            "parser_readable": True,
+            "checks_run": ["parser_readable"],
+            "required_checks": ["binary_signature", "parser_readable", "render_check"],
+        }
+    )
+    warning = build_document_validation_warning(decision, "PDF fully valid.")
+
+    assert decision.status == "unknown"
+    assert decision.safe_claim_level == "parser_readable"
+    assert "binary_signature" in decision.checks_missing
+    assert warning["code"] == "PASSIVE_DOCUMENT_VALIDATION_OVERCLAIM"
+
+
+def test_missing_eof_marker_blocks_complete_pdf_claim():
+    decision = classify_pdf_validation_result(
+        {
+            "parser_readable": True,
+            "binary_signature": {
+                "has_pdf_header": True,
+                "has_eof_marker": False,
+                "eof_marker_near_tail": False,
+                "file_size_bytes": 120,
+            },
+            "required_checks": ["binary_signature", "parser_readable"],
+        }
+    )
+
+    assert decision.status == "fail"
+    assert decision.blocked_reason == "pdf_binary_signature_failed"
+
+
+def test_preview_required_but_not_checked_limits_claim_level():
+    plan = classify_document_validation_requirements("report.pdf", "macOS Preview compatible PDF")
+    decision = classify_pdf_validation_result(
+        {
+            "plan": plan,
+            "binary_signature_ok": True,
+            "parser_readable": True,
+            "render_check_ok": True,
+            "checks_run": ["binary_signature", "parser_readable", "render_check"],
+        }
+    )
+
+    assert "macos_preview_compatibility" in decision.checks_missing
+    assert decision.status == "unknown"
+    assert decision.safe_claim_level == "rendered"
+
+
+def test_batch_summary_cannot_claim_all_valid_with_unknowns():
+    valid = classify_pdf_validation_result(
+        {
+            "binary_signature_ok": True,
+            "parser_readable": True,
+            "render_check_ok": True,
+            "required_checks": ["binary_signature", "parser_readable", "render_check"],
+        }
+    )
+    unknown = classify_pdf_validation_result(
+        {"parser_readable": True, "required_checks": ["binary_signature", "parser_readable"]}
+    )
+
+    summary = summarize_document_validation_batch([valid, unknown])
+
+    assert summary["files_checked"] == 2
+    assert summary["files_unknown_due_missing_checks"] == 1
+    assert summary["all_valid_claim_allowed"] is False
+
+
+def test_target_app_missing_check_reports_unknown_not_pass():
+    decision = classify_pdf_validation_result(
+        {
+            "binary_signature_ok": True,
+            "parser_readable": True,
+            "required_checks": ["binary_signature", "parser_readable", "target_app_compatibility"],
+        }
+    )
+
+    assert decision.status == "unknown"
+    assert "target_app_compatibility" in decision.checks_missing
+
+
+def test_valid_all_required_checks_allows_safe_pass():
+    decision = classify_pdf_validation_result(
+        {
+            "binary_signature_ok": True,
+            "parser_readable": True,
+            "render_check_ok": True,
+            "required_checks": ["binary_signature", "parser_readable", "render_check"],
+        }
+    )
+
+    assert decision.status == "pass"
+    assert decision.safe_claim_level == "rendered"
+    assert "passed the required checks" in safe_document_validation_summary(decision)
+
+
+def test_overclaim_phrase_detects_zero_corrupted_when_checks_missing():
+    decision = classify_pdf_validation_result(
+        {"parser_readable": True, "required_checks": ["binary_signature", "parser_readable"]}
+    )
+
+    warning = build_document_validation_warning(decision, "Batch complete: 0 corrupted.")
+
+    assert warning["code"] == "PASSIVE_DOCUMENT_VALIDATION_OVERCLAIM"
+    assert warning["offending_phrase"] == "0 corrupted"
+
+
+def test_per_file_failure_prevents_aggregate_pass():
+    failed = classify_pdf_validation_result(
+        {
+            "binary_signature_ok": False,
+            "parser_readable": True,
+            "required_checks": ["binary_signature", "parser_readable"],
+        }
+    )
+    valid = classify_pdf_validation_result(
+        {
+            "binary_signature_ok": True,
+            "parser_readable": True,
+            "required_checks": ["binary_signature", "parser_readable"],
+        }
+    )
+
+    summary = summarize_document_validation_batch([valid, failed])
+
+    assert summary["files_failed"] == 1
+    assert summary["all_valid_claim_allowed"] is False
+
+
+def test_inspect_pdf_binary_signatures_detects_tail_eof(tmp_path):
+    pdf = tmp_path / "ok.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
+
+    result = inspect_pdf_binary_signatures(str(pdf))
+
+    assert result.has_pdf_header is True
+    assert result.has_eof_marker is True
+    assert result.eof_marker_near_tail is True
+    assert result.suspicious_truncation is False
+
+
+def test_running_within_silence_budget_waits():
+    decision = classify_long_run_event(
+        {"process_status": "running", "stage_name": "codex_handoff", "silence_seconds": 30}
+    )
+
+    assert decision.should_wait is True
+    assert decision.status == "running"
+
+
+def test_running_beyond_silence_budget_inspects():
+    decision = classify_long_run_event(
+        {"process_status": "running", "stage_name": "gpt_bridge", "silence_seconds": 61}
+    )
+
+    assert decision.should_inspect is True
+    assert decision.blocked_reason == "silence_budget_exceeded"
+
+
+def test_timeout_with_partial_output_is_partial_not_completed_phase2a():
+    decision = classify_long_run_event({"process_status": "timeout", "partial_output_present": True})
+
+    assert decision.status == "partial"
+    assert "do not report completed" in decision.next_safe_action
+
+
+def test_repeated_same_error_blocks_after_limit():
+    signature = compute_retry_signature("schema validation error", exit_code=1)
+    decision = classify_long_run_event(
+        {
+            "process_status": "failed",
+            "retry_count_same_error": 3,
+            "retry_count_total": 3,
+            "current_error_signature": signature,
+        }
+    )
+
+    assert decision.should_block is True
+    assert decision.blocked_reason == "same_error_repeated_3_times"
+
+
+def test_auth_error_blocks_not_retry_phase2a():
+    assert classify_error_kind("auth token expired") == "auth"
+    decision = classify_long_run_event({"process_status": "running", "current_error_signature": "auth token expired"})
+
+    assert decision.should_block is True
+    assert decision.should_retry is False
+
+
+def test_permission_error_blocks_not_retry_phase2a():
+    decision = classify_long_run_event({"process_status": "running", "current_error_signature": "permission denied"})
+
+    assert decision.should_block is True
+    assert decision.should_retry is False
+
+
+def test_unknown_stage_uses_conservative_policy():
+    policy = get_stage_timeout_policy("unknown_stage_name")
+    decision = classify_long_run_event(
+        {
+            "process_status": "running",
+            "stage_name": "unknown_stage_name",
+            "elapsed_seconds": policy.soft_timeout + 1,
+            "silence_seconds": 0,
+        }
+    )
+
+    assert policy.stage_name == "generic_subprocess"
+    assert decision.should_wait is True
+    assert decision.should_block is False
+
+
+def test_codex_incomplete_phase_not_completed():
+    decision = classify_long_run_event(
+        {
+            "process_status": "completed",
+            "stage_name": "codex_handoff",
+            "incomplete_phases": ["phase_5"],
+        }
+    )
+
+    assert decision.should_block is True
+    assert decision.blocked_reason == "completed_claim_with_incomplete_phases"
+
+
+def test_waiting_status_cannot_report_pass_phase2a():
+    decision = classify_long_run_event({"process_status": "waiting", "silence_seconds": 0})
+
+    assert decision.status == "waiting"
+    assert "do not report PASS" in safe_long_run_status_summary(decision)
+
+
+def test_per_stage_policy_not_universal_120s():
+    codex = get_stage_timeout_policy("codex_handoff")
+    batch = get_stage_timeout_policy("batch_download")
+
+    assert codex.expected_silence_budget != batch.expected_silence_budget
+    assert codex.hard_timeout != batch.hard_timeout
+
+
+def test_remote_ahead_diverged_blocks_not_force_push():
+    decision = classify_long_run_event(
+        {"process_status": "failed", "current_error_signature": "remote ahead and diverged; fetch first"}
+    )
+
+    assert decision.should_block is True
+    assert decision.blocked_reason == "remote_diverged_error_requires_owner_action"
+
+
+def test_warn_mode_reports_document_overclaim_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="Validate PDF render Preview before claiming 0 corrupted.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_document_validation={
+                "file_path": "report.pdf",
+                "parser_readable": True,
+                "required_checks": ["binary_signature", "parser_readable", "render_check"],
+            },
+            passive_guard_report_text="All valid, 0 corrupted.",
+        )
+    )
+
+    guard = result["passive_intelligence_guard"]
+    assert result["status"] == "ok"
+    assert "document_validation" in guard["skill_triggers"]
+    assert guard["document_validation"]["warning"]["code"] == "PASSIVE_DOCUMENT_VALIDATION_OVERCLAIM"
+
+
+def test_warn_mode_reports_long_run_watchdog_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="GPT Bridge subprocess is silent and waiting.",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_watchdog_state={
+                "process_status": "running",
+                "stage_name": "gpt_bridge",
+                "silence_seconds": 120,
+            },
+        )
+    )
+
+    watchdog = result["passive_intelligence_guard"]["long_run_watchdog"]
+    assert result["status"] == "ok"
+    assert watchdog["decision"]["should_inspect"] is True
+    assert watchdog["warning_only"] is True

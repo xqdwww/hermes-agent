@@ -110,6 +110,80 @@ class RemoteSyncDecision:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class DocumentValidationPlan:
+    file_path: str
+    file_type: str
+    intended_use: str
+    required_checks: tuple[str, ...]
+    optional_checks: tuple[str, ...]
+    platform_specific_checks: tuple[str, ...]
+    overclaim_prohibited_phrases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PdfSignatureResult:
+    has_pdf_header: bool
+    has_eof_marker: bool
+    eof_marker_near_tail: bool
+    file_size_bytes: int
+    suspicious_truncation: bool
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocumentValidationDecision:
+    status: str
+    parser_readable: bool | None
+    binary_signature_ok: bool | None
+    render_check_ok: bool | None
+    macos_preview_compatible: bool | None
+    target_app_compatible: bool | None
+    checks_run: tuple[str, ...]
+    checks_missing: tuple[str, ...]
+    missing_check_reason: str
+    blocked_reason: str
+    safe_claim_level: str
+    user_facing_summary: str
+
+
+@dataclass(frozen=True)
+class TimeoutPolicy:
+    stage_name: str
+    owner_tool: str
+    expected_silence_budget: int
+    soft_timeout: int
+    hard_timeout: int
+    inspect_after_silence: int
+    retry_limit_same_error: int
+    retry_limit_total: int
+    allow_retry_error_kinds: tuple[str, ...]
+    block_error_kinds: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LongRunState:
+    task_id: str
+    owner_tool: str
+    stage_name: str
+    process_status: str
+    elapsed_seconds: float = 0
+    silence_seconds: float = 0
+    expected_silence_budget: float | None = None
+    hard_timeout: float | None = None
+    retry_count_same_error: int = 0
+    retry_count_total: int = 0
+    last_error_signature: str = ""
+    current_error_signature: str = ""
+    partial_output_present: bool = False
+    output_freshness: str = ""
+    auth_state: str = ""
+    quota_state: str = ""
+    path_state: str = ""
+    permission_state: str = ""
+    incomplete_phases: tuple[str, ...] = ()
+
+
 def classify_skill_triggers(user_request: str) -> list[str]:
     haystack = (user_request or "").casefold()
     return [
@@ -394,36 +468,310 @@ def classify_remote_sync_safety(state: dict[str, Any]) -> RemoteSyncDecision:
     )
 
 
-def classify_watchdog_state(state: dict[str, Any]) -> WatchdogDecision:
-    data = state if isinstance(state, dict) else {}
-    process_status = str(data.get("process_status") or data.get("status") or "").casefold()
-    silence_seconds = float(data.get("silence_seconds") or 0)
-    silence_budget = float(data.get("expected_silence_budget") or 0)
-    retry_same = int(data.get("retry_count_same_error") or 0)
-    current_sig = str(data.get("current_error_signature") or "")
-    last_sig = str(data.get("last_error_signature") or "")
-    signature = current_sig or last_sig
-    repeated_same = retry_same if retry_same or (current_sig and last_sig and current_sig == last_sig) else 0
+def classify_document_validation_requirements(file_path: str, intended_use: str | None = None) -> DocumentValidationPlan:
+    intended = (intended_use or "").strip()
+    lowered = intended.casefold()
+    suffix = file_path.rsplit(".", 1)[-1].casefold() if "." in file_path else ""
+    file_type = "pdf" if suffix == "pdf" or "pdf" in lowered else suffix or "unknown"
+    required: list[str] = []
+    optional: list[str] = []
+    platform: list[str] = []
+    if file_type == "pdf":
+        required.extend(["binary_signature", "parser_readable"])
+        optional.extend(["render_check", "target_app_compatibility"])
+        if any(term in lowered for term in ("complete", "valid", "production", "share", "deliver", "user use")):
+            required.append("render_check")
+        if "preview" in lowered or "macos" in lowered or "quicklook" in lowered:
+            required.append("macos_preview_compatibility")
+            platform.extend(["qlmanage_preview", "mdls_metadata"])
+        if "target app" in lowered:
+            required.append("target_app_compatibility")
+    else:
+        required.append("file_exists")
+        optional.append("target_app_compatibility")
+    return DocumentValidationPlan(
+        file_path=file_path,
+        file_type=file_type,
+        intended_use=intended,
+        required_checks=tuple(dict.fromkeys(required)),
+        optional_checks=tuple(dict.fromkeys(optional)),
+        platform_specific_checks=tuple(dict.fromkeys(platform)),
+        overclaim_prohibited_phrases=(
+            "PDF fully valid",
+            "fully valid PDF",
+            "0 corrupted",
+            "zero corrupted",
+            "all valid",
+            "Preview compatible",
+            "target-app compatible",
+        ),
+    )
 
-    if _fatal_error(signature):
-        return WatchdogDecision(False, True, False, True, "fatal_error_requires_owner_action", "Stop retrying and resolve auth/session/quota/permission/path state.", "blocked")
-    if "timeout" in process_status and data.get("partial_output"):
-        return WatchdogDecision(False, True, False, False, "timeout_with_partial_output", "Mark partial and inspect partial output.", "partial")
-    if repeated_same >= 3:
-        return WatchdogDecision(False, True, False, True, "same_error_repeated_3_times", "Block and surface the repeated error signature.", "blocked")
-    if repeated_same >= 2:
-        if _transient_network(signature):
+
+def inspect_pdf_binary_signatures(file_path: str) -> PdfSignatureResult:
+    notes: list[str] = []
+    try:
+        with open(file_path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        return PdfSignatureResult(False, False, False, 0, True, (f"read_failed:{exc.__class__.__name__}",))
+    size = len(data)
+    has_header = data[:1024].lstrip().startswith(b"%PDF-")
+    has_eof = b"%%EOF" in data
+    eof_near_tail = b"%%EOF" in data[-2048:] if data else False
+    if not has_header:
+        notes.append("missing_pdf_header")
+    if not has_eof:
+        notes.append("missing_eof_marker")
+    elif not eof_near_tail:
+        notes.append("eof_marker_not_near_tail")
+    suspicious = not has_header or not has_eof or not eof_near_tail or size == 0
+    return PdfSignatureResult(has_header, has_eof, eof_near_tail, size, suspicious, tuple(notes))
+
+
+def classify_pdf_validation_result(results: dict[str, Any]) -> DocumentValidationDecision:
+    data = results if isinstance(results, dict) else {}
+    plan = data.get("plan")
+    if isinstance(plan, DocumentValidationPlan):
+        required_checks = set(plan.required_checks)
+    else:
+        required_checks = set(str(item) for item in data.get("required_checks") or ())
+    checks_run = tuple(str(item) for item in data.get("checks_run") or ())
+    checks_missing = list(str(item) for item in data.get("checks_missing") or ())
+    parser_readable = _optional_bool(data.get("parser_readable"))
+    render_check_ok = _optional_bool(data.get("render_check_ok"))
+    macos_preview_compatible = _optional_bool(data.get("macos_preview_compatible"))
+    target_app_compatible = _optional_bool(data.get("target_app_compatible"))
+    signature = _coerce_pdf_signature(data.get("binary_signature") or data)
+    binary_signature_ok = _optional_bool(data.get("binary_signature_ok"))
+    if binary_signature_ok is None and signature is not None:
+        binary_signature_ok = signature.has_pdf_header and signature.has_eof_marker and signature.eof_marker_near_tail
+
+    if "binary_signature" in required_checks and binary_signature_ok is not True:
+        checks_missing = _append_missing(checks_missing, "binary_signature") if binary_signature_ok is None else checks_missing
+    if "parser_readable" in required_checks and parser_readable is not True:
+        checks_missing = _append_missing(checks_missing, "parser_readable") if parser_readable is None else checks_missing
+    if "render_check" in required_checks and render_check_ok is not True:
+        checks_missing = _append_missing(checks_missing, "render_check") if render_check_ok is None else checks_missing
+    if "macos_preview_compatibility" in required_checks and macos_preview_compatible is not True:
+        checks_missing = _append_missing(checks_missing, "macos_preview_compatibility") if macos_preview_compatible is None else checks_missing
+    if "target_app_compatibility" in required_checks and target_app_compatible is not True:
+        checks_missing = _append_missing(checks_missing, "target_app_compatibility") if target_app_compatible is None else checks_missing
+
+    blocked_reason = ""
+    status = "unknown"
+    if binary_signature_ok is False:
+        status = "fail"
+        blocked_reason = "pdf_binary_signature_failed"
+    elif parser_readable is False:
+        status = "fail"
+        blocked_reason = "pdf_parser_failed"
+    elif render_check_ok is False:
+        status = "fail"
+        blocked_reason = "pdf_render_check_failed"
+    elif macos_preview_compatible is False or target_app_compatible is False:
+        status = "fail"
+        blocked_reason = "target_application_check_failed"
+    elif checks_missing:
+        status = "unknown" if any(check in required_checks for check in checks_missing) else "warning"
+    elif required_checks and _all_required_checks_pass(required_checks, binary_signature_ok, parser_readable, render_check_ok, macos_preview_compatible, target_app_compatible):
+        status = "pass"
+    elif parser_readable is True:
+        status = "warning"
+
+    safe_claim_level = _document_safe_claim_level(
+        binary_signature_ok=binary_signature_ok,
+        parser_readable=parser_readable,
+        render_check_ok=render_check_ok,
+        target_app_compatible=target_app_compatible,
+        macos_preview_compatible=macos_preview_compatible,
+    )
+    missing_reason = str(data.get("missing_check_reason") or ("required_checks_missing" if checks_missing else ""))
+    summary = _document_summary_text(status, safe_claim_level, checks_missing, blocked_reason)
+    return DocumentValidationDecision(
+        status=status,
+        parser_readable=parser_readable,
+        binary_signature_ok=binary_signature_ok,
+        render_check_ok=render_check_ok,
+        macos_preview_compatible=macos_preview_compatible,
+        target_app_compatible=target_app_compatible,
+        checks_run=tuple(dict.fromkeys(checks_run)),
+        checks_missing=tuple(dict.fromkeys(checks_missing)),
+        missing_check_reason=missing_reason,
+        blocked_reason=blocked_reason,
+        safe_claim_level=safe_claim_level,
+        user_facing_summary=summary,
+    )
+
+
+def build_document_validation_warning(decision: DocumentValidationDecision, report_text: str = "") -> dict[str, Any]:
+    phrase = _first_claim_phrase(
+        report_text,
+        ("PDF fully valid", "fully valid PDF", "0 corrupted", "zero corrupted", "all valid", "Preview compatible", "target-app compatible"),
+    )
+    code = "PASSIVE_DOCUMENT_VALIDATION_OVERCLAIM"
+    if phrase and decision.status != "pass":
+        code = "PASSIVE_DOCUMENT_VALIDATION_OVERCLAIM"
+    elif decision.status == "fail":
+        code = "PASSIVE_DOCUMENT_VALIDATION_FAILED"
+    elif decision.status == "unknown":
+        code = "PASSIVE_DOCUMENT_VALIDATION_UNKNOWN"
+    elif not phrase and decision.status == "pass":
+        code = "PASSIVE_DOCUMENT_VALIDATION_OK"
+    return {
+        "code": code,
+        "status": decision.status,
+        "offending_phrase": phrase,
+        "safe_claim_level": decision.safe_claim_level,
+        "checks_missing": list(decision.checks_missing),
+        "safe_interpretation": safe_document_validation_summary(decision),
+        "warning_only": True,
+    }
+
+
+def safe_document_validation_summary(decision: DocumentValidationDecision) -> str:
+    return decision.user_facing_summary
+
+
+def summarize_document_validation_batch(decisions: list[DocumentValidationDecision] | tuple[DocumentValidationDecision, ...]) -> dict[str, Any]:
+    items = list(decisions or [])
+    passed = [item for item in items if item.status == "pass"]
+    warnings = [item for item in items if item.status == "warning"]
+    failed = [item for item in items if item.status in {"fail", "blocked"}]
+    unknown = [item for item in items if item.status == "unknown"]
+    return {
+        "files_checked": len(items),
+        "files_passed_all_required_checks": len(passed),
+        "files_with_warnings": len(warnings),
+        "files_failed": len(failed),
+        "files_unknown_due_missing_checks": len(unknown),
+        "all_valid_claim_allowed": bool(items) and len(passed) == len(items),
+    }
+
+
+def classify_error_kind(error_text: str | None) -> str:
+    text = (error_text or "").casefold()
+    if any(term in text for term in ("permission denied", "access denied", "forbidden")):
+        return "permission"
+    if any(term in text for term in ("unauthorized", "auth", "login required")):
+        return "auth"
+    if "session" in text:
+        return "session"
+    if "quota" in text or "rate limit" in text:
+        return "quota"
+    if any(term in text for term in ("path not found", "no such file", "not a directory")):
+        return "path"
+    if any(term in text for term in ("remote ahead", "diverged", "non-fast-forward", "fetch first")):
+        return "remote_diverged"
+    if any(term in text for term in ("connection reset", "temporarily unavailable", "network", "dns", "502", "503", "504")):
+        return "transient_network"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if any(term in text for term in ("validation", "schema", "assert")):
+        return "validation"
+    return "unknown"
+
+
+def compute_retry_signature(error_text: str | None, exit_code: int | None = None) -> str:
+    text = re.sub(r"\s+", " ", (error_text or "").strip().casefold())
+    text = re.sub(r"0x[0-9a-f]+|\d{4,}", "<num>", text)
+    first = text[:160]
+    kind = classify_error_kind(first)
+    code = "" if exit_code is None else f":exit_{exit_code}"
+    return f"{kind}{code}:{first}"
+
+
+def get_stage_timeout_policy(stage_name: str, owner_tool: str | None = None) -> TimeoutPolicy:
+    stage = (stage_name or "generic_subprocess").strip().casefold().replace("-", "_")
+    owner = (owner_tool or "").strip().casefold().replace("-", "_")
+    key = stage or owner or "generic_subprocess"
+    table: dict[str, tuple[int, int, int, int, int, int]] = {
+        "codex_handoff": (120, 900, 1800, 120, 3, 5),
+        "gpt_bridge": (60, 300, 900, 60, 3, 4),
+        "agy": (90, 600, 1200, 90, 3, 4),
+        "research_decision_intelligence_layer": (180, 1800, 3600, 180, 3, 4),
+        "decision_external_calibration": (120, 1200, 2400, 120, 3, 4),
+        "browser_gui": (90, 600, 1200, 90, 2, 3),
+        "batch_download": (300, 1800, 7200, 300, 3, 6),
+        "generic_subprocess": (75, 600, 1800, 75, 3, 4),
+    }
+    values = table.get(key) or table.get(owner) or table["generic_subprocess"]
+    silence, soft, hard, inspect, same_limit, total_limit = values
+    return TimeoutPolicy(
+        stage_name=key if key in table else "generic_subprocess",
+        owner_tool=owner,
+        expected_silence_budget=silence,
+        soft_timeout=soft,
+        hard_timeout=hard,
+        inspect_after_silence=inspect,
+        retry_limit_same_error=same_limit,
+        retry_limit_total=total_limit,
+        allow_retry_error_kinds=("transient_network", "timeout"),
+        block_error_kinds=("auth", "session", "quota", "permission", "path", "remote_diverged"),
+    )
+
+
+def classify_long_run_event(state: LongRunState | dict[str, Any]) -> WatchdogDecision:
+    long_state = _coerce_long_run_state(state)
+    policy = get_stage_timeout_policy(long_state.stage_name, long_state.owner_tool)
+    process_status = long_state.process_status.casefold()
+    signature = long_state.current_error_signature or long_state.last_error_signature
+    error_kind = classify_error_kind(signature)
+    silence_budget = long_state.expected_silence_budget if long_state.expected_silence_budget is not None else policy.expected_silence_budget
+    hard_timeout = long_state.hard_timeout if long_state.hard_timeout is not None else policy.hard_timeout
+
+    if _explicit_blocking_state(long_state) or error_kind in policy.block_error_kinds:
+        return WatchdogDecision(False, True, False, True, f"{error_kind}_error_requires_owner_action", "Block and surface the owner action required.", "blocked")
+    if "timeout" in process_status and long_state.partial_output_present:
+        return WatchdogDecision(False, True, False, False, "timeout_with_partial_output", "Mark partial and inspect partial output; do not report completed.", "partial")
+    if long_state.incomplete_phases and process_status in {"completed", "pass", "passed", "success"}:
+        return WatchdogDecision(False, True, False, True, "completed_claim_with_incomplete_phases", "Report partial/incomplete phases instead of PASS.", "blocked")
+    if long_state.retry_count_same_error >= policy.retry_limit_same_error:
+        if error_kind in policy.allow_retry_error_kinds and long_state.retry_count_total < policy.retry_limit_total:
             return WatchdogDecision(False, False, True, False, "", "Retry once with backoff; block on another repeat.", "retry")
-        return WatchdogDecision(False, True, False, True, "same_error_repeated_2_times", "Block unless a human marks the error transient.", "blocked")
+        return WatchdogDecision(False, True, False, True, "same_error_repeated_3_times", "Block and surface the repeated error signature.", "blocked")
+    if long_state.retry_count_same_error >= 2:
+        if error_kind in policy.allow_retry_error_kinds and long_state.retry_count_total < policy.retry_limit_total:
+            return WatchdogDecision(False, False, True, False, "", "Retry transient error within policy budget.", "retry")
+        return WatchdogDecision(False, True, False, False, "same_error_repeated_2_times", "Inspect repeated error before retrying.", "running")
     if process_status in {"running", "waiting"}:
-        if silence_seconds <= silence_budget:
-            return WatchdogDecision(True, False, False, False, "", "Wait within expected silence budget.", "running")
-        return WatchdogDecision(False, True, False, False, "silence_budget_exceeded", "Inspect process output and child process state.", "running")
+        if long_state.elapsed_seconds >= hard_timeout:
+            status = "partial" if long_state.partial_output_present else "blocked"
+            return WatchdogDecision(False, True, False, not long_state.partial_output_present, "hard_timeout_exceeded", "Inspect before any retry or completion claim.", status)
+        if long_state.silence_seconds <= silence_budget:
+            return WatchdogDecision(True, False, False, False, "", "Wait within expected silence budget.", process_status)
+        return WatchdogDecision(False, True, False, False, "silence_budget_exceeded", "Inspect process output and child process state.", process_status)
     if "timeout" in process_status:
         return WatchdogDecision(False, True, False, False, "timeout_without_success", "Inspect timeout details; do not report PASS.", "partial")
     if process_status in {"failed", "error", "cancelled"}:
         return WatchdogDecision(False, True, False, True, f"process_{process_status}", "Block and report the failure state.", "blocked")
     return WatchdogDecision(False, False, False, False, "", "No watchdog action required.", process_status or "unknown")
+
+
+def update_long_run_ledger(ledger: StatusLedger, event: dict[str, Any]) -> StatusLedger:
+    decision = classify_long_run_event(event.get("state") if isinstance(event.get("state"), dict) else event)
+    payload: dict[str, Any] = {"event_type": "long_run", "task_status": decision.status}
+    if decision.should_block:
+        payload.update({"event_type": "blocked", "blocked_reason": decision.blocked_reason})
+    elif decision.status == "partial":
+        payload["task_status"] = "partial"
+    return update_status_ledger(ledger, payload)
+
+
+def safe_long_run_status_summary(decision: WatchdogDecision) -> str:
+    if decision.status in {"running", "waiting"}:
+        return "Still running or waiting; do not report PASS."
+    if decision.status == "partial":
+        return "Partial output or timeout state; inspect before claiming completion."
+    if decision.should_block:
+        return f"Blocked: {decision.blocked_reason or 'owner action required'}."
+    if decision.should_retry:
+        return "Retry allowed within policy budget."
+    return decision.next_safe_action
+
+
+def classify_watchdog_state(state: dict[str, Any]) -> WatchdogDecision:
+    return classify_long_run_event(state)
 
 
 def _decision(decision: str, reason: str, owner: str, blocked: bool, safe_next_action: str) -> PermissionDecision:
@@ -745,21 +1093,175 @@ def _transient_network(signature: str) -> bool:
     return any(term in signature.casefold() for term in ("network", "timeout", "temporarily unavailable", "connection reset", "econnreset", "dns", "502", "503", "504"))
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1", "pass", "passed", "ok"}:
+            return True
+        if normalized in {"false", "no", "0", "fail", "failed"}:
+            return False
+        return None
+    return bool(value)
+
+
+def _coerce_pdf_signature(value: Any) -> PdfSignatureResult | None:
+    if isinstance(value, PdfSignatureResult):
+        return value
+    if not isinstance(value, dict):
+        return None
+    if not any(key in value for key in ("has_pdf_header", "has_eof_marker", "eof_marker_near_tail", "file_size_bytes")):
+        return None
+    has_header = bool(value.get("has_pdf_header"))
+    has_eof = bool(value.get("has_eof_marker"))
+    eof_tail = bool(value.get("eof_marker_near_tail"))
+    size = int(value.get("file_size_bytes") or 0)
+    suspicious = bool(value.get("suspicious_truncation", not (has_header and has_eof and eof_tail)))
+    notes = tuple(str(item) for item in value.get("notes") or ())
+    return PdfSignatureResult(has_header, has_eof, eof_tail, size, suspicious, notes)
+
+
+def _append_missing(values: list[str], check: str) -> list[str]:
+    if check not in values:
+        values.append(check)
+    return values
+
+
+def _all_required_checks_pass(
+    required_checks: set[str],
+    binary_signature_ok: bool | None,
+    parser_readable: bool | None,
+    render_check_ok: bool | None,
+    macos_preview_compatible: bool | None,
+    target_app_compatible: bool | None,
+) -> bool:
+    state = {
+        "binary_signature": binary_signature_ok,
+        "parser_readable": parser_readable,
+        "render_check": render_check_ok,
+        "macos_preview_compatibility": macos_preview_compatible,
+        "target_app_compatibility": target_app_compatible,
+    }
+    return all(state.get(check) is True for check in required_checks)
+
+
+def _document_safe_claim_level(
+    *,
+    binary_signature_ok: bool | None,
+    parser_readable: bool | None,
+    render_check_ok: bool | None,
+    target_app_compatible: bool | None,
+    macos_preview_compatible: bool | None,
+) -> str:
+    if target_app_compatible is True or macos_preview_compatible is True:
+        return "target_app_validated"
+    if render_check_ok is True:
+        return "rendered"
+    if binary_signature_ok is True and parser_readable is True:
+        return "structurally_validated"
+    if parser_readable is True:
+        return "parser_readable"
+    return "binary_only" if binary_signature_ok is True else "binary_only"
+
+
+def _document_summary_text(status: str, safe_claim_level: str, checks_missing: list[str], blocked_reason: str) -> str:
+    if status == "pass":
+        return f"Document passed the required checks; safe claim level: {safe_claim_level}."
+    if status == "fail":
+        return f"Document validation failed ({blocked_reason}); do not claim the file is fully valid."
+    if checks_missing:
+        missing = ", ".join(checks_missing)
+        return f"Document validation is incomplete; missing checks: {missing}. Safe claim level: {safe_claim_level}."
+    return f"Document validation produced warnings; safe claim level: {safe_claim_level}."
+
+
+def _coerce_long_run_state(state: LongRunState | dict[str, Any]) -> LongRunState:
+    if isinstance(state, LongRunState):
+        return state
+    data = state if isinstance(state, dict) else {}
+    partial_output_present = bool(data.get("partial_output_present") or data.get("partial_output"))
+    current_sig = str(data.get("current_error_signature") or "")
+    last_sig = str(data.get("last_error_signature") or "")
+    retry_same = int(data.get("retry_count_same_error") or 0)
+    if retry_same == 0 and current_sig and last_sig and current_sig == last_sig:
+        retry_same = 1
+    incomplete = data.get("incomplete_phases") or data.get("partial_phases") or ()
+    if isinstance(incomplete, str):
+        incomplete = (incomplete,)
+    return LongRunState(
+        task_id=str(data.get("task_id") or ""),
+        owner_tool=str(data.get("owner_tool") or ""),
+        stage_name=str(data.get("stage_name") or data.get("stage") or "generic_subprocess"),
+        process_status=str(data.get("process_status") or data.get("status") or ""),
+        elapsed_seconds=float(data.get("elapsed_seconds") or 0),
+        silence_seconds=float(data.get("silence_seconds") or 0),
+        expected_silence_budget=_optional_float(data.get("expected_silence_budget")),
+        hard_timeout=_optional_float(data.get("hard_timeout")),
+        retry_count_same_error=retry_same,
+        retry_count_total=int(data.get("retry_count_total") or 0),
+        last_error_signature=last_sig,
+        current_error_signature=current_sig,
+        partial_output_present=partial_output_present,
+        output_freshness=str(data.get("output_freshness") or ""),
+        auth_state=str(data.get("auth_state") or ""),
+        quota_state=str(data.get("quota_state") or ""),
+        path_state=str(data.get("path_state") or ""),
+        permission_state=str(data.get("permission_state") or ""),
+        incomplete_phases=tuple(str(item) for item in incomplete),
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _explicit_blocking_state(state: LongRunState) -> bool:
+    blocked_values = {"missing", "invalid", "denied", "expired", "blocked", "exhausted", "not_found"}
+    return any(
+        value.strip().casefold() in blocked_values
+        for value in (state.auth_state, state.quota_state, state.path_state, state.permission_state)
+        if value
+    )
+
+
 __all__ = [
     "ConsistencyDecision",
+    "DocumentValidationDecision",
+    "DocumentValidationPlan",
+    "LongRunState",
     "PermissionDecision",
+    "PdfSignatureResult",
     "RemoteSyncDecision",
     "SKILL_TRIGGER_RULES",
     "StatusLedger",
+    "TimeoutPolicy",
     "VerificationDecision",
     "WatchdogDecision",
+    "build_document_validation_warning",
     "build_final_report_consistency_warnings",
     "check_final_report_consistency",
     "check_verification_freshness",
     "classify_action_permission",
+    "classify_document_validation_requirements",
+    "classify_error_kind",
+    "classify_long_run_event",
+    "classify_pdf_validation_result",
     "classify_remote_sync_safety",
     "classify_skill_triggers",
     "classify_watchdog_state",
+    "compute_retry_signature",
+    "get_stage_timeout_policy",
     "initialize_status_ledger",
+    "inspect_pdf_binary_signatures",
+    "safe_document_validation_summary",
+    "safe_long_run_status_summary",
+    "summarize_document_validation_batch",
+    "update_long_run_ledger",
     "update_status_ledger",
 ]

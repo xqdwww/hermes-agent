@@ -67,6 +67,18 @@ process(action="submit", session_id="<id>", data="yes")
 process(action="kill", session_id="<id>")
 ```
 
+### Long-Run Watchdog Safety
+
+- Keep waiting, running, partial, blocked, failed, and completed as separate states.
+- Timeout with partial output is partial, not success.
+- Repeated identical failures should block or inspect instead of blind retry.
+- Auth, session, quota, permission, and path errors are blocked states until the owner resolves them.
+- Use a per-stage timeout policy for Codex, GPT Bridge, AGY, browser GUI, batch download, and generic subprocess work; do not use one universal short timeout.
+- Track phase, elapsed time, last output time, retry count, error signature, and next safe action for long tasks.
+- A running or waiting task must not be serialized as PASS.
+- If a branch push fails because a remote is ahead or diverged, block and inspect; do not force push by default.
+- Permission denied on `origin` is not authorization to fallback to `fork`; ask for explicit remote authorization.
+
 ## Key Flags
 
 | Flag | Effect |

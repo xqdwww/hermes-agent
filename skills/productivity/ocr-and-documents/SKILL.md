@@ -17,6 +17,19 @@ For DOCX: use `python-docx` (parses actual document structure, far better than O
 For PPTX: see the `powerpoint` skill (uses `python-pptx` with full slide/notes support).
 This skill covers **PDFs and scanned documents**.
 
+## Validation Claim Safety
+
+Extraction success is not full document validity.
+
+- Parser success is not full PDF validity. A PyMuPDF pass means parser-readable, not necessarily complete, renderable, or user-ready.
+- PyMuPDF pass does not imply macOS Preview pass.
+- EOF/signature checks are separate from parser checks and render checks.
+- Target app compatibility must be checked before claiming Preview, QuickLook, or target-app compatibility.
+- Batch aggregate pass requires every file to pass every required check.
+- Unknown or missing checks must be reported as unknown/warning, not pass.
+- Do not claim "PDF fully valid", "all valid", or "0 corrupted" unless binary signature, required parser, required render, and required target-app checks passed for every file in scope.
+- Report per-file failures and unknowns separately from aggregate counts.
+
 ## Step 1: Remote URL Available?
 
 If the document has a URL, **always try `web_extract` first**:
