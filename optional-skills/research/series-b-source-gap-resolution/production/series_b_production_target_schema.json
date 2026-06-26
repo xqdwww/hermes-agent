@@ -1,0 +1,75 @@
+{
+  "no_default_integration_policy": {
+    "production_default_manifest_integration_performed": false,
+    "production_default_write_allowed_by_this_layer": false,
+    "source_data_write_allowed_by_this_layer": false,
+    "vector_index_write_allowed_by_this_layer": false
+  },
+  "properties": {
+    "classification": {
+      "const": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
+    },
+    "full_series_b_required_before_release": {
+      "const": true
+    },
+    "layer_id": {
+      "const": "series_b_production_target_v1"
+    },
+    "official_baseline_ref": {
+      "const": "39/60"
+    },
+    "official_baseline_write_enabled": {
+      "const": false
+    },
+    "production_default_enabled": {
+      "const": false
+    },
+    "push_tag_required_separate_authorization": {
+      "const": true
+    },
+    "requires_explicit_integration": {
+      "const": true
+    },
+    "schema_version": {
+      "const": "series_b_production_target_manifest.v1"
+    },
+    "smoke_test_required": {
+      "const": true
+    },
+    "source_data_write_enabled": {
+      "const": false
+    },
+    "vector_write_enabled": {
+      "const": false
+    },
+    "write_targets": {
+      "maxItems": 0,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "layer_id",
+    "classification",
+    "official_baseline_ref",
+    "official_baseline_file",
+    "official_baseline_ledger_file",
+    "source_state_manifest_file",
+    "schema_file",
+    "validator_file",
+    "production_default_enabled",
+    "requires_explicit_integration",
+    "write_targets",
+    "vector_write_enabled",
+    "source_data_write_enabled",
+    "official_baseline_write_enabled",
+    "smoke_test_required",
+    "full_series_b_required_before_release",
+    "push_tag_required_separate_authorization",
+    "rollback_files",
+    "caveat_cases"
+  ],
+  "schema_version": "series_b_production_target_manifest.schema.v1",
+  "title": "Series B explicit non-default production target manifest schema",
+  "type": "object"
+}

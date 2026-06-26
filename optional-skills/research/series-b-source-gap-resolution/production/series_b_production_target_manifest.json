@@ -1,0 +1,51 @@
+{
+  "caveat_cases": [
+    "obj_art_003",
+    "obj_art_007",
+    "nat_eco_039",
+    "obj_art_010",
+    "hist_arch_024"
+  ],
+  "classification": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER",
+  "description": "Explicit, non-default Series B production target layer for future separately authorized integration planning and smoke testing.",
+  "full_series_b_required_before_release": true,
+  "future_integration_gate": {
+    "requires_full_series_b_before_release": true,
+    "requires_rollback_plan": true,
+    "requires_separate_authorization": true,
+    "requires_smoke_test_before_commit": true
+  },
+  "layer_id": "series_b_production_target_v1",
+  "no_default_integration_attestation": {
+    "full_series_b_run_performed": false,
+    "production_default_manifest_integration_performed": false,
+    "production_vector_index_write_performed": false,
+    "push_performed": false,
+    "registered_as_global_default": false,
+    "tag_created": false
+  },
+  "official_baseline_file": "../official/series_b_official_baseline_current.json",
+  "official_baseline_ledger_file": "../official/series_b_official_baseline_ledger.json",
+  "official_baseline_ref": "39/60",
+  "official_baseline_write_enabled": false,
+  "official_dataset_file": "../official/series_b_official_60case_dataset.json",
+  "production_default_enabled": false,
+  "push_tag_required_separate_authorization": true,
+  "requires_explicit_integration": true,
+  "rollback_files": [
+    "optional-skills/research/series-b-source-gap-resolution/production/series_b_production_target_manifest.json",
+    "optional-skills/research/series-b-source-gap-resolution/production/series_b_production_target_schema.json",
+    "optional-skills/research/series-b-source-gap-resolution/production/series_b_production_readiness.json",
+    "optional-skills/research/series-b-source-gap-resolution/tools/series_b_production_target_loader.py",
+    "optional-skills/research/series-b-source-gap-resolution/tools/series_b_production_readiness_check.py",
+    "optional-skills/research/series-b-source-gap-resolution/tools/run_series_b_production_smoke.py"
+  ],
+  "schema_file": "series_b_production_target_schema.json",
+  "schema_version": "series_b_production_target_manifest.v1",
+  "smoke_test_required": true,
+  "source_data_write_enabled": false,
+  "source_state_manifest_file": "../official/series_b_source_state_manifest.json",
+  "validator_file": "../validate_series_b_source_manifest_vnext.py",
+  "vector_write_enabled": false,
+  "write_targets": []
+}

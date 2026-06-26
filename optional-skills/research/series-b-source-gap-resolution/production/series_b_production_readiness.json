@@ -1,0 +1,23 @@
+{
+  "caveat_cases": [
+    "obj_art_003",
+    "obj_art_007",
+    "nat_eco_039",
+    "obj_art_010",
+    "hist_arch_024"
+  ],
+  "full_series_b_required_before_release": true,
+  "layer_id": "series_b_production_target_v1",
+  "notes": [
+    "This readiness artifact describes the explicit target layer only.",
+    "It does not register the target layer as production default.",
+    "It does not authorize push, tag, release, vector writes, source writes, or full Series B execution."
+  ],
+  "official_baseline_ref": "39/60",
+  "production_default_enabled": false,
+  "production_default_integrated": false,
+  "readiness_status": "TARGET_LAYER_READY_NOT_INTEGRATED",
+  "requires_explicit_integration": true,
+  "schema_version": "series_b_production_readiness.v1",
+  "smoke_test_required": true
+}
