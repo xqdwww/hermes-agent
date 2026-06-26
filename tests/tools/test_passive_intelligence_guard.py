@@ -7,6 +7,7 @@ from tools.passive_intelligence_guard import (
     build_document_validation_warning,
     build_final_report_consistency_warnings,
     build_long_run_observer_plan,
+    build_passive_runtime_ledger,
     build_pdf_validation_command_plan,
     build_watchdog_poll_plan,
     check_final_report_consistency,
@@ -15,6 +16,7 @@ from tools.passive_intelligence_guard import (
     classify_document_validation_requirements,
     classify_document_validation_trigger,
     classify_error_kind,
+    classify_ledger_completion_state,
     classify_long_run_event,
     classify_long_run_trigger,
     classify_pdf_validation_result,
@@ -23,13 +25,16 @@ from tools.passive_intelligence_guard import (
     classify_watchdog_state,
     compute_retry_signature,
     get_stage_timeout_policy,
+    initialize_passive_runtime_ledger,
     initialize_status_ledger,
     inspect_pdf_binary_signatures,
+    ledger_to_final_report_warnings,
     safe_document_validation_summary,
     safe_long_run_status_summary,
     summarize_document_validation_plan,
     summarize_document_validation_batch,
     summarize_long_run_observer_plan,
+    summarize_passive_runtime_ledger,
     update_status_ledger,
 )
 from tools.task_engine_runner import task_engine_runner
@@ -1049,3 +1054,423 @@ def test_block_destructive_mode_still_blocks_force_push_only_without_observer_ex
     assert result["status"] == "blocked"
     assert result["blocked_reason"] == "git_force_push_blocked"
     assert "observer_plans" not in result["passive_intelligence_guard"]
+
+
+def test_no_events_ledger_is_pending_not_pass():
+    ledger = initialize_passive_runtime_ledger("task-1", "debug")
+    decision = classify_ledger_completion_state(ledger)
+
+    assert ledger.overall_status == "pending"
+    assert decision.can_report_pass is False
+    assert summarize_passive_runtime_ledger(ledger)["events_seen"] == 0
+
+
+def test_file_write_makes_prior_verification_stale():
+    ledger = build_passive_runtime_ledger(
+        [
+            {"event_id": 1, "event_type": "verification", "result": "pass"},
+            {"event_id": 2, "event_type": "file_access", "operation": "write", "path": "tools/example.py"},
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.verification_status == "stale"
+    assert ledger.latest_modification_event_id == 2
+
+
+def test_verification_after_write_restores_verified_state():
+    ledger = build_passive_runtime_ledger(
+        [
+            {"event_id": 1, "event_type": "file_access", "operation": "write", "path": "tools/example.py"},
+            {
+                "event_id": 2,
+                "event_type": "verification",
+                "result": "pass",
+                "verifies_after_event_id": 1,
+            },
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.verification_status == "verified"
+    assert ledger.latest_verification_event_id == 2
+
+
+def test_partial_subtask_prevents_completed():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "subtask_status",
+                "subtask_id": "phase_5",
+                "status": "partial",
+            },
+            {"event_id": 2, "event_type": "subtask_status", "subtask_id": "phase_6", "status": "completed"},
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.overall_status == "partial"
+    assert classify_ledger_completion_state(ledger).can_report_completed is False
+
+
+def test_accepted_partial_allows_completed_with_warning():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "subtask_status",
+                "subtask_id": "phase_5",
+                "status": "partial",
+                "accepted_partial": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    decision = classify_ledger_completion_state(ledger)
+    assert ledger.overall_status == "completed"
+    assert decision.can_report_completed is True
+    assert any(item["code"] == "PASSIVE_RUNTIME_ACCEPTED_PARTIAL" for item in ledger.warnings)
+
+
+def test_blocked_subtask_prevents_pass():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "subtask_status",
+                "subtask_id": "phase_7",
+                "status": "blocked",
+                "reason": "auth_missing",
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.overall_status == "blocked"
+    assert classify_ledger_completion_state(ledger).can_report_pass is False
+
+
+def test_report_only_production_change_invalid():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "file_access",
+                "operation": "write",
+                "path": "tools/source.py",
+                "report_only": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.report_only is True
+    assert ledger.production_changed is True
+    assert ledger.overall_status == "blocked"
+
+
+def test_dry_run_official_update_invalid():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "remote_sync",
+                "operation": "official_update",
+                "dry_run": True,
+                "official_updated": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.dry_run is True
+    assert ledger.official_updated is True
+    assert ledger.overall_status == "blocked"
+
+
+def test_ls_remote_read_event_does_not_set_write_success():
+    ledger = build_passive_runtime_ledger(
+        [{"event_id": 1, "event_type": "remote_sync", "operation": "ls_remote", "read_access": True}],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.remote_pushed is False
+    assert any(item["code"] == "PASSIVE_RUNTIME_READ_ACCESS_IS_NOT_WRITE_ACCESS" for item in ledger.warnings)
+
+
+def test_branch_push_without_verify_not_synced():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "remote_sync",
+                "operation": "branch_push",
+                "write_success": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.remote_pushed is False
+    assert "remote synced" in ledger.forbidden_final_claims
+
+
+def test_branch_push_with_verify_sets_remote_pushed():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "remote_sync",
+                "operation": "branch_push",
+                "write_success": True,
+                "verified": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.remote_pushed is True
+    assert ledger.remote_write_verified is True
+
+
+def test_local_tag_without_remote_tag_not_synced():
+    ledger = build_passive_runtime_ledger(
+        [{"event_id": 1, "event_type": "remote_sync", "operation": "local_tag"}],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.remote_tag_pushed is False
+    assert "remote tag synced" in ledger.forbidden_final_claims
+
+
+def test_tag_push_without_verify_not_synced():
+    ledger = build_passive_runtime_ledger(
+        [{"event_id": 1, "event_type": "remote_sync", "operation": "tag_push", "tag_pushed": True}],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.remote_tag_pushed is False
+    assert any(item["code"] == "PASSIVE_RUNTIME_REMOTE_TAG_UNVERIFIED" for item in ledger.warnings)
+
+
+def test_tag_push_with_verify_sets_remote_tag_pushed():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "remote_sync",
+                "operation": "tag_push",
+                "tag_pushed": True,
+                "tag_verified": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.remote_tag_pushed is True
+    assert ledger.remote_tag_verified is True
+
+
+def test_parser_readable_document_event_limits_claim_level():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "document_validation",
+                "file_path": "report.pdf",
+                "parser_readable": True,
+                "checks_run": ["parser_readable"],
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.document_claim_levels["report.pdf"] == "parser_readable"
+    assert "PDF fully valid" in ledger.forbidden_final_claims
+
+
+def test_target_app_missing_check_blocks_target_app_claim():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "document_validation",
+                "file_path": "report.pdf",
+                "parser_readable": True,
+                "required_checks": ["parser_readable", "target_app_compatibility"],
+                "checks_run": ["parser_readable"],
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+    warnings = ledger_to_final_report_warnings(ledger, "Preview compatible.")
+
+    assert ledger.document_claim_levels["report.pdf"] != "target_app_validated"
+    assert any(item["code"] == "PASSIVE_RUNTIME_TARGET_APP_CLAIM_CONFLICT" for item in warnings)
+
+
+def test_batch_unknown_file_blocks_all_valid_claim():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "document_validation",
+                "file_path": "a.pdf",
+                "parser_readable": True,
+                "binary_signature_ok": True,
+                "render_check_ok": True,
+                "target_app_compatible": True,
+                "required_checks": ["parser_readable"],
+            },
+            {"event_id": 2, "event_type": "document_validation", "file_path": "b.pdf"},
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+    warnings = ledger_to_final_report_warnings(ledger, "All valid, 0 corrupted.")
+
+    assert any(item["code"] == "PASSIVE_RUNTIME_DOCUMENT_AGGREGATE_CONFLICT" for item in warnings)
+
+
+def test_running_process_cannot_report_pass():
+    ledger = build_passive_runtime_ledger(
+        [{"event_id": 1, "event_type": "process_status", "process_status": "running"}],
+        task_id="task-1",
+        mode="warn",
+    )
+    warnings = ledger_to_final_report_warnings(ledger, "PASS.")
+
+    assert ledger.overall_status == "running"
+    assert any(item["code"] == "PASSIVE_RUNTIME_COMPLETION_CONFLICT" for item in warnings)
+
+
+def test_timeout_partial_output_sets_partial():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "process_status",
+                "process_status": "timeout",
+                "partial_output_present": True,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.overall_status == "partial"
+    assert classify_ledger_completion_state(ledger).can_report_completed is False
+
+
+def test_repeated_permission_error_sets_blocked():
+    ledger = build_passive_runtime_ledger(
+        [
+            {
+                "event_id": 1,
+                "event_type": "process_status",
+                "process_status": "running",
+                "current_error_signature": "permission denied",
+                "retry_count_same_error": 3,
+            }
+        ],
+        task_id="task-1",
+        mode="warn",
+    )
+
+    assert ledger.overall_status == "blocked"
+    assert "permission" in ledger.blocked_reason
+
+
+def test_default_mode_no_ledger_metadata():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_runtime_events=[
+                {"event_id": 1, "event_type": "file_access", "operation": "write", "path": "tools/source.py"}
+            ],
+        )
+    )
+
+    assert "passive_intelligence_guard" not in result
+
+
+def test_debug_mode_includes_ledger_metadata_when_events_supplied():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="debug",
+            passive_runtime_events=[
+                {"event_id": 1, "event_type": "file_access", "operation": "write", "path": "tools/source.py"}
+            ],
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert runtime["summary"]["events_seen"] == 1
+    assert runtime["ledger"]["verification_status"] == "required"
+
+
+def test_warn_mode_includes_ledger_warnings_without_blocking():
+    result = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="warn",
+            passive_guard_report_text="PASS.",
+            passive_runtime_events=[{"event_id": 1, "event_type": "process_status", "process_status": "running"}],
+        )
+    )
+
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+    assert result["status"] == "ok"
+    assert runtime["warning_only"] is True
+    assert any(item["code"] == "PASSIVE_RUNTIME_COMPLETION_CONFLICT" for item in runtime["warnings"])
+
+
+def test_block_destructive_mode_still_only_blocks_destructive_rules():
+    warning_only = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_runtime_events=[{"event_id": 1, "event_type": "process_status", "process_status": "running"}],
+        )
+    )
+    blocked = json.loads(
+        task_engine_runner(
+            query="Run DECISION StageRecord",
+            mode="DECISION",
+            action="contract",
+            passive_guard_mode="block_destructive",
+            passive_guard_action={"command": "git push --force origin main"},
+            passive_runtime_events=[{"event_id": 1, "event_type": "process_status", "process_status": "running"}],
+        )
+    )
+
+    assert warning_only["status"] == "ok"
+    assert warning_only["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
+    assert blocked["status"] == "blocked"
+    assert blocked["blocked_reason"] == "git_force_push_blocked"

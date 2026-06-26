@@ -30,6 +30,7 @@ Extraction success is not full document validity.
 - Do not claim "PDF fully valid", "all valid", or "0 corrupted" unless binary signature, required parser, required render, and required target-app checks passed for every file in scope.
 - Report per-file failures and unknowns separately from aggregate counts.
 - Use a passive observer plan before validation-heavy claims: inventory files, list required checks, keep command previews non-executing, and set the claim ceiling to parser-readable until stronger checks pass.
+- When passive runtime ledger events exist, document validation claim level must come from those validation events; do not reconstruct "all valid" or target-app compatibility from memory.
 
 ## Step 1: Remote URL Available?
 

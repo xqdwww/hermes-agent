@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 
@@ -236,6 +236,137 @@ class LongRunObserverPlan:
     blocked_conditions: tuple[str, ...]
     partial_output_policy: str
     prohibited_claims: tuple[str, ...]
+    next_safe_action: str
+
+
+@dataclass(frozen=True)
+class PassiveRuntimeEvent:
+    event_id: int
+    event_type: str
+    timestamp: str = ""
+    source: str = ""
+    task_id: str = ""
+    phase: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    severity: str = "info"
+
+
+@dataclass(frozen=True)
+class FileAccessEvent:
+    event_id: int
+    path: str
+    operation: str
+    allowed_scope: bool = True
+    report_only: bool = False
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class VerificationEvent:
+    event_id: int
+    verification_type: str
+    target_paths: tuple[str, ...] = ()
+    result: str = ""
+    verifies_after_event_id: int | None = None
+    stale_if_before_event_id: int | None = None
+
+
+@dataclass(frozen=True)
+class SubtaskStatusEvent:
+    event_id: int
+    subtask_id: str
+    status: str
+    reason: str = ""
+    accepted_partial: bool = False
+
+
+@dataclass(frozen=True)
+class ProcessStatusEvent:
+    event_id: int
+    owner_tool: str
+    process_status: str
+    elapsed_seconds: float = 0
+    silence_seconds: float = 0
+    partial_output_present: bool = False
+    retry_count: int = 0
+    error_signature: str = ""
+    next_safe_action: str = ""
+
+
+@dataclass(frozen=True)
+class DocumentValidationEvent:
+    event_id: int
+    file_path: str
+    checks_run: tuple[str, ...] = ()
+    checks_missing: tuple[str, ...] = ()
+    safe_claim_level: str = "binary_only"
+    status: str = "unknown"
+    target_app_compatible: bool | None = None
+
+
+@dataclass(frozen=True)
+class RemoteSyncEvent:
+    event_id: int
+    remote: str
+    branch: str
+    operation: str
+    read_access: bool = False
+    write_attempted: bool = False
+    write_success: bool = False
+    remote_head_before: str = ""
+    remote_head_after: str = ""
+    tag_pushed: bool = False
+    tag_verified: bool = False
+
+
+@dataclass(frozen=True)
+class ReportClaimEvent:
+    event_id: int
+    claim_text: str
+    claim_type: str = ""
+    referenced_status: str = ""
+    confidence: str = ""
+    needs_ledger_check: bool = True
+
+
+@dataclass(frozen=True)
+class PassiveRuntimeLedger:
+    task_id: str
+    mode: str = "off"
+    events_seen: int = 0
+    latest_event_id: int = 0
+    files_read: tuple[str, ...] = ()
+    files_written: tuple[str, ...] = ()
+    file_mutations: tuple[dict[str, Any], ...] = ()
+    verification_status: str = "not_required"
+    latest_modification_event_id: int | None = None
+    latest_verification_event_id: int | None = None
+    subtasks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    overall_status: str = "pending"
+    dry_run: bool = False
+    report_only: bool = False
+    production_changed: bool = False
+    official_updated: bool = False
+    remote_pushed: bool = False
+    remote_tag_pushed: bool = False
+    blocked_reason: str = ""
+    partial_reasons: tuple[str, ...] = ()
+    warnings: tuple[dict[str, str], ...] = ()
+    forbidden_final_claims: tuple[str, ...] = ()
+    next_safe_action: str = "Collect runtime events before reporting final status."
+    document_claim_levels: dict[str, str] = field(default_factory=dict)
+    document_statuses: dict[str, str] = field(default_factory=dict)
+    remote_write_verified: bool = False
+    remote_tag_verified: bool = False
+
+
+@dataclass(frozen=True)
+class PassiveLedgerDecision:
+    status: str
+    can_report_completed: bool
+    can_report_pass: bool
+    warnings: tuple[dict[str, str], ...]
+    blocked_reason: str
     next_safe_action: str
 
 
@@ -769,6 +900,458 @@ def summarize_long_run_observer_plan(plan: LongRunObserverPlan) -> str:
         f"Long-run observer plan is warning-only for {plan.stage_name}; "
         f"inspect after {plan.poll_plan.inspect_after_silence}s silence and never report running/waiting/partial as PASS."
     )
+
+
+def initialize_passive_runtime_ledger(task_id: str, mode: str = "off") -> PassiveRuntimeLedger:
+    return PassiveRuntimeLedger(
+        task_id=str(task_id or ""),
+        mode=_coerce_passive_guard_mode(mode),
+        overall_status="pending",
+        verification_status="not_required",
+        next_safe_action="Collect runtime events before reporting final status.",
+    )
+
+
+def apply_passive_runtime_event(
+    ledger: PassiveRuntimeLedger,
+    event: PassiveRuntimeEvent | dict[str, Any],
+) -> PassiveRuntimeLedger:
+    runtime_event = _coerce_passive_runtime_event(event)
+    event_id = runtime_event.event_id if runtime_event.event_id > 0 else ledger.latest_event_id + 1
+    runtime_event = replace(runtime_event, event_id=event_id)
+    event_type = runtime_event.event_type.casefold().replace("-", "_")
+    payload = dict(runtime_event.payload or {})
+
+    files_read = list(ledger.files_read)
+    files_written = list(ledger.files_written)
+    file_mutations = list(ledger.file_mutations)
+    subtasks = {key: dict(value) for key, value in ledger.subtasks.items()}
+    warnings = list(ledger.warnings)
+    forbidden = list(ledger.forbidden_final_claims)
+    partial_reasons = list(ledger.partial_reasons)
+    document_claim_levels = dict(ledger.document_claim_levels)
+    document_statuses = dict(ledger.document_statuses)
+
+    verification_status = ledger.verification_status
+    latest_modification_event_id = ledger.latest_modification_event_id
+    latest_verification_event_id = ledger.latest_verification_event_id
+    overall_status = ledger.overall_status
+    blocked_reason = ledger.blocked_reason
+    next_safe_action = ledger.next_safe_action
+    dry_run = ledger.dry_run or bool(payload.get("dry_run"))
+    report_only = ledger.report_only or bool(payload.get("report_only"))
+    production_changed = ledger.production_changed or bool(payload.get("production_changed"))
+    official_updated = ledger.official_updated or bool(payload.get("official_updated"))
+    remote_pushed = ledger.remote_pushed
+    remote_tag_pushed = ledger.remote_tag_pushed
+    remote_write_verified = ledger.remote_write_verified
+    remote_tag_verified = ledger.remote_tag_verified
+
+    def add_warning(code: str, safe_interpretation: str, *, ledger_field: str = "", offending_phrase: str = "") -> None:
+        warnings.append(
+            {
+                "code": code,
+                "ledger_field": ledger_field,
+                "event_id": str(runtime_event.event_id),
+                "offending_phrase": offending_phrase,
+                "safe_interpretation": safe_interpretation,
+            }
+        )
+
+    def add_forbidden(*claims: str) -> None:
+        for claim in claims:
+            if claim and claim not in forbidden:
+                forbidden.append(claim)
+
+    if event_type in {"file_access", "file", "file_read", "file_write", "file_mutation"}:
+        operation = str(payload.get("operation") or "").casefold()
+        if not operation and event_type.startswith("file_"):
+            operation = event_type.removeprefix("file_")
+        path = str(payload.get("path") or payload.get("file_path") or "")
+        if operation == "read" and path:
+            files_read = list(_append_unique(tuple(files_read), path))
+        if operation in {"write", "delete", "move", "copy"}:
+            if path:
+                files_written = list(_append_unique(tuple(files_written), path))
+            file_mutations.append({"event_id": runtime_event.event_id, "path": path, "operation": operation})
+            latest_modification_event_id = runtime_event.event_id
+            verification_status = "stale" if latest_verification_event_id is not None else "required"
+            add_forbidden("verified", "no changes after verification")
+            if report_only and not _runtime_report_artifact_path(path):
+                production_changed = True
+                blocked_reason = blocked_reason or "report_only_non_report_write"
+                add_warning(
+                    "PASSIVE_RUNTIME_REPORT_ONLY_WRITE_INVALID",
+                    "Report-only tasks may only write report artifacts, not mutate source or production files.",
+                    ledger_field="report_only",
+                )
+        if payload.get("allowed_scope") is False:
+            blocked_reason = blocked_reason or "file_access_outside_allowed_scope"
+            add_warning(
+                "PASSIVE_RUNTIME_FILE_SCOPE_BLOCKED",
+                "Stop and ask for explicit scope review before touching this file.",
+                ledger_field="files_written",
+            )
+
+    elif event_type in {"verification", "verify", "verification_result"}:
+        result = str(payload.get("result") or payload.get("status") or "").casefold()
+        verifies_after = _optional_int(payload.get("verifies_after_event_id"))
+        stale_if_before = _optional_int(payload.get("stale_if_before_event_id"))
+        latest_verification_event_id = runtime_event.event_id
+        required_after = latest_modification_event_id
+        if stale_if_before is not None:
+            required_after = max(required_after or 0, stale_if_before)
+        verification_passed = result in {"pass", "passed", "ok", "verified", "success", "true"} or payload.get("verified") is True
+        if verification_passed and (
+            required_after is None
+            or runtime_event.event_id > required_after
+            or (verifies_after is not None and verifies_after >= required_after)
+        ):
+            verification_status = "verified"
+        elif verification_passed:
+            verification_status = "stale"
+            add_warning(
+                "PASSIVE_RUNTIME_VERIFICATION_STALE",
+                "Verification must be newer than the latest relevant file mutation.",
+                ledger_field="verification_status",
+            )
+        else:
+            verification_status = "unverified"
+            add_warning(
+                "PASSIVE_RUNTIME_VERIFICATION_FAILED",
+                "Do not claim verified until a successful verification event is recorded.",
+                ledger_field="verification_status",
+            )
+
+    elif event_type in {"subtask_status", "subtask", "phase_status", "phase"}:
+        subtask_id = str(payload.get("subtask_id") or payload.get("phase") or runtime_event.phase or "unknown")
+        status = _coerce_status(payload.get("status") or payload.get("task_status") or "pending")
+        accepted_partial = bool(payload.get("accepted_partial"))
+        subtasks[subtask_id] = {
+            "status": status,
+            "reason": str(payload.get("reason") or ""),
+            "accepted_partial": accepted_partial,
+        }
+        if status == "blocked":
+            blocked_reason = blocked_reason or str(payload.get("reason") or f"{subtask_id}_blocked")
+            add_forbidden("PASS", "completed", "all phases complete")
+        elif status == "failed":
+            add_forbidden("PASS", "completed", "all phases complete")
+        elif status == "partial":
+            if accepted_partial:
+                add_warning(
+                    "PASSIVE_RUNTIME_ACCEPTED_PARTIAL",
+                    "Accepted partial work may be reported only with the partial acceptance caveat.",
+                    ledger_field="subtasks",
+                )
+            else:
+                partial_reasons = list(_append_unique(tuple(partial_reasons), f"{subtask_id}:partial"))
+                add_forbidden("PASS", "completed", "all phases complete")
+
+    elif event_type in {"process_status", "process", "watchdog", "long_run"}:
+        state = dict(payload)
+        state.setdefault("task_id", runtime_event.task_id or ledger.task_id)
+        decision = classify_long_run_event(state)
+        next_safe_action = decision.next_safe_action
+        if decision.status in {"running", "waiting"}:
+            overall_status = "running"
+            add_forbidden("PASS", "completed")
+        elif decision.status == "partial":
+            overall_status = "partial"
+            partial_reasons = list(_append_unique(tuple(partial_reasons), decision.blocked_reason or "long_run_partial"))
+            add_forbidden("PASS", "completed")
+        if decision.should_block:
+            overall_status = "blocked"
+            blocked_reason = blocked_reason or decision.blocked_reason or "long_run_blocked"
+            add_forbidden("PASS", "completed")
+        if decision.blocked_reason:
+            add_warning(
+                "PASSIVE_RUNTIME_LONG_RUN_STATUS",
+                safe_long_run_status_summary(decision),
+                ledger_field="overall_status",
+            )
+
+    elif event_type in {"document_validation", "document", "pdf_validation"}:
+        file_path = str(payload.get("file_path") or payload.get("path") or "")
+        decision = classify_pdf_validation_result(payload)
+        if file_path:
+            document_claim_levels[file_path] = decision.safe_claim_level
+            document_statuses[file_path] = decision.status
+        if decision.safe_claim_level in {"binary_only", "parser_readable"}:
+            add_forbidden("PDF fully valid", "all valid", "0 corrupted", "target-app compatible", "Preview compatible")
+        if decision.status in {"warning", "unknown"}:
+            add_warning(
+                "PASSIVE_RUNTIME_DOCUMENT_CHECKS_INCOMPLETE",
+                decision.user_facing_summary,
+                ledger_field="document_validation",
+            )
+        elif decision.status in {"fail", "blocked"}:
+            blocked_reason = blocked_reason or decision.blocked_reason or "document_validation_failed"
+            add_warning(
+                "PASSIVE_RUNTIME_DOCUMENT_VALIDATION_BLOCKED",
+                decision.user_facing_summary,
+                ledger_field="document_validation",
+            )
+
+    elif event_type in {"remote_sync", "remote", "git_remote"}:
+        operation = str(payload.get("operation") or "").casefold().replace("-", "_")
+        read_access = bool(payload.get("read_access"))
+        write_success = bool(payload.get("write_success"))
+        verified = bool(payload.get("verified") or payload.get("branch_verified") or payload.get("write_verified"))
+        tag_pushed = bool(payload.get("tag_pushed") or operation in {"tag_push", "push_tag"})
+        tag_verified = bool(payload.get("tag_verified"))
+        if read_access and not write_success:
+            add_warning(
+                "PASSIVE_RUNTIME_READ_ACCESS_IS_NOT_WRITE_ACCESS",
+                "Remote read access, including ls-remote, does not prove push permission.",
+                ledger_field="remote_pushed",
+            )
+            add_forbidden("pushed", "remote synced")
+        if operation in {"branch_push", "push", "push_branch"}:
+            if write_success and verified:
+                remote_pushed = True
+                remote_write_verified = True
+            elif write_success:
+                add_warning(
+                    "PASSIVE_RUNTIME_REMOTE_PUSH_UNVERIFIED",
+                    "A remote branch push must be fetched or otherwise verified before claiming synced.",
+                    ledger_field="remote_pushed",
+                )
+                add_forbidden("pushed", "remote synced")
+        if operation in {"local_tag", "tag"} and not tag_pushed:
+            add_forbidden("remote tag synced", "tag pushed")
+        if tag_pushed:
+            if tag_verified:
+                remote_tag_pushed = True
+                remote_tag_verified = True
+            else:
+                add_warning(
+                    "PASSIVE_RUNTIME_REMOTE_TAG_UNVERIFIED",
+                    "A tag push must be verified on the remote before claiming tag sync.",
+                    ledger_field="remote_tag_pushed",
+                )
+                add_forbidden("remote tag synced", "tag pushed")
+
+    elif event_type in {"report_claim", "claim", "final_report_claim"}:
+        claim_text = str(payload.get("claim_text") or payload.get("text") or "")
+        for warning in ledger_to_final_report_warnings(ledger, claim_text):
+            warnings.append(dict(warning))
+
+    if payload.get("task_status") or payload.get("overall_status"):
+        overall_status = _coerce_status(payload.get("task_status") or payload.get("overall_status"))
+
+    updated = PassiveRuntimeLedger(
+        task_id=ledger.task_id or runtime_event.task_id,
+        mode=ledger.mode,
+        events_seen=ledger.events_seen + 1,
+        latest_event_id=max(ledger.latest_event_id, runtime_event.event_id),
+        files_read=tuple(files_read),
+        files_written=tuple(files_written),
+        file_mutations=tuple(file_mutations),
+        verification_status=verification_status,
+        latest_modification_event_id=latest_modification_event_id,
+        latest_verification_event_id=latest_verification_event_id,
+        subtasks=subtasks,
+        overall_status=overall_status,
+        dry_run=dry_run,
+        report_only=report_only,
+        production_changed=production_changed,
+        official_updated=official_updated,
+        remote_pushed=remote_pushed,
+        remote_tag_pushed=remote_tag_pushed,
+        blocked_reason=blocked_reason,
+        partial_reasons=tuple(partial_reasons),
+        warnings=tuple(warnings),
+        forbidden_final_claims=tuple(forbidden),
+        next_safe_action=next_safe_action,
+        document_claim_levels=document_claim_levels,
+        document_statuses=document_statuses,
+        remote_write_verified=remote_write_verified,
+        remote_tag_verified=remote_tag_verified,
+    )
+    return _apply_passive_runtime_invariants(updated)
+
+
+def build_passive_runtime_ledger(
+    events: list[PassiveRuntimeEvent | dict[str, Any]] | tuple[PassiveRuntimeEvent | dict[str, Any], ...],
+    task_id: str = "",
+    mode: str = "off",
+) -> PassiveRuntimeLedger:
+    ledger = initialize_passive_runtime_ledger(task_id, mode)
+    for event in events or ():
+        ledger = apply_passive_runtime_event(ledger, event)
+    return ledger
+
+
+def coerce_passive_runtime_ledger(
+    value: PassiveRuntimeLedger | dict[str, Any] | None,
+    *,
+    task_id: str = "",
+    mode: str = "off",
+) -> PassiveRuntimeLedger:
+    if isinstance(value, PassiveRuntimeLedger):
+        return value
+    ledger = initialize_passive_runtime_ledger(task_id, mode)
+    if not isinstance(value, dict):
+        return ledger
+    data = dict(value)
+    return _apply_passive_runtime_invariants(
+        replace(
+            ledger,
+            events_seen=int(data.get("events_seen") or 0),
+            latest_event_id=int(data.get("latest_event_id") or 0),
+            files_read=tuple(str(item) for item in data.get("files_read") or ()),
+            files_written=tuple(str(item) for item in data.get("files_written") or ()),
+            file_mutations=tuple(dict(item) for item in data.get("file_mutations") or ()),
+            verification_status=str(data.get("verification_status") or ledger.verification_status),
+            latest_modification_event_id=_optional_int(data.get("latest_modification_event_id")),
+            latest_verification_event_id=_optional_int(data.get("latest_verification_event_id")),
+            subtasks={str(key): dict(val) for key, val in (data.get("subtasks") or {}).items()},
+            overall_status=_coerce_status(data.get("overall_status") or ledger.overall_status),
+            dry_run=bool(data.get("dry_run", ledger.dry_run)),
+            report_only=bool(data.get("report_only", ledger.report_only)),
+            production_changed=bool(data.get("production_changed", ledger.production_changed)),
+            official_updated=bool(data.get("official_updated", ledger.official_updated)),
+            remote_pushed=bool(data.get("remote_pushed", ledger.remote_pushed)),
+            remote_tag_pushed=bool(data.get("remote_tag_pushed", ledger.remote_tag_pushed)),
+            blocked_reason=str(data.get("blocked_reason") or ""),
+            partial_reasons=tuple(str(item) for item in data.get("partial_reasons") or ()),
+            warnings=tuple(dict(item) for item in data.get("warnings") or ()),
+            forbidden_final_claims=tuple(str(item) for item in data.get("forbidden_final_claims") or ()),
+            next_safe_action=str(data.get("next_safe_action") or ledger.next_safe_action),
+            document_claim_levels={str(key): str(val) for key, val in (data.get("document_claim_levels") or {}).items()},
+            document_statuses={str(key): str(val) for key, val in (data.get("document_statuses") or {}).items()},
+            remote_write_verified=bool(data.get("remote_write_verified", ledger.remote_write_verified)),
+            remote_tag_verified=bool(data.get("remote_tag_verified", ledger.remote_tag_verified)),
+        )
+    )
+
+
+def summarize_passive_runtime_ledger(ledger: PassiveRuntimeLedger) -> dict[str, Any]:
+    return {
+        "task_id": ledger.task_id,
+        "mode": ledger.mode,
+        "events_seen": ledger.events_seen,
+        "latest_event_id": ledger.latest_event_id,
+        "overall_status": ledger.overall_status,
+        "verification_status": ledger.verification_status,
+        "files_read": list(ledger.files_read),
+        "files_written": list(ledger.files_written),
+        "file_mutation_count": len(ledger.file_mutations),
+        "subtask_count": len(ledger.subtasks),
+        "remote_pushed": ledger.remote_pushed,
+        "remote_tag_pushed": ledger.remote_tag_pushed,
+        "blocked_reason": ledger.blocked_reason,
+        "partial_reasons": list(ledger.partial_reasons),
+        "warning_count": len(ledger.warnings),
+        "forbidden_final_claims": list(ledger.forbidden_final_claims),
+        "next_safe_action": ledger.next_safe_action,
+    }
+
+
+def classify_ledger_completion_state(ledger: PassiveRuntimeLedger) -> PassiveLedgerDecision:
+    warnings = tuple(ledger.warnings)
+    blocked_reason = ledger.blocked_reason
+    status = ledger.overall_status
+    can_report_completed = status == "completed" and not blocked_reason and not ledger.partial_reasons
+    can_report_pass = can_report_completed and ledger.verification_status not in {"stale", "unverified", "required"}
+    if status in {"pending", "running", "partial", "blocked", "failed"}:
+        can_report_completed = False
+        can_report_pass = False
+    return PassiveLedgerDecision(
+        status=status,
+        can_report_completed=can_report_completed,
+        can_report_pass=can_report_pass,
+        warnings=warnings,
+        blocked_reason=blocked_reason,
+        next_safe_action=ledger.next_safe_action,
+    )
+
+
+def ledger_to_final_report_warnings(
+    ledger: PassiveRuntimeLedger,
+    report_text: str | None = None,
+) -> list[dict[str, str]]:
+    warnings = [dict(item) for item in ledger.warnings]
+    text = (report_text or "").casefold()
+    if not text:
+        return warnings
+
+    def add(code: str, field_name: str, phrase: str, safe: str) -> None:
+        warnings.append(
+            {
+                "code": code,
+                "ledger_field": field_name,
+                "event_id": str(ledger.latest_event_id),
+                "offending_phrase": phrase,
+                "safe_interpretation": safe,
+            }
+        )
+
+    if _runtime_claims_completion(text) and ledger.overall_status != "completed":
+        add(
+            "PASSIVE_RUNTIME_COMPLETION_CONFLICT",
+            "overall_status",
+            _runtime_first_phrase(text, ("pass", "completed", "done")),
+            f"Ledger status is {ledger.overall_status}; report that state instead of PASS/completed.",
+        )
+    if "verified" in text and ledger.verification_status in {"required", "stale", "unverified"}:
+        add(
+            "PASSIVE_RUNTIME_VERIFICATION_CONFLICT",
+            "verification_status",
+            "verified",
+            f"Ledger verification_status is {ledger.verification_status}; do not claim verified.",
+        )
+    if any(term in text for term in ("pushed", "remote synced", "synced to remote")) and not ledger.remote_pushed:
+        add(
+            "PASSIVE_RUNTIME_REMOTE_PUSH_CONFLICT",
+            "remote_pushed",
+            "pushed",
+            "Remote branch push must be verified before claiming remote sync.",
+        )
+    if any(term in text for term in ("tag pushed", "remote tag", "tag synced")) and not ledger.remote_tag_pushed:
+        add(
+            "PASSIVE_RUNTIME_REMOTE_TAG_CONFLICT",
+            "remote_tag_pushed",
+            "tag pushed",
+            "Remote tag push must be verified separately from local tag creation.",
+        )
+    if any(term in text for term in ("all valid", "0 corrupted", "zero corrupted")):
+        unsafe_docs = [
+            path
+            for path, status in ledger.document_statuses.items()
+            if status in {"warning", "fail", "blocked", "unknown"}
+        ]
+        if unsafe_docs or any(level in {"binary_only", "parser_readable"} for level in ledger.document_claim_levels.values()):
+            add(
+                "PASSIVE_RUNTIME_DOCUMENT_AGGREGATE_CONFLICT",
+                "document_statuses",
+                _runtime_first_phrase(text, ("all valid", "0 corrupted", "zero corrupted")),
+                "Batch document validity requires every file to pass every required check.",
+            )
+    if any(term in text for term in ("preview compatible", "target-app compatible", "target app compatible")):
+        if any(level != "target_app_validated" for level in ledger.document_claim_levels.values()):
+            add(
+                "PASSIVE_RUNTIME_TARGET_APP_CLAIM_CONFLICT",
+                "document_claim_levels",
+                "target-app compatible",
+                "Target-app compatibility requires an explicit target-app validation event.",
+            )
+    if ledger.report_only and any(term in text for term in ("wrote", "modified", "updated production", "production changed")):
+        add(
+            "PASSIVE_RUNTIME_REPORT_ONLY_WRITE_CONFLICT",
+            "report_only",
+            "wrote",
+            "Report-only ledger state cannot be summarized as a non-report write.",
+        )
+    if ledger.dry_run and any(term in text for term in ("official updated", "baseline updated", "official baseline")):
+        add(
+            "PASSIVE_RUNTIME_DRY_RUN_OFFICIAL_CONFLICT",
+            "dry_run",
+            "official updated",
+            "Dry-run ledger state cannot update official state.",
+        )
+    return warnings
 
 
 def classify_document_validation_requirements(file_path: str, intended_use: str | None = None) -> DocumentValidationPlan:
@@ -1674,23 +2257,215 @@ def _long_run_trigger_reasons(text: str, owner: str, stage: str) -> tuple[str, .
     return tuple(dict.fromkeys(reasons))
 
 
+def _coerce_passive_guard_mode(mode: str) -> str:
+    normalized = (mode or "off").strip().casefold().replace("-", "_")
+    if normalized not in {"off", "debug", "warn", "block_destructive"}:
+        return "off"
+    return normalized
+
+
+def _coerce_passive_runtime_event(event: PassiveRuntimeEvent | dict[str, Any]) -> PassiveRuntimeEvent:
+    if isinstance(event, PassiveRuntimeEvent):
+        return event
+    original = event
+    data = asdict(event) if hasattr(event, "__dataclass_fields__") else dict(event or {})
+    payload = dict(data.get("payload") or {})
+    base_fields = {"event_id", "event_type", "type", "timestamp", "source", "task_id", "phase", "payload", "severity"}
+    for key, value in data.items():
+        if key not in base_fields:
+            payload.setdefault(key, value)
+    event_type = str(data.get("event_type") or data.get("type") or "")
+    if not event_type:
+        event_type = _infer_passive_runtime_event_type(original)
+    return PassiveRuntimeEvent(
+        event_id=int(data.get("event_id") or 0),
+        event_type=event_type,
+        timestamp=str(data.get("timestamp") or ""),
+        source=str(data.get("source") or ""),
+        task_id=str(data.get("task_id") or payload.get("task_id") or ""),
+        phase=str(data.get("phase") or payload.get("phase") or ""),
+        payload=payload,
+        severity=str(data.get("severity") or "info"),
+    )
+
+
+def _infer_passive_runtime_event_type(event: Any) -> str:
+    if isinstance(event, FileAccessEvent):
+        return "file_access"
+    if isinstance(event, VerificationEvent):
+        return "verification"
+    if isinstance(event, SubtaskStatusEvent):
+        return "subtask_status"
+    if isinstance(event, ProcessStatusEvent):
+        return "process_status"
+    if isinstance(event, DocumentValidationEvent):
+        return "document_validation"
+    if isinstance(event, RemoteSyncEvent):
+        return "remote_sync"
+    if isinstance(event, ReportClaimEvent):
+        return "report_claim"
+    return "unknown"
+
+
+def _apply_passive_runtime_invariants(ledger: PassiveRuntimeLedger) -> PassiveRuntimeLedger:
+    warnings = list(ledger.warnings)
+    forbidden = list(ledger.forbidden_final_claims)
+    partial_reasons = list(ledger.partial_reasons)
+    status = ledger.overall_status
+    blocked_reason = ledger.blocked_reason
+
+    def add_warning(code: str, field_name: str, safe: str) -> None:
+        warnings.append(
+            {
+                "code": code,
+                "ledger_field": field_name,
+                "event_id": str(ledger.latest_event_id),
+                "offending_phrase": "",
+                "safe_interpretation": safe,
+            }
+        )
+
+    def add_forbidden(*claims: str) -> None:
+        for claim in claims:
+            if claim and claim not in forbidden:
+                forbidden.append(claim)
+
+    verification_status = ledger.verification_status
+    if (
+        ledger.latest_modification_event_id is not None
+        and ledger.latest_verification_event_id is not None
+        and ledger.latest_verification_event_id <= ledger.latest_modification_event_id
+        and verification_status == "verified"
+    ):
+        verification_status = "stale"
+        add_warning(
+            "PASSIVE_RUNTIME_VERIFICATION_STALE",
+            "verification_status",
+            "Verification before the latest mutation cannot satisfy current state.",
+        )
+        add_forbidden("verified")
+
+    if ledger.report_only and ledger.production_changed:
+        status = "blocked"
+        blocked_reason = blocked_reason or "report_only_production_change"
+        add_warning(
+            "PASSIVE_RUNTIME_REPORT_ONLY_PRODUCTION_CHANGE_INVALID",
+            "report_only",
+            "Report-only tasks cannot be represented as production-changing work.",
+        )
+        add_forbidden("production changed", "write performed")
+    if ledger.dry_run and ledger.official_updated:
+        status = "blocked"
+        blocked_reason = blocked_reason or "dry_run_official_update"
+        add_warning(
+            "PASSIVE_RUNTIME_DRY_RUN_OFFICIAL_UPDATE_INVALID",
+            "dry_run",
+            "Dry-run tasks cannot update official or baseline state.",
+        )
+        add_forbidden("official updated", "baseline updated")
+
+    effective_subtask_statuses: list[str] = []
+    for subtask_id, subtask in ledger.subtasks.items():
+        subtask_status = _coerce_status(subtask.get("status"))
+        accepted_partial = bool(subtask.get("accepted_partial"))
+        if subtask_status == "partial" and accepted_partial:
+            effective_subtask_statuses.append("completed")
+            continue
+        effective_subtask_statuses.append(subtask_status)
+        if subtask_status == "partial":
+            partial_reasons = list(_append_unique(tuple(partial_reasons), f"{subtask_id}:partial"))
+            add_forbidden("PASS", "completed", "all phases complete")
+    if any(item == "blocked" for item in effective_subtask_statuses):
+        status = "blocked"
+        blocked_reason = blocked_reason or "subtask_blocked"
+        add_forbidden("PASS", "completed", "all phases complete")
+    elif any(item == "failed" for item in effective_subtask_statuses):
+        status = "failed"
+        add_forbidden("PASS", "completed", "all phases complete")
+    elif any(item == "partial" for item in effective_subtask_statuses):
+        status = "partial"
+        add_forbidden("PASS", "completed", "all phases complete")
+    elif effective_subtask_statuses and all(item == "completed" for item in effective_subtask_statuses):
+        if status in {"pending", "running"}:
+            status = "completed"
+    elif any(item == "running" for item in effective_subtask_statuses):
+        status = "running"
+        add_forbidden("PASS", "completed")
+
+    if status in {"pending", "running", "partial", "blocked", "failed"}:
+        add_forbidden("PASS", "completed")
+    if status in {"running", "partial"} and not ledger.next_safe_action:
+        next_safe_action = "Inspect latest runtime events before reporting final status."
+    else:
+        next_safe_action = ledger.next_safe_action
+
+    return replace(
+        ledger,
+        verification_status=verification_status,
+        overall_status=status,
+        blocked_reason=blocked_reason,
+        partial_reasons=tuple(partial_reasons),
+        warnings=tuple(warnings),
+        forbidden_final_claims=tuple(forbidden),
+        next_safe_action=next_safe_action,
+    )
+
+
+def _runtime_report_artifact_path(path: str) -> bool:
+    normalized = (path or "").casefold()
+    return normalized.startswith("outputs/") or "/outputs/" in normalized or "report" in normalized
+
+
+def _runtime_claims_completion(text: str) -> bool:
+    return bool(re.search(r"\b(pass|completed|done)\b", text or ""))
+
+
+def _runtime_first_phrase(text: str, phrases: tuple[str, ...]) -> str:
+    lowered = text or ""
+    for phrase in phrases:
+        if phrase in lowered:
+            return phrase
+    return phrases[0] if phrases else ""
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 __all__ = [
     "ConsistencyDecision",
+    "DocumentValidationEvent",
     "DocumentValidationDecision",
     "DocumentValidationObserverPlan",
     "DocumentValidationPlan",
+    "FileAccessEvent",
     "LongRunState",
     "LongRunObserverPlan",
+    "PassiveLedgerDecision",
+    "PassiveRuntimeEvent",
+    "PassiveRuntimeLedger",
     "PermissionDecision",
     "PdfSignatureResult",
+    "ProcessStatusEvent",
     "RemoteSyncDecision",
+    "RemoteSyncEvent",
+    "ReportClaimEvent",
     "SKILL_TRIGGER_RULES",
     "StatusLedger",
+    "SubtaskStatusEvent",
     "TimeoutPolicy",
     "ValidationCommandPlan",
+    "VerificationEvent",
     "VerificationDecision",
     "WatchdogDecision",
     "WatchdogPollPlan",
+    "apply_passive_runtime_event",
+    "build_passive_runtime_ledger",
     "build_document_validation_observer_plan",
     "build_document_validation_warning",
     "build_long_run_observer_plan",
@@ -1705,16 +2480,21 @@ __all__ = [
     "classify_error_kind",
     "classify_long_run_event",
     "classify_long_run_trigger",
+    "classify_ledger_completion_state",
     "classify_pdf_validation_result",
     "classify_remote_sync_safety",
     "classify_skill_triggers",
     "classify_watchdog_state",
+    "coerce_passive_runtime_ledger",
     "compute_retry_signature",
     "get_stage_timeout_policy",
+    "initialize_passive_runtime_ledger",
     "initialize_status_ledger",
     "inspect_pdf_binary_signatures",
+    "ledger_to_final_report_warnings",
     "safe_document_validation_summary",
     "safe_long_run_status_summary",
+    "summarize_passive_runtime_ledger",
     "summarize_document_validation_plan",
     "summarize_document_validation_batch",
     "summarize_long_run_observer_plan",

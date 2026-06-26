@@ -32,18 +32,23 @@ from tools.passive_intelligence_guard import (
     build_document_validation_warning,
     build_final_report_consistency_warnings,
     build_long_run_observer_plan,
+    build_passive_runtime_ledger,
     check_final_report_consistency,
     classify_action_permission,
+    classify_ledger_completion_state,
     classify_document_validation_requirements,
     classify_long_run_event,
     classify_pdf_validation_result,
     classify_skill_triggers,
+    coerce_passive_runtime_ledger,
     get_stage_timeout_policy,
     initialize_status_ledger,
+    ledger_to_final_report_warnings,
     safe_document_validation_summary,
     safe_long_run_status_summary,
     summarize_document_validation_plan,
     summarize_long_run_observer_plan,
+    summarize_passive_runtime_ledger,
 )
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
@@ -216,6 +221,14 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "type": "object",
                     "description": "Optional caller-provided long-run process state for debug/warn watchdog classification.",
                 },
+                "passive_runtime_events": {
+                    "type": "array",
+                    "description": "Optional caller-provided passive runtime events for debug/warn ledger metadata.",
+                },
+                "passive_runtime_ledger": {
+                    "type": "object",
+                    "description": "Optional caller-provided passive runtime ledger snapshot for debug/warn metadata.",
+                },
             },
             "required": ["query"],
         },
@@ -239,6 +252,8 @@ def task_engine_runner(
     passive_guard_report_text: str | None = None,
     passive_guard_document_validation: dict[str, Any] | None = None,
     passive_guard_watchdog_state: dict[str, Any] | None = None,
+    passive_runtime_events: list[dict[str, Any]] | None = None,
+    passive_runtime_ledger: dict[str, Any] | None = None,
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
@@ -275,6 +290,8 @@ def task_engine_runner(
         passive_guard_ledger=passive_guard_ledger,
         passive_guard_document_validation=passive_guard_document_validation,
         passive_guard_watchdog_state=passive_guard_watchdog_state,
+        passive_runtime_events=passive_runtime_events,
+        passive_runtime_ledger=passive_runtime_ledger,
     )
     if pre_action_block is not None:
         return json.dumps(pre_action_block, ensure_ascii=False, indent=2)
@@ -297,6 +314,8 @@ def task_engine_runner(
             report_text=passive_guard_report_text,
             document_validation=passive_guard_document_validation,
             watchdog_state=passive_guard_watchdog_state,
+            runtime_events=passive_runtime_events,
+            runtime_ledger=passive_runtime_ledger,
         )
         return json.dumps(
             payload,
@@ -327,6 +346,8 @@ def task_engine_runner(
             report_text=passive_guard_report_text,
             document_validation=passive_guard_document_validation,
             watchdog_state=passive_guard_watchdog_state,
+            runtime_events=passive_runtime_events,
+            runtime_ledger=passive_runtime_ledger,
         )
         return json.dumps(
             payload,
@@ -649,6 +670,8 @@ def task_engine_runner(
             report_text=passive_guard_report_text,
             document_validation=passive_guard_document_validation,
             watchdog_state=passive_guard_watchdog_state,
+            runtime_events=passive_runtime_events,
+            runtime_ledger=passive_runtime_ledger,
         )
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -669,6 +692,8 @@ def task_engine_runner(
         report_text=passive_guard_report_text or markdown,
         document_validation=passive_guard_document_validation,
         watchdog_state=passive_guard_watchdog_state,
+        runtime_events=passive_runtime_events,
+        runtime_ledger=passive_runtime_ledger,
     )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -694,6 +719,8 @@ def _attach_passive_guard_metadata(
     report_text: str | None = None,
     document_validation: dict[str, Any] | None = None,
     watchdog_state: dict[str, Any] | None = None,
+    runtime_events: list[dict[str, Any]] | None = None,
+    runtime_ledger: dict[str, Any] | None = None,
 ) -> None:
     if guard_mode == "off":
         return
@@ -733,6 +760,15 @@ def _attach_passive_guard_metadata(
         )
     if isinstance(watchdog_state, dict):
         payload["passive_intelligence_guard"]["long_run_watchdog"] = _build_long_run_watchdog_metadata(watchdog_state)
+    runtime_metadata = _build_passive_runtime_metadata(
+        runtime_events=runtime_events,
+        runtime_ledger=runtime_ledger,
+        task_id=f"{normalize_mode(mode).lower()}:{action}",
+        guard_mode=guard_mode,
+        report_text=report_text,
+    )
+    if runtime_metadata:
+        payload["passive_intelligence_guard"]["runtime_ledger"] = runtime_metadata
 
 
 def _passive_guard_pre_action_block(
@@ -745,6 +781,8 @@ def _passive_guard_pre_action_block(
     passive_guard_ledger: dict[str, Any] | None,
     passive_guard_document_validation: dict[str, Any] | None = None,
     passive_guard_watchdog_state: dict[str, Any] | None = None,
+    passive_runtime_events: list[dict[str, Any]] | None = None,
+    passive_runtime_ledger: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if guard_mode != "block_destructive" or not isinstance(passive_guard_action, dict):
         return None
@@ -768,6 +806,8 @@ def _passive_guard_pre_action_block(
         passive_guard_ledger=passive_guard_ledger,
         document_validation=passive_guard_document_validation,
         watchdog_state=passive_guard_watchdog_state,
+        runtime_events=passive_runtime_events,
+        runtime_ledger=passive_runtime_ledger,
     )
     return payload
 
@@ -891,6 +931,33 @@ def _build_long_run_watchdog_metadata(watchdog_state: dict[str, Any]) -> dict[st
         "decision": asdict(decision),
         "summary": safe_long_run_status_summary(decision),
         "warning_only": True,
+    }
+
+
+def _build_passive_runtime_metadata(
+    *,
+    runtime_events: list[dict[str, Any]] | None,
+    runtime_ledger: dict[str, Any] | None,
+    task_id: str,
+    guard_mode: str,
+    report_text: str | None,
+) -> dict[str, Any]:
+    if not runtime_events and not isinstance(runtime_ledger, dict):
+        return {}
+    ledger = (
+        build_passive_runtime_ledger(runtime_events or (), task_id=task_id, mode=guard_mode)
+        if runtime_events
+        else coerce_passive_runtime_ledger(runtime_ledger, task_id=task_id, mode=guard_mode)
+    )
+    decision = classify_ledger_completion_state(ledger)
+    warnings = ledger_to_final_report_warnings(ledger, report_text) if guard_mode == "warn" else []
+    return {
+        "summary": summarize_passive_runtime_ledger(ledger),
+        "ledger": asdict(ledger),
+        "decision": asdict(decision),
+        "warnings": warnings,
+        "warning_only": True,
+        "blocks_expanded": False,
     }
 
 
@@ -1141,6 +1208,8 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         passive_guard_report_text=args.get("passive_guard_report_text"),
         passive_guard_document_validation=args.get("passive_guard_document_validation"),
         passive_guard_watchdog_state=args.get("passive_guard_watchdog_state"),
+        passive_runtime_events=args.get("passive_runtime_events"),
+        passive_runtime_ledger=args.get("passive_runtime_ledger"),
     )
 
 
