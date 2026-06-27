@@ -3,14 +3,14 @@
   "artifact_role": "official_baseline_ledger",
   "baseline_write_readiness_verdict": "BASELINE_WRITE_READY_WITH_CAVEATS",
   "branch": "travel-series-b-validation",
-  "candidate_delta_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-official-candidate-rerun/outputs/series_b_28case_candidate_case_delta_matrix.json",
+  "candidate_delta_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-official-candidate-rerun/outputs/series_b_29case_candidate_case_delta_matrix.json",
   "candidate_delta_matrix_sha256": "3cc4855b9fd16a6c8a2147b070810bf9a1eab8563f78d5ab32508a72dcc1daf8",
   "candidate_output_manifest_path": null,
   "candidate_output_manifest_sha256": null,
-  "candidate_output_sha256": "ccff9bfbace6948a46a848815231b83964f759f604cc371b0f810636abbc5260",
+  "candidate_output_sha256": "8359bfb1eac553d965ec7a8f3397ae10d51695546b3ad9b7563a3efc6215335d",
   "candidate_score_accepted_for_baseline": true,
-  "candidate_score_reviewed": "55/60",
-  "candidate_score_source": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-official-candidate-rerun/outputs/series_b_28case_official_candidate_rerun.json",
+  "candidate_score_reviewed": "56/60",
+  "candidate_score_source": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-official-candidate-rerun/outputs/series_b_29case_official_candidate_rerun.json",
   "case_count": 60,
   "caveat_cases": [
     "obj_art_003",
@@ -33,7 +33,8 @@
     "rel_space_028",
     "rel_space_033",
     "obj_art_012",
-    "cross_route_055"
+    "cross_route_055",
+    "hist_arch_022"
   ],
   "caveat_details": {
     "cross_route_053": {
@@ -70,6 +71,18 @@
       "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
       "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
       "human_review_acceptance": "ACCEPTED_BY_17CASE_HUMAN_REVIEW_FOR_OFFICIAL_BASELINE_WRITE"
+    },
+    "hist_arch_022": {
+      "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+      "caveats": [
+        "caozhi/漕制/漕运 accepted as source-backed tribute grain transport / caoyun context.",
+        "Grand Canal / lock / hydraulic coverage passed controlled review.",
+        "materials_book axis was not acquired and must remain caveated.",
+        "Rejected HK Museum short/navigation page remains excluded."
+      ],
+      "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+      "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+      "human_review_acceptance": "HIST_ARCH_022_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
     },
     "hist_arch_024": {
       "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
@@ -276,10 +289,10 @@
     "source_caveats": "Weak/context sources must not be overclaimed; rejected sources remain excluded."
   },
   "classification": "OFFICIAL_BASELINE_SCORE",
-  "controlled_evidence_count": 28,
+  "controlled_evidence_count": 29,
   "controlled_evidence_line_distinction": "Controlled dry-run evidence remains provenance for candidate deltas; this artifact is the authorized human-reviewed official baseline score write.",
-  "controlled_evidence_rollup_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-controlled-evidence-rollup/outputs/series_b_28case_controlled_evidence_rollup.json",
-  "controlled_evidence_rollup_sha256": "a03512cd901161946494c79b148a5765f5b2d6983461baecc708176fa4eefc95",
+  "controlled_evidence_rollup_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-controlled-evidence-rollup/outputs/series_b_29case_controlled_evidence_rollup.json",
+  "controlled_evidence_rollup_sha256": "4a8a6d6df6063e9dfd72bc7638263b2bb98e7bbe1a99face6ee36fe9afb395c9",
   "dataset_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b/optional-skills/research/series-b-source-gap-resolution/official/series_b_official_60case_dataset.json",
   "dataset_sha256": "15568604273ef45660a9811032728e276b992ca8d814dcd7b65ff2d16db6472c",
   "excluded_cases": [
@@ -290,7 +303,6 @@
     "adv_trap_059"
   ],
   "failed_cases": [
-    "hist_arch_022",
     "obj_art_008",
     "rel_space_034",
     "rel_space_035",
@@ -299,9 +311,9 @@
   "full_series_b_run_performed": false,
   "hist_arch_022_status": "handoff_ready_but_not_controlled",
   "human_caveats_accepted": true,
-  "human_review_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-candidate-human-review/outputs/series_b_55of60_candidate_case_review_matrix.json",
+  "human_review_matrix_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-candidate-human-review/outputs/baseline_write_candidate_scope_manifest.json",
   "human_review_matrix_sha256": "7bf5181bd3a7db399ac5172cc3d87c88f2d906fa553d12f152c9eeb33b530a36",
-  "human_review_report_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-candidate-human-review/outputs/series_b_28case_candidate_human_review.json",
+  "human_review_report_path": "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-candidate-human-review/outputs/series_b_29case_candidate_human_review_report.md",
   "human_review_report_sha256": "c3da2f9c129668fc3a3a8da7742e4f482fb6b06e109073df7535affb20d06212",
   "human_review_verdict": "BASELINE_WRITE_READY_WITH_CAVEATS",
   "ledger_entries": [
@@ -545,14 +557,45 @@
       "tag_push_performed": false,
       "timestamp": "2026-06-27T02:56:35.622600+00:00",
       "to_score": "55/60"
+    },
+    {
+      "basis": "hist_arch_022 controlled evidence + 29-case no-write candidate rerun + human review",
+      "candidate_score_accepted_for_baseline": true,
+      "candidate_score_reviewed": "56/60",
+      "caveats": [
+        "materials_book axis remains caveated for hist_arch_022",
+        "rejected sources remain excluded",
+        "adv_trap_059 remains policy-gated and not counted"
+      ],
+      "delta": "+1",
+      "excluded_cases": [
+        "obj_art_008",
+        "rel_space_034",
+        "rel_space_035",
+        "adv_trap_059"
+      ],
+      "from_score": "55/60",
+      "newly_countable_cases": [
+        "hist_arch_022"
+      ],
+      "no_production_mutation_in_baseline_write_phase": true,
+      "no_source_vector_mutation": true,
+      "push_performed": false,
+      "readiness_verdict": "BASELINE_WRITE_READY_WITH_CAVEATS",
+      "remaining_failed_or_deferred_cases": [
+        "obj_art_008",
+        "rel_space_034",
+        "rel_space_035",
+        "adv_trap_059"
+      ],
+      "runtime_metadata_updated_in_this_phase": false,
+      "tag_push_performed": false,
+      "timestamp": "2026-06-27T03:42:13.831134+00:00",
+      "to_score": "56/60"
     }
   ],
   "newly_countable_cases": [
-    "nat_eco_045",
-    "rel_space_028",
-    "rel_space_033",
-    "obj_art_012",
-    "cross_route_055"
+    "hist_arch_022"
   ],
   "newly_passed_delta_cases": [
     "obj_art_002",
@@ -580,17 +623,78 @@
     "obj_art_012",
     "cross_route_055"
   ],
-  "official_delta_vs_prior": "+5",
-  "official_failed_cases": 5,
-  "official_failed_cases_list": [
-    "hist_arch_022",
+  "official_delta_vs_prior": "+1",
+  "official_failed_cases": [
     "obj_art_008",
     "rel_space_034",
     "rel_space_035",
     "adv_trap_059"
   ],
-  "official_passed_cases": 55,
-  "official_score": "55/60",
+  "official_failed_cases_list": [
+    "obj_art_008",
+    "rel_space_034",
+    "rel_space_035",
+    "adv_trap_059"
+  ],
+  "official_passed_cases": [
+    "obj_art_001",
+    "obj_art_002",
+    "obj_art_003",
+    "obj_art_004",
+    "obj_art_005",
+    "obj_art_006",
+    "obj_art_007",
+    "obj_art_009",
+    "obj_art_010",
+    "obj_art_011",
+    "obj_art_013",
+    "obj_art_014",
+    "obj_art_015",
+    "hist_arch_016",
+    "hist_arch_017",
+    "hist_arch_018",
+    "hist_arch_019",
+    "hist_arch_020",
+    "hist_arch_021",
+    "hist_arch_023",
+    "hist_arch_024",
+    "hist_arch_025",
+    "hist_arch_026",
+    "hist_arch_027",
+    "rel_space_029",
+    "rel_space_030",
+    "rel_space_031",
+    "rel_space_032",
+    "rel_space_036",
+    "rel_space_037",
+    "nat_eco_038",
+    "nat_eco_039",
+    "nat_eco_040",
+    "nat_eco_041",
+    "nat_eco_042",
+    "nat_eco_043",
+    "nat_eco_044",
+    "nat_eco_046",
+    "nat_eco_047",
+    "cross_route_048",
+    "cross_route_049",
+    "cross_route_050",
+    "cross_route_051",
+    "cross_route_052",
+    "cross_route_053",
+    "cross_route_054",
+    "adv_trap_056",
+    "adv_trap_057",
+    "adv_trap_058",
+    "adv_trap_060",
+    "nat_eco_045",
+    "rel_space_028",
+    "rel_space_033",
+    "obj_art_012",
+    "cross_route_055",
+    "hist_arch_022"
+  ],
+  "official_score": "56/60",
   "passed_cases": [
     "obj_art_001",
     "obj_art_002",
@@ -646,32 +750,33 @@
     "rel_space_028",
     "rel_space_033",
     "obj_art_012",
-    "cross_route_055"
+    "cross_route_055",
+    "hist_arch_022"
   ],
-  "previous_official_score": "50/60",
+  "previous_official_score": "55/60",
   "prior_failed_cases": 16,
   "prior_frozen_ledger_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b/optional-skills/research/series-b-source-gap-resolution/official/series_b_frozen_baseline_ledger.json",
   "prior_frozen_ledger_sha256": "a1d92e79953f50f219e37b2b714b7d3465cc7a1d280b1dba2a535256123179d3",
   "prior_passed_cases": 44,
-  "prior_score": "50/60",
+  "prior_score": "55/60",
   "production_default_integrated": false,
   "production_default_manifest_integration_performed": false,
   "push_performed": false,
-  "recommended_official_score": "55/60",
+  "recommended_official_score": "56/60",
   "release_performed": false,
   "remaining_failed_or_deferred_cases": [
-    "hist_arch_022",
     "obj_art_008",
     "rel_space_034",
     "rel_space_035",
     "adv_trap_059"
   ],
-  "repo_head_at_write": "313f74567fec7b9e703c0b09bbadd9413c22846e",
+  "repo_head_at_write": "97bf68c5aafbc196d989f849b783acd2d30bcab3",
   "repo_path": "/Users/xqdwww/Workspace/AI_Core/hermes-agent-travel-series-b",
   "runtime_metadata_update_performed": false,
   "runtime_metadata_update_required": true,
   "schema_version": "series_b_official_baseline_50_write.v1",
   "series": "Travel / Series B",
+  "source": "29-case candidate human-review audit",
   "tag_created": false,
-  "write_timestamp": "2026-06-27T02:56:35.622600+00:00"
+  "write_timestamp": "2026-06-27T03:42:13.831134+00:00"
 }
