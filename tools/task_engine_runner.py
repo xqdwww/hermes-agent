@@ -57,6 +57,10 @@ from tools.passive_intelligence_guard import (
     summarize_long_run_observer_plan,
     summarize_passive_runtime_ledger,
 )
+from tools.pdf_validation_adapter import (
+    PdfValidationExecutionPolicy,
+    build_pdf_validation_adapter_plan,
+)
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
     run_decision_final_smoke,
@@ -771,6 +775,9 @@ def _attach_passive_guard_metadata(
         observer_metadata = _build_passive_observer_metadata(query=query, guard_mode=guard_mode)
         if observer_metadata:
             payload["passive_intelligence_guard"]["observer_plans"] = observer_metadata
+        pdf_adapter_metadata = _build_pdf_validation_adapter_metadata(passive_context, guard_mode=guard_mode)
+        if pdf_adapter_metadata:
+            payload["passive_intelligence_guard"]["pdf_validation_adapter"] = pdf_adapter_metadata
     if isinstance(document_validation, dict):
         payload["passive_intelligence_guard"]["document_validation"] = _build_document_validation_metadata(
             document_validation,
@@ -888,6 +895,77 @@ def _build_document_validation_metadata(document_validation: dict[str, Any], *, 
         "summary": safe_document_validation_summary(decision),
         "warning_only": True,
     }
+
+
+def _build_pdf_validation_adapter_metadata(passive_context: dict[str, Any] | None, *, guard_mode: str) -> dict[str, Any]:
+    if guard_mode not in {"debug", "warn"}:
+        return {}
+    request = _extract_pdf_validation_adapter_request(passive_context)
+    if not request:
+        return {}
+    file_path = str(request.get("file_path") or request.get("path") or "")
+    intended_use = str(request.get("intended_use") or "")
+    target_app = str(request.get("target_app") or "")
+    policy = PdfValidationExecutionPolicy(execute=False, allow_native_tools=True, allow_qlmanage_thumbnail=False)
+    try:
+        plan = build_pdf_validation_adapter_plan(
+            file_path,
+            intended_use=intended_use,
+            target_app=target_app,
+            policy=policy,
+        )
+    except ValueError as exc:
+        return {
+            "status": "unknown",
+            "reason": str(exc),
+            "executes_native_tools": False,
+            "warning_only": True,
+            "warnings": [
+                {
+                    "code": "PASSIVE_PDF_VALIDATION_EXPLICIT_FILE_REQUIRED",
+                    "safe_interpretation": "PDF validation adapter plans require a single explicit local file path.",
+                }
+            ] if guard_mode == "warn" else [],
+        }
+    warnings: list[dict[str, str]] = []
+    if guard_mode == "warn":
+        warnings.append(
+            {
+                "code": "PASSIVE_PDF_NATIVE_VALIDATION_NOT_EXECUTED",
+                "safe_interpretation": "Native PDF validation is available but was not executed; do not claim full validity or Preview compatibility.",
+            }
+        )
+    return {
+        "plan": asdict(plan),
+        "executes_native_tools": False,
+        "warning_only": True,
+        "warnings": warnings,
+    }
+
+
+def _extract_pdf_validation_adapter_request(passive_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(passive_context, dict):
+        return {}
+    candidates: list[Any] = [
+        passive_context.get("pdf_validation_adapter"),
+        passive_context.get("pdf_validation"),
+    ]
+    validation = passive_context.get("validation")
+    if isinstance(validation, dict):
+        candidates.extend(
+            [
+                validation.get("pdf_validation_adapter"),
+                validation.get("pdf_validation"),
+                validation.get("document_validation"),
+            ]
+        )
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        file_path = str(candidate.get("file_path") or candidate.get("path") or "")
+        if file_path:
+            return candidate
+    return {}
 
 
 def _build_passive_observer_metadata(*, query: str, guard_mode: str) -> dict[str, Any]:

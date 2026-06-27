@@ -22,6 +22,12 @@ def test_document_validation_claim_safety_lesson_is_documented():
     assert "missing file inventory or validation checks must remain unknown/warning" in text
     assert "At supported report boundaries, passive context may be derived automatically" in text
     assert "ledger warnings are advisory" in text
+    assert "Preview compatibility requires a Preview/QuickLook-compatible check" in text
+    assert "GUI-opening commands are forbidden by default" in text
+    assert "`qlmanage -t` thumbnail validation is opt-in only" in text
+    assert "write only to a safe temp/output directory" in text
+    assert "produce unknown/skipped checks, not pass" in text
+    assert "Do not run OCR unless explicitly asked and scoped" in text
 
 
 def test_long_run_watchdog_safety_lesson_is_documented():
