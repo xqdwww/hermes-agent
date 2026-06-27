@@ -320,6 +320,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=('wiki_or_zim',),
     ),
 
+    "rel_space_034": CaseConfig(
+        case_id="rel_space_034",
+        expected_formal_ready_decision="REL_SPACE_034_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="APPROVE_WITH_CAVEAT",
+        required_terms=("ziggurat", "terrace", "alignment", "brick"),
+        required_sections=("spatial_structure", "nature_environment", "historical_layers", "theme_tracks"),
+        required_axes=("archaeology_book", "religion_book", "materials_book"),
+    ),
+
     "obj_art_012": CaseConfig(
         case_id="obj_art_012",
         expected_formal_ready_decision="OBJ_ART_012_FORMAL_READY_APPROVED_WITH_CAVEAT",
@@ -429,6 +438,21 @@ def check_case_text(text: str, *, case_id: str) -> list[str]:
             violations.append("caozhi_disambiguation_missing")
         if "materials_book" not in lowered or "not overclaimed" not in lowered:
             violations.append("materials_book_caveat_missing")
+    if case_id == "rel_space_034":
+        has_limited_alignment = (
+            "orientation/cardinal" in lowered
+            or "cardinal planning" in lowered
+            or "oriented to true north" in lowered
+        )
+        if not has_limited_alignment:
+            violations.append("alignment_orientation_caveat_missing")
+        unsupported_astronomy_claims = (
+            "confirmed astronomical program",
+            "proves astronomical alignment",
+            "astronomical program is confirmed",
+        )
+        if any(claim in lowered for claim in unsupported_astronomy_claims):
+            violations.append("unsupported_astronomical_overclaim")
     return sorted(set(violations))
 
 
@@ -460,7 +484,8 @@ def validate_case_chunks(chunks: list[dict[str, Any]], *, case_id: str) -> dict[
             violations.append(f"{chunk_id}:source_hash_missing")
         if not chunk.get("section_locator"):
             violations.append(f"{chunk_id}:section_locator_missing")
-        char_count = int(chunk.get("char_count") or len(str(chunk.get("text_excerpt") or "")))
+        preview_text = str(chunk.get("text_excerpt") or chunk.get("text_preview") or "")
+        char_count = int(chunk.get("char_count") or len(preview_text))
         if char_count <= 0:
             violations.append(f"{chunk_id}:empty_chunk")
         terms.update(str(term) for term in chunk.get("supports_terms", []))
