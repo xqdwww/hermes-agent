@@ -59,6 +59,7 @@ FORBIDDEN_TEXT_PATTERNS = {
         "nat_eco_046", "nat_eco_043", "obj_art_005", "obj_art_011", "hist_arch_025", "rel_space_036",
         "adv_trap_059",
         "nat_eco_045", "rel_space_028", "rel_space_033", "obj_art_012", "cross_route_055", "hist_arch_022",
+        "rel_space_035",
     ],
     "generated_or_mock": [
         "dummy_test_artifact_only",
@@ -329,6 +330,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=("archaeology_book", "religion_book", "materials_book"),
     ),
 
+    "rel_space_035": CaseConfig(
+        case_id="rel_space_035",
+        expected_formal_ready_decision="REL_SPACE_035_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="APPROVE_WITH_CAVEAT",
+        required_terms=("ballcourt", "rings", "ritual", "geometry"),
+        required_sections=("spatial_structure", "historical_layers", "theme_tracks"),
+        required_axes=("archaeology_book", "religion_book", "wiki_or_zim"),
+    ),
+
     "obj_art_012": CaseConfig(
         case_id="obj_art_012",
         expected_formal_ready_decision="OBJ_ART_012_FORMAL_READY_APPROVED_WITH_CAVEAT",
@@ -453,6 +463,46 @@ def check_case_text(text: str, *, case_id: str) -> list[str]:
         )
         if any(claim in lowered for claim in unsupported_astronomy_claims):
             violations.append("unsupported_astronomical_overclaim")
+    if case_id == "rel_space_035":
+        has_acoustic_caveat = (
+            "acoustics remains unsupported/caveated" in lowered
+            or "acoustics_not_supported" in lowered
+            or "no direct acoustics evidence" in lowered
+        )
+        if not has_acoustic_caveat:
+            violations.append("acoustics_caveat_missing")
+        unsupported_acoustic_claims = (
+            "acoustic design is confirmed",
+            "professional acoustic design",
+            "technical acoustics are supported",
+            "sound projection is proven",
+            "resonance is source-backed",
+            "amplification is source-backed",
+        )
+        if any(claim in lowered for claim in unsupported_acoustic_claims):
+            violations.append("unsupported_acoustics_overclaim")
+        has_professional_book_caveat = (
+            "not extracted book-body evidence" in lowered
+            or "do_not_count_as_extracted_professional_book_body" in lowered
+            or "not overclaimed as professional book evidence" in lowered
+        )
+        if not has_professional_book_caveat:
+            violations.append("professional_book_caveat_missing")
+        professional_book_overclaims = (
+            "extracted professional book body proves",
+            "internet archive book body confirms",
+            "wikipedia is professional book evidence",
+            "le monde is professional book evidence",
+        )
+        if any(claim in lowered for claim in professional_book_overclaims):
+            violations.append("professional_book_axis_overclaim")
+        source_axis_overclaims = (
+            "travel locator source counts as conceptual evidence",
+            "listing source counts as conceptual evidence",
+            "travel guide source proves the concept",
+        )
+        if any(claim in lowered for claim in source_axis_overclaims):
+            violations.append("source_axis_overclaim")
     return sorted(set(violations))
 
 
