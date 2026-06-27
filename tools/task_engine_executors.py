@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import http.client
@@ -341,8 +342,9 @@ class LocalTaskEngineExecutor:
     def run_agy_gemini(self, stage: StageSpec, prompt: str, model: str, timeout_s: int | None = None) -> str:
         if stage.model not in {GEMINI_HIGH, GEMINI_PRO_HIGH} or model != stage.model:
             raise RuntimeError(f"{stage.stage_name}: Gemini model binding mismatch")
-        agy_path = shutil.which("agy") or "/opt/homebrew/bin/agy"
-        if not os.path.exists(agy_path):
+        resolved_agy_path = shutil.which("agy")
+        agy_path = resolved_agy_path or "/opt/homebrew/bin/agy"
+        if resolved_agy_path is None and not os.path.exists(agy_path):
             raise RuntimeError(f"{stage.stage_name}: agy not found at {agy_path}")
         actual_model = resolve_agy_model_alias(model)
         self._ensure_agy_preflight_warmed(stage)
@@ -352,7 +354,7 @@ class LocalTaskEngineExecutor:
         agy_env = _agy_subprocess_env()
         last_error = ""
         for attempt in range(2):
-            log_file = Path(f"/private/tmp/agy-{uuid.uuid4().hex[:8]}.log")
+            log_file = Path(tempfile.gettempdir()) / f"agy-{uuid.uuid4().hex[:8]}.log"
             command = [
                 agy_path,
                 "--log-file",
@@ -10304,7 +10306,7 @@ def _run_agy_auth_refresh_gate(
         )
 
     actual_model = model or resolve_agy_model_alias(GEMINI_PRO_HIGH)
-    sentinel_log = Path(f"/private/tmp/agy-refresh-{uuid.uuid4().hex[:8]}.log")
+    sentinel_log = Path(tempfile.gettempdir()) / f"agy-refresh-{uuid.uuid4().hex[:8]}.log"
     sentinel_command = [
         agy_path,
         "--log-file",
