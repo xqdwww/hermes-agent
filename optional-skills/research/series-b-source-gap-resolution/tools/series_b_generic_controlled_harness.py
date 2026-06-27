@@ -302,6 +302,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=('nature_book', 'external_book', 'wiki_or_zim'),
     ),
 
+    "rel_space_028": CaseConfig(
+        case_id="rel_space_028",
+        expected_formal_ready_decision="REL_SPACE_028_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="include_for_formal_review",
+        required_terms=('chaitya', 'stupa', 'circumambulation', 'apse'),
+        required_sections=('spatial_structure', 'historical_layers', 'theme_tracks'),
+        required_axes=('wiki_or_zim',),
+    ),
+
 }
 
 
