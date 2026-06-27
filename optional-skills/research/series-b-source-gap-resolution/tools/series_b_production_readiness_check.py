@@ -32,7 +32,7 @@ def build_readiness_report(manifest_path: str | Path = DEFAULT_TARGET_MANIFEST) 
         "controlled_evidence_count": validation.get("controlled_evidence_count"),
         "official_baseline_commit": validation.get("official_baseline_commit"),
         "official_baseline_tag": validation.get("official_baseline_tag"),
-        "baseline_check": "PASS_50_OF_60",
+        "baseline_check": "PASS_55_OF_60",
         "source_state_manifest_check": "PASS_READ_ONLY_NON_DEFAULT",
         "schema_validator_check": "PASS_PRESENT_READABLE",
         "caveat_preservation": "PASS",

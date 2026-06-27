@@ -16,11 +16,16 @@
     "obj_art_005",
     "obj_art_011",
     "hist_arch_025",
-    "rel_space_036"
+    "rel_space_036",
+    "nat_eco_045",
+    "rel_space_028",
+    "rel_space_033",
+    "obj_art_012",
+    "cross_route_055"
   ],
   "caveat_details": {
     "adv_trap_059": "policy-gated; not counted; must not be treated as resolved",
-    "controlled_evidence_count": 23,
+    "controlled_evidence_count": 28,
     "cross_route_053": [
       "approved with caveat",
       "Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence",
@@ -29,40 +34,248 @@
       "LP locator is not counted as formal axis evidence",
       "nature/geography/karst-hydrology source backing remains explicit"
     ],
-    "remaining_failed_or_deferred_cases": "remaining 10 cases are excluded from the 50/60 official baseline",
-    "score_classification": "50/60 is a human-reviewed official baseline, not a raw candidate-only score.",
+    "hist_arch_022": "handoff-ready after caozhi source-backed intake/formal-ready/handoff, but not controlled; excluded from the official 55/60 baseline",
     "newly_countable_case_caveats": {
-      "nat_eco_046": [
-        "Travel guide pages must not overrule geography/ecology sources.",
-        "Baidu redirects are rejected.",
-        "Natural process / regional relation / ecology grounding remains source-scoped."
+      "cross_route_055": [
+        "Ryukyu proxy/intermediary trade is source-backed; proxy is trade-intermediary sense, not technical/generic proxy.",
+        "Rejected/blocked sources excluded; art_architecture_book caveat preserved."
       ],
-      "nat_eco_043": [
-        "PDF extraction remains validated/caveated.",
-        "ScienceDirect metadata-only page is not counted unless body/extract exists.",
-        "Geomorphology / hydrology process grounding remains source-scoped."
+      "nat_eco_045": [
+        "Glacial geomorphology terms are source-backed; cirque/tarn/plucking/bergschrund mechanism grounding is preserved.",
+        "Travel/listing sources must not be overclaimed as conceptual evidence."
       ],
-      "obj_art_005": [
-        "Architecture pages provide concept evidence, not listicle-only framing.",
-        "Blocked page is rejected."
+      "obj_art_012": [
+        "Yingzao Fashi/module/cai/grading are source-backed.",
+        "Professional axes are caveated; ArchDaily is supplementary unless conceptual coverage is source-backed."
       ],
-      "obj_art_011": [
-        "Architectural order / column / capital / classical context remains source-backed.",
-        "Generic architecture-course filler is not overcounted."
+      "rel_space_028": [
+        "Wikipedia/context-heavy package accepted with caveat.",
+        "Chaitya/stupa/circumambulation/apse support religious-spatial architecture; no professional book overclaim."
       ],
-      "hist_arch_025": [
-        "Historical/archaeological frontier-system evidence remains source-backed.",
-        "Non-institutional pages are supplementary unless source-backed body is strong."
-      ],
-      "rel_space_036": [
-        "UNESCO / Beijing Gov / Wikipedia provide source-scoped religious-spatial grounding.",
-        "TravelChinaGuide remains context/locator unless conceptual content is source-backed.",
-        "Empty page is rejected."
+      "rel_space_033": [
+        "Wikipedia/context-heavy package accepted with caveat.",
+        "Cloister/scriptorium/refectory/monastery must remain source-backed; no generic monastery filler or religion/history book overclaim."
       ]
-    }
+    },
+    "official_baseline_caveats_by_case": {
+      "cross_route_053": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Wikipedia/API and ZIM-derived context evidence is treated as context/wiki evidence, not overclaimed as dedicated professional book evidence.",
+          "No dedicated nature_book PDF was present; karst/hydrology/nature coverage is source-backed through karst, limestone, cenote, Yucatán Peninsula, and related context sources.",
+          "Cached Tikal excerpts are supplementary archaeological/context support, not primary nature/geography source backing.",
+          "Rejected sources are excluded from formal evidence: zim_raised_field.md, zim_cached_chichen_itza_excerpts.md, local_source_locator_chultun_maya_cisterns.md.",
+          "Chultun article is short; chultun/cistern coverage is supplemented by Maya civilization, Tikal excerpts, karst/limestone/cenote context, and Yucatán regional context.",
+          "cross_route_053 approved with caveat; Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence.",
+          "cached Tikal excerpts are supplementary; rejected sources and LP locator are excluded from formal axis evidence."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "CROSS_ROUTE_053_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "cross_route_055": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Ryukyu proxy/intermediary trade source-backed; proxy is trade-intermediary sense, not technical/generic proxy; rejected/blocked sources excluded; art_architecture_book caveat preserved."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "CROSS_ROUTE_055_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "hist_arch_020": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "UNESCO Cloudflare page not counted; nomination text/PDF extraction and context evidence caveats preserved."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_17CASE_HUMAN_REVIEW_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "hist_arch_024": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "legacy approved controlled evidence; not a per-case new-pipeline archive",
+          "not official baseline improvement"
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_EVIDENCE_LEGACY",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "hist_arch_025": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Historical/archaeological frontier-system evidence remains source-backed.",
+          "Non-institutional pages are supplementary unless source-backed body is strong."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "HIST_ARCH_025_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "nat_eco_039": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "legacy approved controlled evidence; not a per-case new-pipeline archive",
+          "not official baseline improvement"
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_EVIDENCE_LEGACY",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "nat_eco_042": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "nature_book axis partial via context evidence; pneumatophore stub excluded and Aerial root context used."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_17CASE_HUMAN_REVIEW_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "nat_eco_043": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "PDF extraction remains validated/caveated.",
+          "ScienceDirect metadata-only page is not counted unless body/extract exists.",
+          "Geomorphology / hydrology process grounding remains required and source-scoped."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "NAT_ECO_043_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "nat_eco_045": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Glacial geomorphology terms are source-backed; no travel-listing overclaim; cirque/tarn/plucking/bergschrund mechanism grounding preserved."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "NAT_ECO_045_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "nat_eco_046": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Travel guide pages must not overrule geography/ecology sources.",
+          "Baidu redirects are rejected.",
+          "Natural process / regional relation / ecology grounding remains required and source-scoped."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "NAT_ECO_046_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "obj_art_002": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "qyer_or_china_local axis remains low-severity missing; wiki/API context not overclaimed as professional book evidence."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_17CASE_HUMAN_REVIEW_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "obj_art_003": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "archaeology_book not hard-required by current manifest; downgrade if future official case-rule trace requires it"
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "obj_art_005": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Architecture pages are counted only for concept evidence, not listicle-only framing.",
+          "Blocked page is rejected."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "OBJ_ART_005_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "obj_art_007": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "page-binding caveat preserved; 0/0 chunks traced by chunk_id / section locator / text_sha256, not precise page claims"
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "obj_art_010": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "legacy approved controlled evidence; not a per-case new-pipeline archive",
+          "not official baseline improvement"
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_EVIDENCE_LEGACY",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_USER_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "obj_art_011": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Architectural order / column / capital / classical context remains source-backed.",
+          "Generic architecture-course filler is not overcounted."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "OBJ_ART_011_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "obj_art_012": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Yingzao Fashi/module/cai/grading source-backed; professional axes caveated; no book/PDF overclaim; ArchDaily supplementary only when conceptual coverage is source-backed."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "OBJ_ART_012_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "rel_space_028": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Wikipedia/context-heavy package accepted with caveat; Chaitya/stupa/circumambulation/apse support religious-spatial architecture; no professional book overclaim."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "REL_SPACE_028_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "rel_space_031": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "religion_book and lp_or_travel_guide axes missing/medium severity; wiki/API context not overclaimed."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
+        "human_review_acceptance": "ACCEPTED_BY_17CASE_HUMAN_REVIEW_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "rel_space_033": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "Wikipedia/context-heavy package accepted with caveat; cloister/scriptorium/refectory/monastery source-backed; no religion/history book overclaim or generic monastery filler."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "REL_SPACE_033_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "rel_space_036": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "UNESCO / Beijing Gov / Wikipedia provide source-scoped religious-spatial grounding.",
+          "TravelChinaGuide remains context/locator unless conceptual content is source-backed.",
+          "Empty page is rejected."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "REL_SPACE_036_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      }
+    },
+    "remaining_failed_or_deferred_cases": "remaining 5 cases are excluded from the 55/60 official baseline",
+    "score_classification": "55/60 is a human-reviewed official baseline, not a raw candidate-only score."
   },
   "classification": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER",
-  "controlled_evidence_count": 23,
+  "controlled_evidence_count": 28,
   "description": "Explicit, non-default Series B production target layer for future separately authorized integration planning and smoke testing.",
   "explicit_production_integration_enabled": true,
   "full_series_b_required_before_release": true,
@@ -78,12 +291,11 @@
   "integration_manifest_file": "series_b_production_integration.json",
   "layer_id": "series_b_production_target_v1",
   "newly_countable_cases": [
-    "nat_eco_046",
-    "nat_eco_043",
-    "obj_art_005",
-    "obj_art_011",
-    "hist_arch_025",
-    "rel_space_036"
+    "nat_eco_045",
+    "rel_space_028",
+    "rel_space_033",
+    "obj_art_012",
+    "cross_route_055"
   ],
   "no_default_integration_attestation": {
     "explicit_production_integration_performed": true,
@@ -95,29 +307,24 @@
     "tag_created": false
   },
   "official_baseline_classification": "human_reviewed_official_baseline_not_raw_candidate_only",
-  "official_baseline_commit": "2b8c10a44936f176e0503f8bab03f02a1166096a",
+  "official_baseline_commit": "1979730917898d983155a5e2ba827f34fe2b2d7a",
   "official_baseline_file": "../official/series_b_official_baseline_current.json",
   "official_baseline_ledger_file": "../official/series_b_official_baseline_ledger.json",
-  "official_baseline_ref": "50/60",
-  "official_baseline_tag": "travel-series-b-official-50of60-human-reviewed-2026-06-25",
+  "official_baseline_ref": "55/60",
+  "official_baseline_tag": "travel-series-b-official-55of60-human-reviewed-2026-06-25",
   "official_baseline_write_enabled": false,
   "official_dataset_file": "../official/series_b_official_60case_dataset.json",
-  "previous_official_baseline_ref": "44/60",
+  "previous_official_baseline_ref": "50/60",
   "production_default_enabled": false,
   "production_default_scope": "explicit_series_b_target_only",
   "production_release_ready": false,
   "push_tag_required_separate_authorization": true,
   "release_requires_separate_authorization": true,
   "remaining_failed_or_deferred_cases": [
-    "obj_art_008",
-    "obj_art_012",
     "hist_arch_022",
-    "rel_space_028",
-    "rel_space_033",
+    "obj_art_008",
     "rel_space_034",
     "rel_space_035",
-    "nat_eco_045",
-    "cross_route_055",
     "adv_trap_059"
   ],
   "requires_explicit_integration": true,

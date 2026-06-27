@@ -18,11 +18,11 @@ EXPECTED_SCHEMA_VERSION = "series_b_production_target_manifest.v1"
 EXPECTED_CLASSIFICATION = "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
 EXPECTED_INTEGRATION_SCHEMA = "series_b_production_integration.v1"
 EXPECTED_INTEGRATION_CLASSIFICATION = "EXPLICIT_SERIES_B_PRODUCTION_INTEGRATION_PATH"
-EXPECTED_BASELINE = "50/60"
-EXPECTED_PREVIOUS_BASELINE = "44/60"
-EXPECTED_CONTROLLED_EVIDENCE_COUNT = 23
-EXPECTED_OFFICIAL_BASELINE_COMMIT = "2b8c10a44936f176e0503f8bab03f02a1166096a"
-EXPECTED_OFFICIAL_BASELINE_TAG = "travel-series-b-official-50of60-human-reviewed-2026-06-25"
+EXPECTED_BASELINE = "55/60"
+EXPECTED_PREVIOUS_BASELINE = "50/60"
+EXPECTED_CONTROLLED_EVIDENCE_COUNT = 28
+EXPECTED_OFFICIAL_BASELINE_COMMIT = "1979730917898d983155a5e2ba827f34fe2b2d7a"
+EXPECTED_OFFICIAL_BASELINE_TAG = "travel-series-b-official-55of60-human-reviewed-2026-06-25"
 EXPECTED_SCOPE = "explicit_series_b_target_only"
 REQUIRED_CAVEAT_CASES = {
     "obj_art_003",
@@ -41,21 +41,21 @@ REQUIRED_CAVEAT_CASES = {
     "obj_art_011",
     "hist_arch_025",
     "rel_space_036",
-}
-REQUIRED_NEWLY_COUNTABLE_CASES = {"nat_eco_046", "nat_eco_043", "obj_art_005", "obj_art_011", "hist_arch_025", "rel_space_036"}
-REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES = {
-    "obj_art_008",
-    "obj_art_012",
-    "hist_arch_022",
+    "nat_eco_045",
     "rel_space_028",
     "rel_space_033",
+    "obj_art_012",
+    "cross_route_055",
+}
+REQUIRED_NEWLY_COUNTABLE_CASES = {"nat_eco_045", "rel_space_028", "rel_space_033", "obj_art_012", "cross_route_055"}
+REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES = {
+    "hist_arch_022",
+    "obj_art_008",
     "rel_space_034",
     "rel_space_035",
-    "nat_eco_045",
-    "cross_route_055",
     "adv_trap_059",
 }
-REQUIRED_BASELINE_TRACE_VALUES = {"31/60", "39/60", EXPECTED_PREVIOUS_BASELINE, EXPECTED_BASELINE}
+REQUIRED_BASELINE_TRACE_VALUES = {"31/60", "39/60", "44/60", EXPECTED_PREVIOUS_BASELINE, EXPECTED_BASELINE}
 
 
 class ProductionTargetLayerError(ValueError):
@@ -143,9 +143,9 @@ def _validate_current_baseline_metadata(payload: dict[str, Any], *, context: str
             f"metadata must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases",
         )
     if payload.get("official_baseline_commit") != EXPECTED_OFFICIAL_BASELINE_COMMIT:
-        raise ProductionTargetLayerError(f"{context}_BASELINE_COMMIT_INVALID", "metadata must reference the official 50/60 baseline commit")
+        raise ProductionTargetLayerError(f"{context}_BASELINE_COMMIT_INVALID", "metadata must reference the official 55/60 baseline commit")
     if payload.get("official_baseline_tag") != EXPECTED_OFFICIAL_BASELINE_TAG:
-        raise ProductionTargetLayerError(f"{context}_BASELINE_TAG_INVALID", "metadata must reference the official 50/60 baseline tag")
+        raise ProductionTargetLayerError(f"{context}_BASELINE_TAG_INVALID", "metadata must reference the official 55/60 baseline tag")
     missing_new = sorted(REQUIRED_NEWLY_COUNTABLE_CASES - set(payload.get("newly_countable_cases") or []))
     if missing_new:
         raise ProductionTargetLayerError(f"{context}_NEW_CASE_TRACE_MISSING", f"metadata missing newly countable cases: {missing_new}")
