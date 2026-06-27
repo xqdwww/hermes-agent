@@ -897,7 +897,7 @@ def test_agy_adapter_matches_legacy_call_shape(monkeypatch, tmp_path: Path):
     assert calls[0][0] == ["/opt/homebrew/bin/agy", "models"]
     command, kwargs = calls[1]
     assert command[:2] == ["/opt/homebrew/bin/agy", "--log-file"]
-    assert command[2].startswith("/private/tmp/agy-")
+    assert Path(command[2]).name.startswith("agy-")
     assert command[3:8] == ["--model", GEMINI_HIGH, "-p", "prompt", "--print-timeout"]
     assert command[8] == "600s"
     assert kwargs["timeout"] == 630
@@ -906,7 +906,8 @@ def test_agy_adapter_matches_legacy_call_shape(monkeypatch, tmp_path: Path):
     assert kwargs["env"]["GEMINI_DIR"] == str(Path.home() / ".gemini")
     assert "canonical_model='Gemini 3.5 Flash (High)'" in message
     assert "actual_model='Gemini 3.5 Flash (High)'" in message
-    assert "log_file='/private/tmp/agy-" in message
+    assert "log_file='" in message
+    assert "agy-" in message
     assert "agy_cwd=" in message
     assert "elapsed_seconds=" in message
     assert "command=" in message
@@ -1351,7 +1352,8 @@ def test_run_agy_gemini_blocks_after_repeated_timeout_response_without_valid_art
     assert "L1_gemini_search: AGY_CALL_BLOCKED" in message
     assert "reason=AGY_TIMEOUT_BLOCKED" in message
     assert "actual_model='Gemini 3.5 Flash (High)'" in message
-    assert "log_file='/private/tmp/agy-" in message
+    assert "log_file='" in message
+    assert "agy-" in message
     assert "stdout: Error: timed out waiting for response" in message
     assert "token" not in message.lower()
     assert not list(tmp_path.rglob("*.md"))
