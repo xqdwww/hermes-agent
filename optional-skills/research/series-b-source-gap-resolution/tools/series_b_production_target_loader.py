@@ -18,11 +18,11 @@ EXPECTED_SCHEMA_VERSION = "series_b_production_target_manifest.v1"
 EXPECTED_CLASSIFICATION = "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER"
 EXPECTED_INTEGRATION_SCHEMA = "series_b_production_integration.v1"
 EXPECTED_INTEGRATION_CLASSIFICATION = "EXPLICIT_SERIES_B_PRODUCTION_INTEGRATION_PATH"
-EXPECTED_BASELINE = "58/60"
-EXPECTED_PREVIOUS_BASELINE = "56/60"
-EXPECTED_CONTROLLED_EVIDENCE_COUNT = 31
-EXPECTED_OFFICIAL_BASELINE_COMMIT = "e3c75ea4d00809b690252fba2b443ab04a29a55d"
-EXPECTED_OFFICIAL_BASELINE_TAG = "travel-series-b-official-58of60-human-reviewed-2026-06-25"
+EXPECTED_BASELINE = "60/60"
+EXPECTED_PREVIOUS_BASELINE = "58/60"
+EXPECTED_CONTROLLED_EVIDENCE_COUNT = 33
+EXPECTED_OFFICIAL_BASELINE_COMMIT = "a713b09559ffec8106eee2796c73689cfdf079bf"
+EXPECTED_OFFICIAL_BASELINE_TAG = "travel-series-b-official-60of60-human-reviewed-2026-06-25"
 EXPECTED_SCOPE = "explicit_series_b_target_only"
 REQUIRED_CAVEAT_CASES = {
     "obj_art_003",
@@ -46,13 +46,15 @@ REQUIRED_CAVEAT_CASES = {
     "rel_space_033",
     "obj_art_012",
     "cross_route_055",
-}
-REQUIRED_NEWLY_COUNTABLE_CASES = {"rel_space_034", "rel_space_035"}
-REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES = {
-    "obj_art_008",
+    "hist_arch_022",
+    "rel_space_034",
+    "rel_space_035",
     "adv_trap_059",
+    "obj_art_008",
 }
-REQUIRED_BASELINE_TRACE_VALUES = {"31/60", "39/60", "44/60", "50/60", "55/60", EXPECTED_PREVIOUS_BASELINE, EXPECTED_BASELINE}
+REQUIRED_NEWLY_COUNTABLE_CASES = {"adv_trap_059", "obj_art_008"}
+REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES = set()
+REQUIRED_BASELINE_TRACE_VALUES = {"31/60", "39/60", "44/60", "50/60", "55/60", "56/60", EXPECTED_PREVIOUS_BASELINE, EXPECTED_BASELINE}
 
 
 class ProductionTargetLayerError(ValueError):
@@ -140,17 +142,19 @@ def _validate_current_baseline_metadata(payload: dict[str, Any], *, context: str
             f"metadata must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases",
         )
     if payload.get("official_baseline_commit") != EXPECTED_OFFICIAL_BASELINE_COMMIT:
-        raise ProductionTargetLayerError(f"{context}_BASELINE_COMMIT_INVALID", "metadata must reference the official 58/60 baseline commit")
+        raise ProductionTargetLayerError(f"{context}_BASELINE_COMMIT_INVALID", f"metadata must reference the official {EXPECTED_BASELINE} baseline commit")
     if payload.get("official_baseline_tag") != EXPECTED_OFFICIAL_BASELINE_TAG:
-        raise ProductionTargetLayerError(f"{context}_BASELINE_TAG_INVALID", "metadata must reference the official 58/60 baseline tag")
+        raise ProductionTargetLayerError(f"{context}_BASELINE_TAG_INVALID", f"metadata must reference the official {EXPECTED_BASELINE} baseline tag")
     missing_new = sorted(REQUIRED_NEWLY_COUNTABLE_CASES - set(payload.get("newly_countable_cases") or []))
     if missing_new:
         raise ProductionTargetLayerError(f"{context}_NEW_CASE_TRACE_MISSING", f"metadata missing newly countable cases: {missing_new}")
     missing_remaining = sorted(REQUIRED_REMAINING_FAILED_OR_DEFERRED_CASES - set(payload.get("remaining_failed_or_deferred_cases") or []))
     if missing_remaining:
         raise ProductionTargetLayerError(f"{context}_REMAINING_CASE_TRACE_MISSING", f"metadata missing remaining failed/deferred cases: {missing_remaining}")
-    if payload.get("adv_trap_059_status") != "policy_gated_not_counted":
-        raise ProductionTargetLayerError(f"{context}_ADV_TRAP_059_STATUS_INVALID", "adv_trap_059 must remain policy-gated and not counted")
+    if payload.get("adv_trap_059_status") != "accepted_with_policy_caveats":
+        raise ProductionTargetLayerError(f"{context}_ADV_TRAP_059_STATUS_INVALID", "adv_trap_059 must be accepted only with policy caveats")
+    if payload.get("obj_art_008_status") != "accepted_with_alias_caveat":
+        raise ProductionTargetLayerError(f"{context}_OBJ_ART_008_STATUS_INVALID", "obj_art_008 must be accepted only with alias caveat")
 
 
 def validate_production_integration_manifest(integration_path: str | Path, *, target_manifest_path: str | Path) -> dict[str, Any]:
