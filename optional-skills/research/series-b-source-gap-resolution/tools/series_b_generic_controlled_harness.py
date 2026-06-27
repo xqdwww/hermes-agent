@@ -41,6 +41,8 @@ RESULT_ENUMS = {
     "BLOCKED_GUARD_VIOLATION",
     "BLOCKED_MALFORMED_TOKEN_RISK",
     "BLOCKED_BOOKING_LISTING_CONTAMINATION",
+    "BLOCKED_ALIAS_AMBIGUITY",
+    "BLOCKED_WRONG_CONTEXT_RISK",
     "BLOCKED_PRODUCTION_DEFAULT_RISK",
     "BLOCKED_BASELINE_UPDATE_RISK",
     "BLOCKED_FULL_SERIES_B_RISK",
@@ -356,6 +358,26 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
     ),
 
 
+    "obj_art_008": CaseConfig(
+        case_id="obj_art_008",
+        expected_formal_ready_decision="OBJ_ART_008_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="APPROVE_WITH_CAVEAT",
+        required_terms=(
+            "mashrabiya",
+            "mashrabiyya",
+            "wooden lattice screen",
+            "wood carving",
+            "lattice",
+            "thermal regulation",
+            "ventilation",
+            "geometry",
+            "Cairo",
+        ),
+        required_sections=("spatial_structure", "materials_mechanics", "historical_layers", "theme_tracks"),
+        required_axes=("art_architecture_context", "history_context", "materials_mechanics", "spatial_structure"),
+    ),
+
+
     "obj_art_012": CaseConfig(
         case_id="obj_art_012",
         expected_formal_ready_decision="OBJ_ART_012_FORMAL_READY_APPROVED_WITH_CAVEAT",
@@ -537,6 +559,61 @@ def check_case_text(text: str, *, case_id: str) -> list[str]:
             "wikipedia is scholarly engineering evidence",
             "zim is scholarly engineering evidence",
             "encyclopedic source proves professional engineering depth",
+        )
+        if any(claim in lowered for claim in source_axis_overclaims):
+            violations.append("source_axis_overclaim")
+
+    if case_id == "obj_art_008":
+        has_alias_caveat = (
+            "alias confirmed with caveat" in lowered
+            or "alias-confirmed-with-caveat" in lowered
+            or "alias_confirmed_with_caveat" in lowered
+        )
+        has_mingan_caveat = (
+            "mingan is a dataset alias token" in lowered
+            or "mingan is not a real architectural term" in lowered
+            or "mingan` is a dataset alias token" in lowered
+        )
+        has_target_alias = "mashrabiya" in lowered or "mashrabiyya" in lowered
+        if not (has_alias_caveat and has_mingan_caveat and has_target_alias):
+            violations.append("alias_caveat_missing")
+        alias_overclaims = (
+            "mingan is a real architectural term",
+            "mingan is an independent architectural style",
+            "mingan proves the object",
+            "literal mingan evidence",
+        )
+        if any(claim in lowered for claim in alias_overclaims):
+            violations.append("alias_ambiguity_overclaim")
+        wrong_context_claims = (
+            "wrong object is acceptable",
+            "wrong period is acceptable",
+            "wrong culture is acceptable",
+            "chinese mingan proves",
+            "mongolian mingan proves",
+            "mingan archipelago proves",
+            "mingan military unit proves",
+        )
+        if any(claim in lowered for claim in wrong_context_claims):
+            violations.append("wrong_context_overclaim")
+        generic_screen_overclaims = (
+            "generic decorative screen proves the required object",
+            "any decorative screen counts as mashrabiya",
+            "generic screen evidence is sufficient",
+        )
+        if any(claim in lowered for claim in generic_screen_overclaims):
+            violations.append("generic_screen_overclaim")
+        rejected_source_claims = (
+            "wikipedia_historic_cairo.md counted",
+            "wikipedia_islamic_architecture.md counted",
+            "rejected source counted",
+        )
+        if any(claim in lowered for claim in rejected_source_claims):
+            violations.append("rejected_source_counted")
+        source_axis_overclaims = (
+            "wikipedia api proves professional book body",
+            "encyclopedic source proves professional book body",
+            "unconstrained professional book evidence",
         )
         if any(claim in lowered for claim in source_axis_overclaims):
             violations.append("source_axis_overclaim")
@@ -854,6 +931,17 @@ def build_controlled_dossier(
             "Booking, ticket, listing, restaurant, map, locator-only, and price material is not counted as conceptual evidence. "
             "Orientation is not directly source-backed and remains caveated. Theme_tracks is weak and remains caveated."
         )
+    if case_id == "obj_art_008":
+        confirmed_alias = manifest.get("confirmed_alias") or {}
+        alias_caveat = str(manifest.get("alias_caveat") or "")
+        case_policy_notes = (
+            "\n\nobj_art_008 alias guard: alias confirmed with caveat. "
+            f"Confirmed alias metadata: `{json.dumps(confirmed_alias, ensure_ascii=False, sort_keys=True)}`. "
+            f"Alias caveat: {alias_caveat}. "
+            "Mingan is a dataset alias token, not a real architectural term or independent object. "
+            "The controlled dossier binds the required object context to mashrabiya/mashrabiyya, Cairo, wooden lattice screen, ventilation, thermal regulation, geometry, and privacy screening evidence only. "
+            "Wrong-object, wrong-period, wrong-culture, generic decorative screen, rejected-source, and professional-book-body overclaims remain blocked."
+        )
     section_blocks = []
     for section in config.required_sections:
         section_chunks = [chunk for chunk in chunks if section in chunk.get("supports_sections", [])]
@@ -963,6 +1051,17 @@ def _policy_checks(packet: dict[str, Any], manifest: dict[str, Any]) -> dict[str
             and any("Orientation is not directly source-backed" in str(item) for item in manifest.get("caveats", []))
             and any("Theme_tracks is weak" in str(item) for item in manifest.get("caveats", []))
         )
+    obj_art_008_policy_passed = True
+    if case_id == "obj_art_008":
+        caveat_text = " ".join(str(item) for item in manifest.get("caveats", []))
+        obj_art_008_policy_passed = (
+            manifest.get("alias_confirmed_with_caveat") is True
+            and manifest.get("wrong_context_guard_required") is True
+            and "Mingan" in str(manifest.get("alias_caveat") or caveat_text)
+            and "wrong object" in caveat_text.lower()
+            and "wrong period" in caveat_text.lower()
+            and "wrong culture" in caveat_text.lower()
+        )
     return {
         "production_default_disabled": locks.get("production_default_loader_enabled") is False and manifest.get("production_default_loader_enabled") is False,
         "baseline_update_disabled": locks.get("official_baseline_update_enabled") is False and manifest.get("official_baseline_update_enabled") is False,
@@ -970,7 +1069,9 @@ def _policy_checks(packet: dict[str, Any], manifest: dict[str, Any]) -> dict[str
         "policy_constrained": manifest.get("policy_constrained") is True if case_id == "adv_trap_059" else True,
         "malformed_token_guard_required": manifest.get("malformed_token_guard_required") is True if case_id == "adv_trap_059" else True,
         "booking_listing_contamination_guard_required": manifest.get("booking_listing_contamination_guard_required") is True if case_id == "adv_trap_059" else True,
-        "passed": base_passed and adv_policy_passed,
+        "alias_confirmed_with_caveat": manifest.get("alias_confirmed_with_caveat") is True if case_id == "obj_art_008" else True,
+        "wrong_context_guard_required": manifest.get("wrong_context_guard_required") is True if case_id == "obj_art_008" else True,
+        "passed": base_passed and adv_policy_passed and obj_art_008_policy_passed,
     }
 
 
@@ -1039,6 +1140,10 @@ def audit_controlled_dossier(
         result_enum = "BLOCKED_MALFORMED_TOKEN_RISK"
     elif guard_violations and any(label in guard_violations for label in ("booking_listing_contamination", "locator_only_overclaim")):
         result_enum = "BLOCKED_BOOKING_LISTING_CONTAMINATION"
+    elif guard_violations and any(label in guard_violations for label in ("alias_caveat_missing", "alias_ambiguity_overclaim")):
+        result_enum = "BLOCKED_ALIAS_AMBIGUITY"
+    elif guard_violations and any(label in guard_violations for label in ("wrong_context_overclaim", "generic_screen_overclaim", "rejected_source_counted")):
+        result_enum = "BLOCKED_WRONG_CONTEXT_RISK"
     elif guard_violations:
         result_enum = "BLOCKED_GUARD_VIOLATION"
     elif not policy["production_default_disabled"]:
