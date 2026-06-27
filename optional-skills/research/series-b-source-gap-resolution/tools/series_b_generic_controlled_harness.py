@@ -39,6 +39,8 @@ RESULT_ENUMS = {
     "PARTIAL_SOURCE_GUARDED_PASS",
     "BLOCKED_BINDING_INSUFFICIENT",
     "BLOCKED_GUARD_VIOLATION",
+    "BLOCKED_MALFORMED_TOKEN_RISK",
+    "BLOCKED_BOOKING_LISTING_CONTAMINATION",
     "BLOCKED_PRODUCTION_DEFAULT_RISK",
     "BLOCKED_BASELINE_UPDATE_RISK",
     "BLOCKED_FULL_SERIES_B_RISK",
@@ -339,6 +341,21 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=("archaeology_book", "religion_book", "wiki_or_zim"),
     ),
 
+    "adv_trap_059": CaseConfig(
+        case_id="adv_trap_059",
+        expected_formal_ready_decision="ADV_TRAP_059_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="APPROVE_WITH_CAVEAT",
+        required_terms=(
+            "Cappadocia underground city",
+            "Derinkuyu underground city ventilation shaft",
+            "Kaymakli underground city ventilation",
+            "Cappadocia underground city spatial structure",
+        ),
+        required_sections=("spatial_structure", "historical_layers"),
+        required_axes=("history_architecture", "spatial_structure"),
+    ),
+
+
     "obj_art_012": CaseConfig(
         case_id="obj_art_012",
         expected_formal_ready_decision="OBJ_ART_012_FORMAL_READY_APPROVED_WITH_CAVEAT",
@@ -463,6 +480,67 @@ def check_case_text(text: str, *, case_id: str) -> list[str]:
         )
         if any(claim in lowered for claim in unsupported_astronomy_claims):
             violations.append("unsupported_astronomical_overclaim")
+    if case_id == "adv_trap_059":
+        has_malformed_guard = (
+            "malformed trap token" in lowered
+            or "malformed token" in lowered
+            or "must not be treated as a real hotel/place/entity" in lowered
+            or "not treated as a real hotel" in lowered
+        )
+        if not has_malformed_guard:
+            violations.append("malformed_token_guard_missing")
+        malformed_overclaims = (
+            "cappadociahôtel is a real",
+            "cappadociahôtel hotel is real",
+            "cappadociahôtel as a hotel",
+            "cappadociahôtel attraction",
+            "cappadociahôtel proves",
+        )
+        if any(claim in lowered for claim in malformed_overclaims):
+            violations.append("malformed_token_entity_overclaim")
+        booking_overclaims = (
+            "booking evidence counts as conceptual evidence",
+            "ticket pricing counts as conceptual evidence",
+            "ticket pricing system is source-backed",
+            "hotel listing proves the concept",
+            "listing page proves the concept",
+            "price page proves the concept",
+        )
+        if any(claim in lowered for claim in booking_overclaims):
+            violations.append("booking_listing_contamination")
+        locator_overclaims = (
+            "locator-only sources count as conceptual evidence",
+            "travel locator source counts as conceptual evidence",
+        )
+        if any(claim in lowered for claim in locator_overclaims):
+            violations.append("locator_only_overclaim")
+        if "orientation is not directly source-backed" not in lowered and "not direct orientation evidence" not in lowered:
+            violations.append("orientation_caveat_missing")
+        orientation_overclaims = (
+            "orientation is directly source-backed",
+            "directional orientation is proven",
+            "cardinal orientation is supported",
+            "subterranean architecture orientation is confirmed",
+        )
+        if any(claim in lowered for claim in orientation_overclaims):
+            violations.append("orientation_overclaim")
+        if "theme_tracks is weak" not in lowered and "theme_tracks remains weak" not in lowered:
+            violations.append("theme_tracks_caveat_missing")
+        theme_overclaims = (
+            "theme_tracks fully supported",
+            "theme tracks fully supported",
+            "comparative theme tracks are proven",
+        )
+        if any(claim in lowered for claim in theme_overclaims):
+            violations.append("theme_tracks_overclaim")
+        source_axis_overclaims = (
+            "wikipedia is scholarly engineering evidence",
+            "zim is scholarly engineering evidence",
+            "encyclopedic source proves professional engineering depth",
+        )
+        if any(claim in lowered for claim in source_axis_overclaims):
+            violations.append("source_axis_overclaim")
+
     if case_id == "rel_space_035":
         has_acoustic_caveat = (
             "acoustics remains unsupported/caveated" in lowered
@@ -534,7 +612,7 @@ def validate_case_chunks(chunks: list[dict[str, Any]], *, case_id: str) -> dict[
             violations.append(f"{chunk_id}:source_hash_missing")
         if not chunk.get("section_locator"):
             violations.append(f"{chunk_id}:section_locator_missing")
-        preview_text = str(chunk.get("text_excerpt") or chunk.get("text_preview") or "")
+        preview_text = str(chunk.get("text_excerpt") or chunk.get("text_preview") or chunk.get("text") or "")
         char_count = int(chunk.get("char_count") or len(preview_text))
         if char_count <= 0:
             violations.append(f"{chunk_id}:empty_chunk")
@@ -639,6 +717,8 @@ def validate_handoff_inputs(
     chunks = chunks_payload.get("handoff_chunks")
     if chunks is None:
         chunks = chunks_payload.get("approved_chunks")
+    if chunks is None:
+        chunks = chunks_payload.get("chunks")
     if not isinstance(chunks, list):
         raise ControlledHarnessError("APPROVED_CHUNKS_MALFORMED", "approved handoff chunks must be a list")
     validate_case_chunks(chunks, case_id=case_id)
@@ -736,6 +816,9 @@ def build_controlled_dossier(
     packet = _load_json(source_packet_path, kind="source_packet")
     if packet.get("case_id") != case_id:
         raise ControlledHarnessError("CASE_ID_MISMATCH", "source packet case_id mismatch")
+    manifest = _load_json(handoff_manifest_path, kind="handoff_manifest")
+    if manifest.get("case_id") != case_id:
+        raise ControlledHarnessError("CASE_ID_MISMATCH", "handoff manifest case_id mismatch")
     policy = packet.get("policy_locks")
     if not isinstance(policy, dict) or policy.get("production_default_loader_enabled") is not False:
         raise ControlledHarnessError("BLOCKED_PRODUCTION_DEFAULT_RISK", "source packet policy lock is unsafe")
@@ -762,6 +845,15 @@ def build_controlled_dossier(
         f"- `{chunk['chunk_id']}` supports sections {', '.join(chunk.get('supports_sections', []))}; terms {', '.join(chunk.get('supports_terms', []))}; axes {', '.join(chunk.get('supports_axes', []))}; section_locator={chunk.get('section_locator')}; text_sha256={chunk.get('text_sha256')}"
         for chunk in chunks
     ]
+    case_policy_notes = ""
+    if case_id == "adv_trap_059":
+        trap_token = str(manifest.get("malformed_trap_token") or "not declared")
+        case_policy_notes = (
+            "\n\nadv_trap_059 policy guard: malformed trap token "
+            f"`{trap_token}` is preserved only as a malformed-token risk marker and is not treated as a real place, hotel, route, or entity. "
+            "Booking, ticket, listing, restaurant, map, locator-only, and price material is not counted as conceptual evidence. "
+            "Orientation is not directly source-backed and remains caveated. Theme_tracks is weak and remains caveated."
+        )
     section_blocks = []
     for section in config.required_sections:
         section_chunks = [chunk for chunk in chunks if section in chunk.get("supports_sections", [])]
@@ -803,7 +895,7 @@ Required terms: {', '.join(config.required_terms)}. Covered handoff terms: {', '
 
 ## caveat_preservation
 
-Caveats preserved: {'; '.join(caveats) if caveats else 'none declared'}. Missing or weak axes remain caveats. Context/Wikipedia/API material is not overclaimed as professional book evidence. This dossier keeps evidence-strength limits visible instead of converting thin or contextual material into high-confidence source claims.
+Caveats preserved: {'; '.join(caveats) if caveats else 'none declared'}. Missing or weak axes remain caveats. Context/Wikipedia/API material is not overclaimed as professional book evidence. This dossier keeps evidence-strength limits visible instead of converting thin or contextual material into high-confidence source claims.{case_policy_notes}
 
 {chr(10).join(section_blocks)}
 
@@ -853,7 +945,8 @@ def _axis_checks(packet: dict[str, Any], config: CaseConfig) -> dict[str, Any]:
 
 def _policy_checks(packet: dict[str, Any], manifest: dict[str, Any]) -> dict[str, bool]:
     locks = packet.get("policy_locks") if isinstance(packet.get("policy_locks"), dict) else {}
-    passed = (
+    case_id = str(packet.get("case_id") or manifest.get("case_id") or "")
+    base_passed = (
         locks.get("production_default_loader_enabled") is False
         and locks.get("official_baseline_update_enabled") is False
         and locks.get("full_series_b_enabled") is False
@@ -861,11 +954,23 @@ def _policy_checks(packet: dict[str, Any], manifest: dict[str, Any]) -> dict[str
         and manifest.get("official_baseline_update_enabled") is False
         and manifest.get("full_series_b_enabled") is False
     )
+    adv_policy_passed = True
+    if case_id == "adv_trap_059":
+        adv_policy_passed = (
+            manifest.get("policy_constrained") is True
+            and manifest.get("malformed_token_guard_required") is True
+            and manifest.get("booking_listing_contamination_guard_required") is True
+            and any("Orientation is not directly source-backed" in str(item) for item in manifest.get("caveats", []))
+            and any("Theme_tracks is weak" in str(item) for item in manifest.get("caveats", []))
+        )
     return {
         "production_default_disabled": locks.get("production_default_loader_enabled") is False and manifest.get("production_default_loader_enabled") is False,
         "baseline_update_disabled": locks.get("official_baseline_update_enabled") is False and manifest.get("official_baseline_update_enabled") is False,
         "full_series_b_disabled": locks.get("full_series_b_enabled") is False and manifest.get("full_series_b_enabled") is False,
-        "passed": passed,
+        "policy_constrained": manifest.get("policy_constrained") is True if case_id == "adv_trap_059" else True,
+        "malformed_token_guard_required": manifest.get("malformed_token_guard_required") is True if case_id == "adv_trap_059" else True,
+        "booking_listing_contamination_guard_required": manifest.get("booking_listing_contamination_guard_required") is True if case_id == "adv_trap_059" else True,
+        "passed": base_passed and adv_policy_passed,
     }
 
 
@@ -930,7 +1035,11 @@ def audit_controlled_dossier(
     source_binding = _source_binding(text, packet)
     policy = _policy_checks(packet, manifest)
     quality = _quality(text, config, terms, axes, sections, source_binding, policy)
-    if guard_violations:
+    if guard_violations and any(label in guard_violations for label in ("malformed_token_guard_missing", "malformed_token_entity_overclaim")):
+        result_enum = "BLOCKED_MALFORMED_TOKEN_RISK"
+    elif guard_violations and any(label in guard_violations for label in ("booking_listing_contamination", "locator_only_overclaim")):
+        result_enum = "BLOCKED_BOOKING_LISTING_CONTAMINATION"
+    elif guard_violations:
         result_enum = "BLOCKED_GUARD_VIOLATION"
     elif not policy["production_default_disabled"]:
         result_enum = "BLOCKED_PRODUCTION_DEFAULT_RISK"
