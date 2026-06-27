@@ -23,20 +23,20 @@ SOURCE_STATE_PATH = OFFICIAL_ROOT / "series_b_source_state_manifest.json"
 SCORING_AUDIT_PATH = SERIES_B_ROOT / "tools/series_b_official_scoring_audit.py"
 INTEGRATION_PATH = PRODUCTION_ROOT / "series_b_production_integration.json"
 CONTROLLED_CASE_LIST_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-controlled-evidence-rollup/outputs/controlled_evidence_case_list_28cases.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-controlled-evidence-rollup/outputs/controlled_evidence_case_list_29cases.json"
 )
 CONTROLLED_ROLLUP_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-controlled-evidence-rollup/outputs/series_b_28case_controlled_evidence_rollup.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-controlled-evidence-rollup/outputs/series_b_29case_controlled_evidence_rollup.json"
 )
 FINAL_CASE_MATRIX_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-controlled-evidence-rollup/outputs/series_b_28case_artifact_index.json"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-controlled-evidence-rollup/outputs/series_b_29case_artifact_index.json"
 )
 FINAL_SEAL_AUDIT_PATH = Path(
-    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-28case-controlled-evidence-rollup/outputs/series_b_28case_controlled_evidence_rollup_report.md"
+    "/Users/xqdwww/Documents/Codex/2026-06-25/travel-series-b-29case-controlled-evidence-rollup/outputs/series_b_29case_controlled_evidence_rollup_report.md"
 )
-EXPECTED_BASELINE = "55/60"
-EXPECTED_PREVIOUS_BASELINE = "50/60"
-EXPECTED_CONTROLLED_EVIDENCE_COUNT = 28
+EXPECTED_BASELINE = "56/60"
+EXPECTED_PREVIOUS_BASELINE = "55/60"
+EXPECTED_CONTROLLED_EVIDENCE_COUNT = 29
 REQUIRED_CAVEAT_CASES = [
     "obj_art_003",
     "obj_art_007",
@@ -178,7 +178,7 @@ def check_baseline() -> dict[str, Any]:
         raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", f"previous {EXPECTED_PREVIOUS_BASELINE} baseline trace must be retained")
     ledger_text = json.dumps(ledger, sort_keys=True)
     if ledger.get("prior_score") != EXPECTED_PREVIOUS_BASELINE or "31/60" not in ledger_text or "39/60" not in ledger_text:
-        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", "ledger must retain 31/60, 39/60, 44/60, and 50/60 baseline traces")
+        raise FullSanityError("FULL_SANITY_PRIOR_BASELINE_MISSING", "ledger must retain 31/60, 39/60, 44/60, 50/60, and 55/60 baseline traces")
     if current.get("controlled_evidence_count") != EXPECTED_CONTROLLED_EVIDENCE_COUNT:
         raise FullSanityError("FULL_SANITY_CONTROLLED_EVIDENCE_COUNT_INVALID", f"baseline must reference {EXPECTED_CONTROLLED_EVIDENCE_COUNT} controlled evidence cases")
     if current.get("production_default_integrated") is not False:

@@ -92,7 +92,7 @@ def test_dry_run_plan_only_works() -> None:
         assert status == 0, payload
         assert payload["result_enum"] == "SERIES_B_BACKGROUND_DOSSIER_DRY_RUN_PLAN_PASS"
         assert payload["production_target_id"] == "series_b_production_target_v1"
-        assert payload["official_baseline_current"] == "55/60"
+        assert payload["official_baseline_current"] == "56/60"
         assert (Path(tmp) / "series_b_background_dossier_plan.json").exists()
 
 
@@ -113,7 +113,7 @@ def test_execute_generates_background_dossier() -> None:
         assert status == 0, payload
         assert payload["result_enum"] == "SERIES_B_BACKGROUND_DOSSIER_EXECUTION_PASS"
         assert payload["production_target_loaded"] is True
-        assert payload["official_baseline_current"] == "55/60"
+        assert payload["official_baseline_current"] == "56/60"
         assert payload["guard"]["itinerary_listing_contamination"] is False
         dossier = Path(tmp) / "series_b_background_dossier.md"
         assert dossier.exists()

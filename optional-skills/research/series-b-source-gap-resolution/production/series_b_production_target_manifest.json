@@ -21,11 +21,12 @@
     "rel_space_028",
     "rel_space_033",
     "obj_art_012",
-    "cross_route_055"
+    "cross_route_055",
+    "hist_arch_022"
   ],
   "caveat_details": {
     "adv_trap_059": "policy-gated; not counted; must not be treated as resolved",
-    "controlled_evidence_count": 28,
+    "controlled_evidence_count": 29,
     "cross_route_053": [
       "approved with caveat",
       "Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence",
@@ -34,27 +35,13 @@
       "LP locator is not counted as formal axis evidence",
       "nature/geography/karst-hydrology source backing remains explicit"
     ],
-    "hist_arch_022": "handoff-ready after caozhi source-backed intake/formal-ready/handoff, but not controlled; excluded from the official 55/60 baseline",
+    "hist_arch_022": "controlled PASS and counted in the official 56/60 baseline with caozhi/materials_book caveats preserved",
     "newly_countable_case_caveats": {
-      "cross_route_055": [
-        "Ryukyu proxy/intermediary trade is source-backed; proxy is trade-intermediary sense, not technical/generic proxy.",
-        "Rejected/blocked sources excluded; art_architecture_book caveat preserved."
-      ],
-      "nat_eco_045": [
-        "Glacial geomorphology terms are source-backed; cirque/tarn/plucking/bergschrund mechanism grounding is preserved.",
-        "Travel/listing sources must not be overclaimed as conceptual evidence."
-      ],
-      "obj_art_012": [
-        "Yingzao Fashi/module/cai/grading are source-backed.",
-        "Professional axes are caveated; ArchDaily is supplementary unless conceptual coverage is source-backed."
-      ],
-      "rel_space_028": [
-        "Wikipedia/context-heavy package accepted with caveat.",
-        "Chaitya/stupa/circumambulation/apse support religious-spatial architecture; no professional book overclaim."
-      ],
-      "rel_space_033": [
-        "Wikipedia/context-heavy package accepted with caveat.",
-        "Cloister/scriptorium/refectory/monastery must remain source-backed; no generic monastery filler or religion/history book overclaim."
+      "hist_arch_022": [
+        "caozhi/漕制/漕运 accepted as source-backed tribute grain transport / caoyun context.",
+        "Grand Canal / lock / hydraulic coverage passed controlled review.",
+        "materials_book axis was not acquired and must remain caveated.",
+        "Rejected HK Museum short/navigation page remains excluded."
       ]
     },
     "official_baseline_caveats_by_case": {
@@ -92,6 +79,18 @@
         "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
         "delta_vs_frozen": "FAIL_TO_CANDIDATE_PASS",
         "human_review_acceptance": "ACCEPTED_BY_17CASE_HUMAN_REVIEW_FOR_OFFICIAL_BASELINE_WRITE"
+      },
+      "hist_arch_022": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "caveats": [
+          "caozhi/漕制/漕运 accepted as source-backed tribute grain transport / caoyun context.",
+          "Grand Canal / lock / hydraulic coverage passed controlled review.",
+          "materials_book axis was not acquired and must remain caveated.",
+          "Rejected HK Museum short/navigation page remains excluded."
+        ],
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "HIST_ARCH_022_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
       },
       "hist_arch_024": {
         "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
@@ -271,11 +270,11 @@
         "human_review_acceptance": "REL_SPACE_036_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
       }
     },
-    "remaining_failed_or_deferred_cases": "remaining 5 cases are excluded from the 55/60 official baseline",
-    "score_classification": "55/60 is a human-reviewed official baseline, not a raw candidate-only score."
+    "remaining_failed_or_deferred_cases": "remaining 4 cases are excluded from the 56/60 official baseline",
+    "score_classification": "56/60 is a human-reviewed official baseline, not a raw candidate-only score."
   },
   "classification": "EXPLICIT_NON_DEFAULT_PRODUCTION_TARGET_LAYER",
-  "controlled_evidence_count": 28,
+  "controlled_evidence_count": 29,
   "description": "Explicit, non-default Series B production target layer for future separately authorized integration planning and smoke testing.",
   "explicit_production_integration_enabled": true,
   "full_series_b_required_before_release": true,
@@ -291,11 +290,7 @@
   "integration_manifest_file": "series_b_production_integration.json",
   "layer_id": "series_b_production_target_v1",
   "newly_countable_cases": [
-    "nat_eco_045",
-    "rel_space_028",
-    "rel_space_033",
-    "obj_art_012",
-    "cross_route_055"
+    "hist_arch_022"
   ],
   "no_default_integration_attestation": {
     "explicit_production_integration_performed": true,
@@ -307,21 +302,20 @@
     "tag_created": false
   },
   "official_baseline_classification": "human_reviewed_official_baseline_not_raw_candidate_only",
-  "official_baseline_commit": "1979730917898d983155a5e2ba827f34fe2b2d7a",
+  "official_baseline_commit": "45d91f96bec3ec64c7c8e47ef3aeb04691b8f3bf",
   "official_baseline_file": "../official/series_b_official_baseline_current.json",
   "official_baseline_ledger_file": "../official/series_b_official_baseline_ledger.json",
-  "official_baseline_ref": "55/60",
-  "official_baseline_tag": "travel-series-b-official-55of60-human-reviewed-2026-06-25",
+  "official_baseline_ref": "56/60",
+  "official_baseline_tag": "travel-series-b-official-56of60-human-reviewed-2026-06-25",
   "official_baseline_write_enabled": false,
   "official_dataset_file": "../official/series_b_official_60case_dataset.json",
-  "previous_official_baseline_ref": "50/60",
+  "previous_official_baseline_ref": "55/60",
   "production_default_enabled": false,
   "production_default_scope": "explicit_series_b_target_only",
   "production_release_ready": false,
   "push_tag_required_separate_authorization": true,
   "release_requires_separate_authorization": true,
   "remaining_failed_or_deferred_cases": [
-    "hist_arch_022",
     "obj_art_008",
     "rel_space_034",
     "rel_space_035",
