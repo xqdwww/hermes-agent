@@ -311,6 +311,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=('wiki_or_zim',),
     ),
 
+    "rel_space_033": CaseConfig(
+        case_id="rel_space_033",
+        expected_formal_ready_decision="REL_SPACE_033_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="include_for_formal_review",
+        required_terms=('cloister', 'scriptorium', 'refectory', 'monastery'),
+        required_sections=('spatial_structure', 'historical_layers', 'theme_tracks'),
+        required_axes=('wiki_or_zim',),
+    ),
+
 }
 
 
