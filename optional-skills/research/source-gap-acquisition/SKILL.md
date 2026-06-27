@@ -96,6 +96,19 @@ Proceed to Hermes acquisition only when:
 
 Do not proceed when the case requires human policy confirmation first, uses ambiguous aliases without policy, or would require booking/listing pages as concept evidence.
 
+## Alias And Caveated Confirmation Gate
+
+For alias-sensitive cases, resolve the alias before acquisition. Record one of these decisions before Hermes is asked to acquire or classify sources:
+
+- `ALIAS_CONFIRMED`
+- `ALIAS_CONFIRMED_WITH_CAVEAT`
+- `ALIAS_PARTIAL_NEEDS_HUMAN_CONFIRMATION`
+- `ALIAS_REJECTED_OR_WRONG_CONTEXT`
+
+If the decision is `ALIAS_CONFIRMED_WITH_CAVEAT`, keep the caveat attached through source validation, Codex intake, formal-ready review, controlled handoff, candidate review, and any later baseline/runtime report. Do not convert a caveated alias into unconstrained certainty. Reject wrong-object, wrong-period, wrong-culture, wrong-domain, or generic decorative-screen evidence when the prompt requires a more specific object, art, architecture, or cultural context.
+
+Stop ordinary acquisition when the alias is partial, uncertain, or policy-dependent and no human confirmation exists.
+
 ## Usable Source Criteria
 
 A usable source must include:
@@ -128,6 +141,9 @@ For malformed, adversarial, typo, alias, trap, booking, ticket, or listing-overf
 3. State what source types are admissible, supplementary, locator-only, or rejected.
 4. Define pass, partial, blocked, invalid-source, and overclaim conditions.
 5. Stop ordinary acquisition if the policy is absent.
+
+
+A later PASS for a policy-constrained case remains caveated. Malformed/trap tokens must not be promoted into fake entities, and booking, ticket, listing, map, price-list, or locator-only evidence must not become conceptual evidence unless a policy explicitly permits locator-only use.
 
 ## Output Directory Convention
 

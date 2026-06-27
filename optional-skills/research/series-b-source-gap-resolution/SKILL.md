@@ -25,7 +25,15 @@ metadata:
 
 This hidden draft skill is a Hermes shell for Series B hard-mode source gaps. It tells Hermes to treat these requests as gated, case-scoped source evidence workflows, not as ordinary Codex code repair tasks.
 
-The official frozen Series B score remains around `31/60`. The passing examples below are case-scoped approved-manifest harness passes only; they are not production-default improvements, and the production builder does not automatically read these manifests.
+Historical note: this skill began when the official frozen Series B score was around `31/60`. Do not treat that historical score as current state. Current tasks may have later official baselines, including a post-60 state; always read the repo's official baseline and runtime metadata before acting.
+
+Passing examples below are case-scoped approved-manifest harness passes only unless a separate candidate rerun, human review, official baseline write, runtime metadata update, smoke, and backup have already occurred. They are not production-default improvements, and the production builder does not automatically read these manifests.
+
+## Post-60 Safety Boundary
+
+If the project is already at a human-reviewed `60/60` official baseline with runtime metadata aligned, this skill is for audit, documentation, regression-test, or safety-rule hardening only unless the user explicitly opens a new validation scope. Do not chase more cases, run controlled execution, run candidate reruns, update official baseline files, update production metadata, push, tag-push, or release from this skill.
+
+A final `60/60` result remains caveated. Preserve alias caveats, policy-constrained malformed-token caveats, anti-overclaim caveats, source-backed-body requirements, rejected-source exclusion, and candidate-only vs official-baseline separation in all reports.
 
 ## Trigger Conditions
 
@@ -227,4 +235,4 @@ These are compact patterns, not hard-coded repair rules.
 | `obj_art_010` | Two-source multi-axis | `kento/kentō` | `Japanese Woodblock Prints`; `Edo Culture` | `art_architecture_book`; `history_book` | Two-source controlled touched eval PASS. |
 | `hist_arch_024` | Disambiguation / false-positive rejection | `fauces` | `Herculaneum: Past and Future` | `archaeology_book` | Architectural fauces controlled touched eval PASS. |
 
-Remember: these three passing cases remain case-scoped harness evidence. They do not change the official frozen Series B score, and they do not prove the production builder reads approved manifests.
+Remember: these three passing cases are historical case-scoped harness evidence. They do not by themselves change any official Series B score, and they do not prove the production builder reads approved manifests. Official movement requires separate candidate rerun, human review, baseline write, runtime metadata alignment, smoke, and backup with caveats preserved.

@@ -9,6 +9,12 @@ description: Use when Travel / Series B or a comparable evaluation track needs a
 
 Use this skill to run a safe, staged score-improvement cycle for Series B-style evaluation work. The skill defines sequencing, ownership, report contracts, and stop conditions. It does not itself authorize source acquisition, controlled execution, baseline writes, runtime metadata updates, pushes, or releases.
 
+## Post-60 Closure Rule
+
+When a track has reached a human-reviewed `60/60` official baseline with caveats and runtime metadata is aligned, stop case chasing by default. Future work should be release-readiness planning, skill hardening, documentation, regression-test cleanup, or explicitly scoped refactor only. Do not start new source acquisition, intake, formal-ready review, controlled execution, candidate rerun, or baseline movement unless the user opens a new validation scope.
+
+A `60/60` baseline must be described as human-reviewed with caveats, not as caveat-free absolute success. Preserve the final caveat registry in release notes, runtime docs, and backup manifests.
+
 ## When To Use
 
 Use this skill when a failed/deferred case queue needs disciplined progression from evidence gaps to candidate-score review, or when the user asks to plan, execute, audit, or document a Series B score-improvement batch.
@@ -67,6 +73,8 @@ After a controlled evidence rollup, run a no-write candidate rerun or candidate 
 
 Human review is mandatory before baseline writes. Review every delta case for source-backed body, caveat preservation, rejected source exclusion, axis overclaim, contamination, artifact completeness, and whether it should count officially. Allowed decisions include approved, approved with caveat, needs more evidence, and rejected.
 
+If human review is partial, inconclusive, or scoped to only some delta cases, narrow the baseline-write target to the accepted scope or stop. Do not promote candidate-only deltas that were outside the review scope; require a focused human-review task before counting them officially.
+
 ## Official Baseline Write Branch
 
 Baseline write is a separate authorized task. It may modify only official current/ledger files unless the user explicitly widens scope. It must preserve caveats, list newly countable cases, list remaining failed/deferred cases, validate JSON, pass scope guard, commit baseline files only, and never update runtime metadata in the same commit unless separately authorized.
@@ -78,6 +86,8 @@ Runtime or production metadata updates happen only after the baseline commit exi
 ## Smoke / Sanity / Backup Branch
 
 Before intake, vectorization, or bundle work, check disk space. For release closure, run non-destructive tests and smoke, create local bundle, verify bundle, write reports, and use local-only fallback if external push is blocked. Never push origin, force-push, or push all tags.
+
+Release planning is not release execution. A release plan may list what would be pushed if authorized, what must not be pushed, rollback from bundle, and exact future authorization wording. It must not push branches, push tags, create remote releases, or contact origin without explicit authorization.
 
 ## Remaining Queue Planning Branch
 
