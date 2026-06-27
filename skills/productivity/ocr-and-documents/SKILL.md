@@ -1,7 +1,7 @@
 ---
 name: ocr-and-documents
 description: "Extract text from PDFs/scans (pymupdf, marker-pdf)."
-version: 2.3.0
+version: 2.4.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -16,6 +16,29 @@ metadata:
 For DOCX: use `python-docx` (parses actual document structure, far better than OCR).
 For PPTX: see the `powerpoint` skill (uses `python-pptx` with full slide/notes support).
 This skill covers **PDFs and scanned documents**.
+
+## Validation Claim Safety
+
+Extraction success is not full document validity.
+
+- Parser success is not full PDF validity. A PyMuPDF pass means parser-readable, not necessarily complete, renderable, or user-ready.
+- PyMuPDF pass does not imply macOS Preview pass.
+- EOF/signature checks are separate from parser checks and render checks.
+- Target app compatibility must be checked before claiming Preview, QuickLook, or target-app compatibility.
+- Batch aggregate pass requires every file to pass every required check.
+- Unknown or missing checks must be reported as unknown/warning, not pass.
+- Do not claim "PDF fully valid", "all valid", or "0 corrupted" unless binary signature, required parser, required render, and required target-app checks passed for every file in scope.
+- Report per-file failures and unknowns separately from aggregate counts.
+- Use a passive observer plan before validation-heavy claims: inventory files, list required checks, keep command previews non-executing, and set the claim ceiling to parser-readable until stronger checks pass.
+- Full validity requires required checks; parser-only, metadata-only, or signature-only checks must not be promoted to full validity.
+- Preview compatibility requires a Preview/QuickLook-compatible check. `qlmanage` preview mode (`-p`), `open`, Preview GUI launches, and other GUI-opening commands are forbidden by default.
+- `qlmanage -t` thumbnail validation is opt-in only and must write only to a safe temp/output directory, never next to the user PDF.
+- Missing PDF tools such as `qpdf`, `pdfinfo`, `mdls`, or `qlmanage` produce unknown/skipped checks, not pass.
+- Never claim "0 corrupted" for a batch unless all required checks ran and passed per file.
+- Do not run OCR unless explicitly asked and scoped to the supplied files.
+- When passive runtime ledger events exist, document validation claim level must come from those validation events; do not reconstruct "all valid" or target-app compatibility from memory.
+- When runner/report context is converted into passive ledger events, missing file inventory or validation checks must remain unknown/warning until explicit evidence is supplied.
+- At supported report boundaries, passive context may be derived automatically in debug/warn modes; default/off mode remains silent and ledger warnings are advisory until enforcement is explicitly enabled.
 
 ## Step 1: Remote URL Available?
 

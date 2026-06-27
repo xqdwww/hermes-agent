@@ -67,6 +67,25 @@ process(action="submit", session_id="<id>", data="yes")
 process(action="kill", session_id="<id>")
 ```
 
+### Long-Run Watchdog Safety
+
+- Keep waiting, running, partial, blocked, failed, and completed as separate states.
+- Timeout with partial output is partial, not success.
+- Repeated identical failures should block or inspect instead of blind retry.
+- Auth, session, quota, permission, and path errors are blocked states until the owner resolves them.
+- Use a per-stage timeout policy for Codex, GPT Bridge, AGY, browser GUI, batch download, and generic subprocess work; do not use one universal short timeout.
+- Track phase, elapsed time, last output time, retry count, error signature, and next safe action for long tasks.
+- A running or waiting task must not be serialized as PASS.
+- If a branch push fails because a remote is ahead or diverged, block and inspect; do not force push by default.
+- Permission denied on `origin` is not authorization to fallback to `fork`; ask for explicit remote authorization.
+- Use a passive watchdog observer plan before long-run closure claims: collect phase, started_at, last_output_at, elapsed, silence_seconds, process_status, retry_count, error_signature, and next_safe_action without starting, killing, or retrying processes.
+- When a passive runtime ledger exists, use it as the source of truth for final status claims; record explicit phase status, verification freshness, remote write/tag verification, document claim level, and long-run process state as separate events.
+- Derived passive runtime events from runner/report context are advisory until hard enforcement is explicitly enabled; missing context must become unknown/warning, not success.
+- At supported report boundaries, passive context may be derived automatically in debug/warn modes while default/off mode stays silent.
+- The opt-in long-run process observer requires an explicit PID, bounded log path, or supplied status context before producing a dashboard.
+- The observer is read-only: it does not start processes, retry jobs, or perform process control by default.
+- Observer dashboards should show known fields, unknown fields, warning codes, and the next safe action rather than collapsing unknown/running/partial states into completion.
+
 ## Key Flags
 
 | Flag | Effect |
@@ -74,25 +93,6 @@ process(action="kill", session_id="<id>")
 | `exec "prompt"` | One-shot execution, exits when done |
 | `--full-auto` | Sandboxed but auto-approves file changes in workspace |
 | `--yolo` | No sandbox, no approvals (fastest, most dangerous) |
-| `--sandbox danger-full-access` | No Codex sandbox; useful when the host service context breaks bubblewrap |
-
-## Hermes Gateway Caveat
-
-When invoking the Codex CLI from a Hermes gateway/service context (for example,
-Telegram-driven agent sessions), Codex `workspace-write` sandboxing may fail even
-when the same command works in the user's interactive shell. A typical symptom is
-bubblewrap/user-namespace errors such as `setting up uid map: Permission denied`
-or `loopback: Failed RTM_NEWADDR: Operation not permitted`.
-
-In that context, prefer:
-
-```
-codex exec --sandbox danger-full-access "<task>"
-```
-
-Use process boundaries as the safety layer instead: explicit `workdir`, clean git
-status before launch, narrow task prompts, `git diff` review, targeted tests, and
-human/agent confirmation before committing broad changes.
 
 ## PR Reviews
 
