@@ -58,7 +58,7 @@ FORBIDDEN_TEXT_PATTERNS = {
         "hist_arch_020", "obj_art_002", "rel_space_031", "nat_eco_042", "cross_route_053",
         "nat_eco_046", "nat_eco_043", "obj_art_005", "obj_art_011", "hist_arch_025", "rel_space_036",
         "adv_trap_059",
-        "nat_eco_045", "rel_space_028", "rel_space_033", "obj_art_012", "cross_route_055",
+        "nat_eco_045", "rel_space_028", "rel_space_033", "obj_art_012", "cross_route_055", "hist_arch_022",
     ],
     "generated_or_mock": [
         "dummy_test_artifact_only",
@@ -338,6 +338,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=('art_architecture_context_supplementary', 'history_book', 'wiki_or_zim'),
     ),
 
+    "hist_arch_022": CaseConfig(
+        case_id="hist_arch_022",
+        expected_formal_ready_decision="HIST_ARCH_022_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="include_for_formal_review",
+        required_terms=("Grand Canal", "caozhi", "lock", "hydraulic"),
+        required_sections=("spatial_structure", "historical_layers", "regional_relations", "theme_tracks"),
+        required_axes=("history_book", "qyer_or_china_local", "wiki_or_zim"),
+    ),
+
 }
 
 
@@ -408,10 +417,18 @@ def check_case_text(text: str, *, case_id: str) -> list[str]:
         ]
         if _contains_any(text, active_patterns):
             violations.append(label)
-    if "readme counted as evidence" in text.lower():
+    lowered = text.lower()
+    if "readme counted as evidence" in lowered:
         violations.append("readme_or_title_only")
     if case_id not in text:
         violations.append("case_id_missing")
+    if case_id == "hist_arch_022":
+        has_chinese_caozhi = "漕制" in text or "漕运" in text
+        has_transport_context = "tribute grain" in lowered or "caoyun" in lowered or "grain transport" in lowered
+        if "caozhi" not in lowered or not has_chinese_caozhi or not has_transport_context:
+            violations.append("caozhi_disambiguation_missing")
+        if "materials_book" not in lowered or "not overclaimed" not in lowered:
+            violations.append("materials_book_caveat_missing")
     return sorted(set(violations))
 
 
