@@ -329,6 +329,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=('art_architecture_context_supplementary', 'wiki_or_zim'),
     ),
 
+    "cross_route_055": CaseConfig(
+        case_id="cross_route_055",
+        expected_formal_ready_decision="CROSS_ROUTE_055_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="include_for_formal_review",
+        required_terms=('Ryukyu', 'proxy', 'gusuku', 'maritime'),
+        required_sections=('spatial_structure', 'historical_layers', 'regional_relations', 'theme_tracks'),
+        required_axes=('art_architecture_context_supplementary', 'history_book', 'wiki_or_zim'),
+    ),
+
 }
 
 
