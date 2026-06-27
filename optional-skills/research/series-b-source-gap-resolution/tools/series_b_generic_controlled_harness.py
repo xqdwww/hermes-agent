@@ -58,6 +58,7 @@ FORBIDDEN_TEXT_PATTERNS = {
         "hist_arch_020", "obj_art_002", "rel_space_031", "nat_eco_042", "cross_route_053",
         "nat_eco_046", "nat_eco_043", "obj_art_005", "obj_art_011", "hist_arch_025", "rel_space_036",
         "adv_trap_059",
+        "nat_eco_045", "rel_space_028", "rel_space_033", "obj_art_012", "cross_route_055",
     ],
     "generated_or_mock": [
         "dummy_test_artifact_only",
@@ -292,6 +293,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=("art_architecture_book", "local_place", "religion_book"),
     ),
 
+    "nat_eco_045": CaseConfig(
+        case_id="nat_eco_045",
+        expected_formal_ready_decision="NAT_ECO_045_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="include_for_formal_review",
+        required_terms=('cirque', 'tarn', 'plucking', 'bergschrund'),
+        required_sections=('spatial_structure', 'nature_environment', 'theme_tracks'),
+        required_axes=('nature_book', 'external_book', 'wiki_or_zim'),
+    ),
+
 }
 
 
@@ -397,7 +407,8 @@ def validate_case_chunks(chunks: list[dict[str, Any]], *, case_id: str) -> dict[
             violations.append(f"{chunk_id}:source_hash_missing")
         if not chunk.get("section_locator"):
             violations.append(f"{chunk_id}:section_locator_missing")
-        if int(chunk.get("char_count") or 0) <= 0:
+        char_count = int(chunk.get("char_count") or len(str(chunk.get("text_excerpt") or "")))
+        if char_count <= 0:
             violations.append(f"{chunk_id}:empty_chunk")
         terms.update(str(term) for term in chunk.get("supports_terms", []))
         sections.update(str(section) for section in chunk.get("supports_sections", []))
