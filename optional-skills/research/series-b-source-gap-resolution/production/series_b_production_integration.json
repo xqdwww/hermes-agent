@@ -22,11 +22,13 @@
     "rel_space_033",
     "obj_art_012",
     "cross_route_055",
-    "hist_arch_022"
+    "hist_arch_022",
+    "rel_space_034",
+    "rel_space_035"
   ],
   "caveat_details": {
     "adv_trap_059": "policy-gated; not counted; must not be treated as resolved",
-    "controlled_evidence_count": 29,
+    "controlled_evidence_count": 31,
     "cross_route_053": [
       "approved with caveat",
       "Wikipedia/ZIM context evidence must not be overclaimed as dedicated book/PDF evidence",
@@ -37,11 +39,15 @@
     ],
     "hist_arch_022": "controlled PASS and counted in the official 56/60 baseline with caozhi/materials_book caveats preserved",
     "newly_countable_case_caveats": {
-      "hist_arch_022": [
-        "caozhi/漕制/漕运 accepted as source-backed tribute grain transport / caoyun context.",
-        "Grand Canal / lock / hydraulic coverage passed controlled review.",
-        "materials_book axis was not acquired and must remain caveated.",
-        "Rejected HK Museum short/navigation page remains excluded."
+      "rel_space_034": [
+        "Astronomical alignment is not broadly proven; only orientation/cardinal planning is source-backed.",
+        "Wikipedia source is context-only and must not overrule Met/Smarthistory evidence.",
+        "No unsupported astronomical program claim is promoted."
+      ],
+      "rel_space_035": [
+        "Acoustics remains unsupported/caveated.",
+        "Internet Archive book record is access-restricted; use as professional source target/metadata, not extracted book-body evidence.",
+        "Wikipedia/Le Monde are context/supplementary and must not be overclaimed as professional book axes."
       ]
     },
     "official_baseline_caveats_by_case": {
@@ -268,20 +274,45 @@
         "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
         "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
         "human_review_acceptance": "REL_SPACE_036_HUMAN_REVIEW_APPROVED_WITH_CAVEAT"
+      },
+      "rel_space_034": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "REL_SPACE_034_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+        "caveats": [
+          "Astronomical alignment is not broadly proven; only orientation/cardinal planning is source-backed.",
+          "Wikipedia source is context-only and must not overrule Met/Smarthistory evidence.",
+          "No unsupported astronomical program claim is promoted."
+        ]
+      },
+      "rel_space_035": {
+        "candidate_status": "CANDIDATE_CONTROLLED_PASS_DELTA",
+        "controlled_case_result": "PASS_CONTROLLED_REGRESSION",
+        "delta_vs_current_official": "FAIL_TO_OFFICIAL_PASS",
+        "human_review_acceptance": "REL_SPACE_035_HUMAN_REVIEW_APPROVED_WITH_CAVEAT",
+        "caveats": [
+          "Acoustics remains unsupported/caveated.",
+          "Internet Archive book record is access-restricted; use as professional source target/metadata, not extracted book-body evidence.",
+          "Wikipedia/Le Monde are context/supplementary and must not be overclaimed as professional book axes."
+        ]
       }
     },
-    "remaining_failed_or_deferred_cases": "remaining 4 cases are excluded from the 56/60 official baseline",
-    "score_classification": "56/60 is a human-reviewed official baseline, not a raw candidate-only score."
+    "remaining_failed_or_deferred_cases": "remaining 2 cases are excluded from the 58/60 official baseline",
+    "score_classification": "58/60 is a human-reviewed official baseline, not a raw candidate-only score.",
+    "rel_space_034": "controlled PASS and counted in the official 58/60 baseline with orientation/cardinal alignment caveat preserved",
+    "rel_space_035": "controlled PASS and counted in the official 58/60 baseline with acoustics/professional-book caveats preserved"
   },
   "classification": "EXPLICIT_SERIES_B_PRODUCTION_INTEGRATION_PATH",
-  "controlled_evidence_count": 29,
+  "controlled_evidence_count": 31,
   "explicit_production_integration_enabled": true,
   "full_series_b_required_before_release": true,
   "full_series_b_run_performed": false,
   "global_default_enabled": false,
   "integration_id": "series_b_explicit_production_integration_v1",
   "newly_countable_cases": [
-    "hist_arch_022"
+    "rel_space_034",
+    "rel_space_035"
   ],
   "notes": [
     "This integration path is explicit to Series B only.",
@@ -290,12 +321,12 @@
     "Push, tag, and release remain separately unauthorized."
   ],
   "official_baseline_classification": "human_reviewed_official_baseline_not_raw_candidate_only",
-  "official_baseline_commit": "45d91f96bec3ec64c7c8e47ef3aeb04691b8f3bf",
+  "official_baseline_commit": "e3c75ea4d00809b690252fba2b443ab04a29a55d",
   "official_baseline_file": "../official/series_b_official_baseline_current.json",
-  "official_baseline_ref": "56/60",
-  "official_baseline_tag": "travel-series-b-official-56of60-human-reviewed-2026-06-25",
+  "official_baseline_ref": "58/60",
+  "official_baseline_tag": "travel-series-b-official-58of60-human-reviewed-2026-06-25",
   "official_baseline_write_enabled": false,
-  "previous_official_baseline_ref": "55/60",
+  "previous_official_baseline_ref": "56/60",
   "production_default_enabled": false,
   "production_default_manifest_modified": false,
   "production_default_scope": "explicit_series_b_target_only",
@@ -305,8 +336,6 @@
   "release_ready": false,
   "remaining_failed_or_deferred_cases": [
     "obj_art_008",
-    "rel_space_034",
-    "rel_space_035",
     "adv_trap_059"
   ],
   "rollback_files": [

@@ -48,13 +48,13 @@ def test_write_targets_empty_and_source_vector_writes_disabled() -> None:
     assert validation["official_baseline_write_enabled"] is False
 
 
-def test_official_baseline_56_and_prior_traces_retained() -> None:
+def test_official_baseline_58_and_prior_traces_retained() -> None:
     validation = validate_production_target_manifest(DEFAULT_TARGET_MANIFEST)
     baseline = json.loads(Path(validation["resolved_paths"]["official_baseline_file"]).read_text(encoding="utf-8"))
-    assert baseline["official_score"] == "56/60"
-    assert baseline["prior_score"] == "55/60"
+    assert baseline["official_score"] == "58/60"
+    assert baseline["prior_score"] == "56/60"
     assert baseline["production_default_integrated"] is False
-    assert baseline["controlled_evidence_count"] == 29
+    assert baseline["controlled_evidence_count"] == 31
 
 
 def test_caveat_cases_preserved() -> None:
@@ -117,7 +117,7 @@ def test_readiness_checker_reports_integrated_not_released_state() -> None:
 def run_tests() -> None:
     test_target_layer_loads_explicitly_and_is_integrated_without_global_default()
     test_write_targets_empty_and_source_vector_writes_disabled()
-    test_official_baseline_56_and_prior_traces_retained()
+    test_official_baseline_58_and_prior_traces_retained()
     test_caveat_cases_preserved()
     test_loader_rejects_malformed_global_default_target()
     test_integration_manifest_rejects_write_targets()
