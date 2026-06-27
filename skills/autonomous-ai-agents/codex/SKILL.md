@@ -86,6 +86,14 @@ process(action="kill", session_id="<id>")
 - The observer is read-only: it does not start processes, retry jobs, or perform process control by default.
 - Observer dashboards should show known fields, unknown fields, warning codes, and the next safe action rather than collapsing unknown/running/partial states into completion.
 
+### Codex Handoff and Permission Boundaries
+
+- Before giving a Codex prompt, summarize the current situation and next safe action so the prompt starts from the real state, not stale context.
+- Classify whether the user wants local/fork improvement or upstream contribution before starting PR, CI, or maintainer-policy work.
+- If the user goal is local/fork improvement, stop after local/fork validation and do not continue long upstream PR or contributor-policy workflows.
+- Stop at permission boundary: origin write, upstream mergeability, contributor policy, AUTHOR_MAP, branch protection, and maintainer approval are not implementation tasks unless explicitly authorized.
+- Do not turn a successful fork/local implementation into an upstream contribution workflow by inference.
+
 ## Key Flags
 
 | Flag | Effect |

@@ -39,6 +39,32 @@ Before pushing a branch or tag, prove the remote target instead of inferring it.
 - If using GitHub SSH over port 443, the SSH endpoint is `ssh.github.com:443`. `github.com:443` is not the GitHub SSH endpoint.
 - Avoid `HostName` alias tricks for push retries unless host key handling is already verified. Prefer a direct URL such as `ssh://git@ssh.github.com:443/OWNER/REPO.git` when appropriate and authorized.
 
+## Self-Use vs Upstream PR Decision Gate
+
+Before any remote, PR, or maintainer-policy workflow, classify the user goal:
+
+- `self_use_local`: the user wants their own local checkout or fork improved.
+- `fork_sync`: the user wants a validated branch published to a proven fork remote.
+- `upstream_contribution`: the user explicitly wants an upstream PR.
+- `maintainer_policy`: the task has reached contributor policy, AUTHOR_MAP, branch protection, required review, required checks, or maintainer approval.
+
+Rules:
+
+- Upstream contribution must be explicit, not inferred.
+- If the goal is `self_use_local`, stop after the local/fork branch is validated and pushed; do not create an upstream PR and do not chase contributor policy.
+- If the goal is `fork_sync`, push only to the proven fork remote and do not push `origin` unless explicitly authorized.
+- If the goal is `upstream_contribution`, run target discovery before PR creation, verify target branch prerequisites, verify diff scope, and create the PR only after explicit authorization.
+- Origin read access is not origin write access.
+- Fork push success is not upstream mergeability.
+- Do not interpret read access, CI rerun success, or local test success as mergeability.
+- If the target base lacks prerequisites, do not drag unrelated history into the PR; stop and ask whether a prerequisite baseline is still wanted.
+- Do not retarget stacked passive PRs to upstream main until prerequisites are merged or the target branch already contains them.
+- Do not keep retrying stale merge refs; resync the stack only if upstream contribution remains the explicit goal.
+- Contributor policy, AUTHOR_MAP, base branch policy, branch protection, and maintainer approval are maintainer boundaries: stop, produce a maintainer action note, and do not modify unrelated files to bypass policy.
+- Do not fold AUTHOR_MAP or contributor-policy fixes into feature PRs unless that policy work is explicitly scoped as a separate change.
+- If base branch policy blocks merge, stop and ask for maintainer action instead of looping.
+- No force push, admin merge, or branch-protection bypass by default.
+
 ### Setup
 
 ```bash
