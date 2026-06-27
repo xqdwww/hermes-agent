@@ -40,6 +40,7 @@ from tools.passive_intelligence_guard import (
     build_passive_runtime_ledger,
     check_final_report_consistency,
     classify_action_permission,
+    should_block_passive_output,
     classify_ledger_completion_state,
     classify_document_validation_requirements,
     classify_long_run_event,
@@ -796,6 +797,13 @@ def _attach_passive_guard_metadata(
     )
     if runtime_metadata:
         payload["passive_intelligence_guard"]["runtime_ledger"] = runtime_metadata
+        hard_block_decision = runtime_metadata.get("hard_block_decision")
+        if isinstance(hard_block_decision, dict) and hard_block_decision.get("should_block"):
+            payload["status"] = "blocked"
+            payload["pipeline_status"] = PIPELINE_BLOCKED
+            payload["blocked_stage"] = "passive_intelligence_guard"
+            payload["blocked_reason"] = str(hard_block_decision.get("blocked_reason") or "passive_hard_block")
+            payload["message"] = "Passive guard blocked a deterministic ledger/report contradiction in explicit block_destructive mode."
 
 
 def _passive_guard_pre_action_block(
@@ -986,17 +994,19 @@ def _build_passive_runtime_metadata(
         else coerce_passive_runtime_ledger(runtime_ledger, task_id=task_id, mode=guard_mode)
     )
     decision = classify_ledger_completion_state(ledger)
-    warnings = ledger_to_final_report_warnings(ledger, report_text) if guard_mode == "warn" else []
+    warnings = ledger_to_final_report_warnings(ledger, report_text) if guard_mode in {"warn", "block_destructive"} else []
+    hard_block_decision = should_block_passive_output(ledger, warnings, guard_mode)
     return {
         "summary": summarize_passive_runtime_ledger(ledger),
         "ledger": asdict(ledger),
         "decision": asdict(decision),
         "warnings": warnings,
+        "hard_block_decision": asdict(hard_block_decision),
         "supplied_event_count": len(runtime_events or ()),
         "derived_event_count": len(derived_events),
         "merged_event_count": len(merged_events),
-        "warning_only": True,
-        "blocks_expanded": False,
+        "warning_only": not hard_block_decision.should_block,
+        "blocks_expanded": bool(hard_block_decision.should_block),
     }
 
 

@@ -1889,3 +1889,307 @@ def test_block_destructive_mode_does_not_expand_to_warning_only_ledger_findings(
 
     assert result["status"] == "ok"
     assert result["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
+
+
+def _phase3_boundary_result(
+    *,
+    query: str = "Run DECISION StageRecord",
+    action: str = "contract",
+    guard_mode: str = "block_destructive",
+    passive_context: dict | None = None,
+    passive_runtime_events: list[dict] | None = None,
+    passive_guard_report_text: str | None = None,
+    passive_guard_action: dict | None = None,
+) -> dict:
+    return json.loads(
+        task_engine_runner(
+            query=query,
+            mode="DECISION",
+            action=action,
+            passive_guard_mode=guard_mode,
+            passive_context=passive_context,
+            passive_runtime_events=passive_runtime_events,
+            passive_guard_report_text=passive_guard_report_text,
+            passive_guard_action=passive_guard_action,
+        )
+    )
+
+
+def _phase3_block_codes(result: dict) -> set[str]:
+    runtime = result.get("passive_intelligence_guard", {}).get("runtime_ledger", {})
+    decision = runtime.get("hard_block_decision", {})
+    return {item["code"] for item in decision.get("hard_blocks", [])}
+
+
+def test_phase3_off_mode_does_not_block_selected_contradictions():
+    result = _phase3_boundary_result(
+        guard_mode="off",
+        passive_context={"runner": {"files_written": ["tools/source.py"]}},
+    )
+
+    assert result["status"] == "ok"
+    assert "passive_intelligence_guard" not in result
+
+
+def test_phase3_debug_mode_does_not_block_selected_contradictions():
+    result = _phase3_boundary_result(
+        guard_mode="debug",
+        passive_context={"runner": {"files_written": ["tools/source.py"]}},
+    )
+
+    assert result["status"] == "ok"
+    assert result["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
+
+
+def test_phase3_warn_mode_does_not_block_selected_contradictions():
+    result = _phase3_boundary_result(
+        guard_mode="warn",
+        passive_context={"runner": {"files_written": ["tools/source.py"]}},
+    )
+
+    assert result["status"] == "ok"
+    assert result["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
+
+
+def test_phase3_block_mode_blocks_selected_contradictions():
+    result = _phase3_boundary_result(passive_context={"runner": {"files_written": ["tools/source.py"]}})
+
+    assert result["status"] == "blocked"
+    assert "REPORT_ONLY_NON_REPORT_WRITE" in _phase3_block_codes(result)
+
+
+def test_phase3_block_mode_does_not_block_unselected_warnings():
+    result = _phase3_boundary_result(query="Validate all PDFs before reporting status.")
+
+    assert result["status"] == "ok"
+    assert result["passive_intelligence_guard"]["runtime_ledger"]["blocks_expanded"] is False
+
+
+def test_phase3_blocks_report_only_non_report_write():
+    result = _phase3_boundary_result(passive_context={"runner": {"files_written": ["tools/source.py"]}})
+
+    assert "REPORT_ONLY_NON_REPORT_WRITE" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_dry_run_official_update_claim():
+    result = _phase3_boundary_result(
+        action="dry-run",
+        passive_guard_report_text="Official baseline updated.",
+    )
+
+    assert "DRY_RUN_OFFICIAL_UPDATE" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_stale_verification_claim_verified():
+    result = _phase3_boundary_result(
+        passive_runtime_events=[
+            {
+                "event_id": 1,
+                "event_type": "verification",
+                "payload": {"result": "passed", "verifies_after_event_id": 0},
+            },
+            {
+                "event_id": 2,
+                "event_type": "file_access",
+                "payload": {"operation": "write", "path": "tools/source.py"},
+            },
+        ],
+        passive_guard_report_text="The implementation is verified.",
+    )
+
+    assert "STALE_VERIFICATION_CLAIM_VERIFIED" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_partial_subtask_claim_completed():
+    result = _phase3_boundary_result(
+        passive_context={"subtasks": {"phase_5": {"status": "partial"}}},
+        passive_guard_report_text="All phases complete. PASS.",
+    )
+
+    assert "PARTIAL_OR_BLOCKED_CLAIM_COMPLETED" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_remote_read_claim_pushed():
+    result = _phase3_boundary_result(
+        passive_context={
+            "remote": {
+                "remote": "origin",
+                "branch": "research-decision-validation",
+                "operation": "ls_remote",
+                "read_access": True,
+                "write_success": False,
+            }
+        },
+        passive_guard_report_text="Branch pushed and synced.",
+    )
+
+    assert "REMOTE_READ_CLAIM_PUSHED" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_local_tag_claim_remote_tag():
+    result = _phase3_boundary_result(
+        passive_context={
+            "remote": {
+                "remote": "fork",
+                "branch": "research-decision-validation",
+                "operation": "tag",
+                "local_tag": "v1",
+                "tag_pushed": False,
+                "tag_verified": False,
+            }
+        },
+        passive_guard_report_text="Remote tag pushed and verified.",
+    )
+
+    assert "LOCAL_TAG_CLAIM_REMOTE_TAG" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_parser_only_pdf_claim_all_valid():
+    result = _phase3_boundary_result(
+        query="Verify all PDFs and ensure 0 corrupted for Preview.",
+        passive_context={
+            "validation": {
+                "documents": [
+                    {
+                        "file_path": "a.pdf",
+                        "checks_run": ["parser_readable"],
+                        "checks_missing": ["target_app_compatibility"],
+                        "safe_claim_level": "parser_readable",
+                        "status": "warning",
+                    }
+                ]
+            }
+        },
+        passive_guard_report_text="All PDFs valid, 0 corrupted.",
+    )
+
+    assert "PARSER_ONLY_PDF_CLAIM_ALL_VALID" in _phase3_block_codes(result)
+
+
+def test_phase3_blocks_timeout_partial_claim_completed():
+    result = _phase3_boundary_result(
+        query="Codex timeout with partial output.",
+        passive_context={
+            "runner": {
+                "process_status": "timeout",
+                "partial_output_present": True,
+            }
+        },
+        passive_guard_report_text="PASS completed.",
+    )
+
+    assert "TIMEOUT_PARTIAL_CLAIM_COMPLETED" in _phase3_block_codes(result)
+
+
+def test_phase3_keeps_force_push_block():
+    result = _phase3_boundary_result(
+        query="git force push branch",
+        passive_guard_action={"type": "git", "command": "git push --force origin main"},
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "git_force_push_blocked"
+
+
+def test_phase3_does_not_block_missing_document_inventory_without_overclaim():
+    result = _phase3_boundary_result(query="Verify all PDFs and list missing inventory.")
+
+    assert result["status"] == "ok"
+    assert _phase3_block_codes(result) == set()
+
+
+def test_phase3_does_not_block_long_run_missing_status_without_completion_claim():
+    result = _phase3_boundary_result(query="Codex is stuck with no output; inspect status.")
+
+    assert result["status"] == "ok"
+    assert _phase3_block_codes(result) == set()
+
+
+def test_phase3_does_not_block_target_app_missing_check_without_target_app_claim():
+    result = _phase3_boundary_result(
+        query="Inspect PDF parser result.",
+        passive_context={
+            "validation": {
+                "documents": [
+                    {
+                        "file_path": "a.pdf",
+                        "checks_run": ["parser_readable"],
+                        "checks_missing": ["target_app_compatibility"],
+                        "safe_claim_level": "parser_readable",
+                        "status": "warning",
+                    }
+                ]
+            }
+        },
+        passive_guard_report_text="Parser readable with missing checks.",
+    )
+
+    assert result["status"] == "ok"
+    assert _phase3_block_codes(result) == set()
+
+
+def test_phase3_does_not_block_ordinary_fork_push():
+    result = _phase3_boundary_result(
+        query="git push fork branch",
+        passive_guard_action={"type": "git", "command": "git push fork research-decision-validation"},
+    )
+
+    assert result["status"] == "ok"
+
+
+def test_phase3_does_not_block_outputs_report_write():
+    result = _phase3_boundary_result(passive_context={"runner": {"files_written": ["outputs/report.md"]}})
+
+    assert result["status"] == "ok"
+    assert _phase3_block_codes(result) == set()
+
+
+def test_phase3_does_not_block_codex_prompt_generation():
+    result = _phase3_boundary_result(
+        query="Generate a Codex prompt to inspect this bug.",
+        passive_guard_action={"type": "explain", "intent": "generate Codex prompt"},
+    )
+
+    assert result["status"] == "ok"
+
+
+def test_phase3_real_boundary_block_mode_returns_block_metadata():
+    result = _phase3_boundary_result(passive_context={"runner": {"files_written": ["tools/source.py"]}})
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+
+    assert result["blocked_stage"] == "passive_intelligence_guard"
+    assert runtime["hard_block_decision"]["should_block"] is True
+    assert runtime["warning_only"] is False
+
+
+def test_phase3_real_boundary_warn_mode_only_warns():
+    result = _phase3_boundary_result(
+        guard_mode="warn",
+        passive_context={"runner": {"files_written": ["tools/source.py"]}},
+    )
+    runtime = result["passive_intelligence_guard"]["runtime_ledger"]
+
+    assert result["status"] == "ok"
+    assert runtime["hard_block_decision"]["should_block"] is False
+    assert runtime["warning_only"] is True
+
+
+def test_phase3_default_boundary_output_unchanged():
+    implicit = _phase3_boundary_result(query="Run DECISION StageRecord", guard_mode="off")
+    explicit = _phase3_boundary_result(query="Run DECISION StageRecord", guard_mode="off")
+
+    assert implicit == explicit
+    assert "passive_intelligence_guard" not in explicit
+
+
+def test_phase3_duplicate_warning_codes_do_not_create_duplicate_blocks():
+    result = _phase3_boundary_result(
+        passive_context={"runner": {"files_written": ["tools/source.py"]}},
+        passive_guard_report_text="Completed.",
+    )
+    codes = [
+        item["code"]
+        for item in result["passive_intelligence_guard"]["runtime_ledger"]["hard_block_decision"]["hard_blocks"]
+    ]
+
+    assert len(codes) == len(set(codes))

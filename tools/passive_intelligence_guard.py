@@ -370,6 +370,28 @@ class PassiveLedgerDecision:
     next_safe_action: str
 
 
+@dataclass(frozen=True)
+class HardBlockDecision:
+    code: str
+    reason: str
+    source_warning_code: str
+    ledger_field: str
+    offending_claim: str
+    safe_next_action: str
+    severity: str
+    mode_required: str
+    user_visible_summary: str
+
+
+@dataclass(frozen=True)
+class PassiveBlockDecision:
+    should_block: bool
+    mode: str
+    hard_blocks: tuple[HardBlockDecision, ...] = ()
+    blocked_reason: str = ""
+    safe_next_action: str = ""
+
+
 def classify_skill_triggers(user_request: str) -> list[str]:
     haystack = (user_request or "").casefold()
     return [
@@ -1401,6 +1423,155 @@ def ledger_to_final_report_warnings(
     return warnings
 
 
+def classify_passive_hard_blocks(
+    ledger: PassiveRuntimeLedger | dict[str, Any],
+    warnings: Any,
+    mode: str,
+) -> list[HardBlockDecision]:
+    guard_mode = _coerce_passive_guard_mode(mode)
+    if guard_mode != "block_destructive":
+        return []
+    runtime_ledger = coerce_passive_runtime_ledger(ledger, mode=guard_mode)
+    warning_items = _normalize_warning_items(warnings)
+    warning_codes = {str(item.get("code") or "") for item in warning_items}
+    blocks: list[HardBlockDecision] = []
+    seen_codes: set[str] = set()
+
+    def add(
+        code: str,
+        reason: str,
+        source_codes: tuple[str, ...],
+        *,
+        ledger_field: str,
+        offending_claim: str,
+        safe_next_action: str,
+        summary: str,
+    ) -> None:
+        if code in seen_codes:
+            return
+        source_warning = _first_present_warning_code(warning_codes, source_codes)
+        if not source_warning:
+            return
+        source_item = _first_warning_item(warning_items, source_warning)
+        blocks.append(
+            HardBlockDecision(
+                code=code,
+                reason=reason,
+                source_warning_code=source_warning,
+                ledger_field=ledger_field or str(source_item.get("ledger_field") or ""),
+                offending_claim=offending_claim or str(source_item.get("offending_phrase") or ""),
+                safe_next_action=safe_next_action,
+                severity="error",
+                mode_required="block_destructive",
+                user_visible_summary=summary,
+            )
+        )
+        seen_codes.add(code)
+
+    if runtime_ledger.report_only and any(not _runtime_report_artifact_path(path) for path in runtime_ledger.files_written):
+        add(
+            "REPORT_ONLY_NON_REPORT_WRITE",
+            "report_only_non_report_write",
+            ("PASSIVE_RUNTIME_REPORT_ONLY_WRITE_INVALID", "PASSIVE_RUNTIME_REPORT_ONLY_WRITE_CONFLICT"),
+            ledger_field="report_only",
+            offending_claim="write performed",
+            safe_next_action="Keep the task report-only or ask for explicit scope authorization.",
+            summary="Report-only task attempted to write a non-report artifact.",
+        )
+    if runtime_ledger.dry_run:
+        add(
+            "DRY_RUN_OFFICIAL_UPDATE",
+            "dry_run_official_update",
+            ("PASSIVE_RUNTIME_DRY_RUN_OFFICIAL_UPDATE_INVALID", "PASSIVE_RUNTIME_DRY_RUN_OFFICIAL_CONFLICT"),
+            ledger_field="dry_run",
+            offending_claim="official baseline updated",
+            safe_next_action="Do not update official state from a dry-run; rerun only after explicit authorization.",
+            summary="Dry-run state conflicts with an official-update claim.",
+        )
+    if (
+        runtime_ledger.latest_modification_event_id is not None
+        and runtime_ledger.latest_verification_event_id is not None
+        and runtime_ledger.latest_verification_event_id <= runtime_ledger.latest_modification_event_id
+    ) or runtime_ledger.verification_status == "stale":
+        add(
+            "STALE_VERIFICATION_CLAIM_VERIFIED",
+            "stale_verification_claim_verified",
+            ("PASSIVE_RUNTIME_VERIFICATION_CONFLICT",),
+            ledger_field="verification_status",
+            offending_claim="verified",
+            safe_next_action="Run verification after the latest file mutation before claiming verified.",
+            summary="Report claims verification that is stale after a later file mutation.",
+        )
+    if runtime_ledger.overall_status in {"running", "partial", "blocked", "failed"} or runtime_ledger.partial_reasons:
+        add(
+            "PARTIAL_OR_BLOCKED_CLAIM_COMPLETED",
+            "partial_or_blocked_claim_completed",
+            ("PASSIVE_RUNTIME_COMPLETION_CONFLICT",),
+            ledger_field="overall_status",
+            offending_claim="PASS/completed/all phases complete",
+            safe_next_action="Report the actual partial, running, blocked, or failed state.",
+            summary="Report claims completion while ledger state is not complete.",
+        )
+    if "PASSIVE_RUNTIME_READ_ACCESS_IS_NOT_WRITE_ACCESS" in warning_codes:
+        add(
+            "REMOTE_READ_CLAIM_PUSHED",
+            "remote_read_claim_pushed",
+            ("PASSIVE_RUNTIME_REMOTE_PUSH_CONFLICT",),
+            ledger_field="remote_pushed",
+            offending_claim="pushed/synced",
+            safe_next_action="Verify a successful remote branch push before claiming sync.",
+            summary="Remote read evidence was reported as a pushed/synced branch.",
+        )
+    add(
+        "LOCAL_TAG_CLAIM_REMOTE_TAG",
+        "local_tag_claim_remote_tag",
+        ("PASSIVE_RUNTIME_REMOTE_TAG_CONFLICT",),
+        ledger_field="remote_tag_pushed",
+        offending_claim="remote tag pushed/synced",
+        safe_next_action="Verify the remote tag before claiming tag sync.",
+        summary="Local or unverified tag evidence was reported as a remote tag sync.",
+    )
+    add(
+        "PARSER_ONLY_PDF_CLAIM_ALL_VALID",
+        "parser_only_pdf_claim_all_valid",
+        ("PASSIVE_RUNTIME_DOCUMENT_AGGREGATE_CONFLICT",),
+        ledger_field="document_statuses",
+        offending_claim="all PDFs valid / 0 corrupted",
+        safe_next_action="Run every required per-file document check before claiming all valid.",
+        summary="Parser-only or incomplete document checks were reported as full PDF validity.",
+    )
+    if runtime_ledger.overall_status == "partial" and (
+        "PASSIVE_RUNTIME_LONG_RUN_PARTIAL" in warning_codes or runtime_ledger.partial_reasons
+    ):
+        add(
+            "TIMEOUT_PARTIAL_CLAIM_COMPLETED",
+            "timeout_partial_claim_completed",
+            ("PASSIVE_RUNTIME_COMPLETION_CONFLICT",),
+            ledger_field="overall_status",
+            offending_claim="PASS/completed",
+            safe_next_action="Report timeout/partial-output state and inspect before claiming completion.",
+            summary="Timeout or partial output was reported as completed.",
+        )
+    return blocks
+
+
+def should_block_passive_output(
+    ledger: PassiveRuntimeLedger | dict[str, Any],
+    warnings: Any,
+    mode: str,
+) -> PassiveBlockDecision:
+    hard_blocks = tuple(classify_passive_hard_blocks(ledger, warnings, mode))
+    if not hard_blocks:
+        return PassiveBlockDecision(False, _coerce_passive_guard_mode(mode))
+    return PassiveBlockDecision(
+        True,
+        _coerce_passive_guard_mode(mode),
+        hard_blocks=hard_blocks,
+        blocked_reason=hard_blocks[0].reason,
+        safe_next_action=hard_blocks[0].safe_next_action,
+    )
+
+
 def build_passive_events_from_runner_context(context: dict[str, Any]) -> list[PassiveRuntimeEvent]:
     data = context if isinstance(context, dict) else {}
     task_id = str(data.get("task_id") or "")
@@ -1605,7 +1776,7 @@ def build_passive_events_from_validation_context(validation_context: dict[str, A
                 },
             )
         )
-    for item in _coerce_dict_list(data.get("document_validation_results")):
+    for item in _coerce_dict_list(data.get("document_validation_results") or data.get("documents")):
         events.append(_runtime_event(_next_event_id(events), "document_validation", task_id, item))
     return _sort_runtime_events(events)
 
@@ -2940,6 +3111,32 @@ def _runtime_first_phrase(text: str, phrases: tuple[str, ...]) -> str:
     return phrases[0] if phrases else ""
 
 
+def _normalize_warning_items(warnings: Any) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    if isinstance(warnings, dict):
+        warnings = (warnings,)
+    for warning in warnings or ():
+        if isinstance(warning, dict):
+            items.append({str(key): str(value) for key, value in warning.items()})
+        elif isinstance(warning, str):
+            items.append({"code": warning})
+    return items
+
+
+def _first_present_warning_code(warning_codes: set[str], candidates: tuple[str, ...]) -> str:
+    for candidate in candidates:
+        if candidate in warning_codes:
+            return candidate
+    return ""
+
+
+def _first_warning_item(warnings: list[dict[str, str]], code: str) -> dict[str, str]:
+    for warning in warnings:
+        if warning.get("code") == code:
+            return warning
+    return {}
+
+
 def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -2956,8 +3153,10 @@ __all__ = [
     "DocumentValidationObserverPlan",
     "DocumentValidationPlan",
     "FileAccessEvent",
+    "HardBlockDecision",
     "LongRunState",
     "LongRunObserverPlan",
+    "PassiveBlockDecision",
     "PassiveLedgerDecision",
     "PassiveRuntimeEvent",
     "PassiveRuntimeLedger",
@@ -2998,6 +3197,7 @@ __all__ = [
     "classify_long_run_event",
     "classify_long_run_trigger",
     "classify_ledger_completion_state",
+    "classify_passive_hard_blocks",
     "classify_pdf_validation_result",
     "classify_remote_sync_safety",
     "classify_skill_triggers",
@@ -3013,6 +3213,7 @@ __all__ = [
     "merge_supplied_and_derived_passive_events",
     "safe_document_validation_summary",
     "safe_long_run_status_summary",
+    "should_block_passive_output",
     "summarize_passive_runtime_ledger",
     "summarize_document_validation_plan",
     "summarize_document_validation_batch",
