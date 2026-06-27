@@ -61,6 +61,12 @@ from tools.pdf_validation_adapter import (
     PdfValidationExecutionPolicy,
     build_pdf_validation_adapter_plan,
 )
+from tools.long_run_process_observer import (
+    build_long_run_dashboard_summary,
+    build_long_run_observer_policy,
+    classify_long_run_observer_snapshot,
+    collect_long_run_observer_snapshot,
+)
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
     run_decision_final_smoke,
@@ -751,6 +757,16 @@ def _attach_passive_guard_metadata(
     consistency = None
     warnings: tuple[dict[str, str], ...] = ()
     skill_triggers = classify_skill_triggers(query)
+    merged_passive_context = _merge_passive_contexts(
+        _build_report_boundary_passive_context(
+            payload=payload,
+            query=query,
+            mode=mode,
+            action=action,
+            report_text=report_text,
+        ),
+        passive_context,
+    )
     if guard_mode in {"warn", "block_destructive"} and report_text:
         consistency = check_final_report_consistency(ledger, report_text)
         warnings = build_final_report_consistency_warnings(ledger, report_text)
@@ -775,9 +791,15 @@ def _attach_passive_guard_metadata(
         observer_metadata = _build_passive_observer_metadata(query=query, guard_mode=guard_mode)
         if observer_metadata:
             payload["passive_intelligence_guard"]["observer_plans"] = observer_metadata
-        pdf_adapter_metadata = _build_pdf_validation_adapter_metadata(passive_context, guard_mode=guard_mode)
+        pdf_adapter_metadata = _build_pdf_validation_adapter_metadata(merged_passive_context, guard_mode=guard_mode)
         if pdf_adapter_metadata:
             payload["passive_intelligence_guard"]["pdf_validation_adapter"] = pdf_adapter_metadata
+        process_observer_metadata = _build_long_run_process_observer_metadata(
+            merged_passive_context,
+            guard_mode=guard_mode,
+        )
+        if process_observer_metadata:
+            payload["passive_intelligence_guard"]["long_run_process_observer"] = process_observer_metadata
     if isinstance(document_validation, dict):
         payload["passive_intelligence_guard"]["document_validation"] = _build_document_validation_metadata(
             document_validation,
@@ -788,16 +810,7 @@ def _attach_passive_guard_metadata(
     runtime_metadata = _build_passive_runtime_metadata(
         runtime_events=runtime_events,
         runtime_ledger=runtime_ledger,
-        passive_context=_merge_passive_contexts(
-            _build_report_boundary_passive_context(
-                payload=payload,
-                query=query,
-                mode=mode,
-                action=action,
-                report_text=report_text,
-            ),
-            passive_context,
-        ),
+        passive_context=merged_passive_context,
         task_id=f"{normalize_mode(mode).lower()}:{action}",
         guard_mode=guard_mode,
         report_text=report_text,
@@ -1049,6 +1062,95 @@ def _build_long_run_watchdog_metadata(watchdog_state: dict[str, Any]) -> dict[st
     }
 
 
+def _build_long_run_process_observer_metadata(passive_context: dict[str, Any] | None, *, guard_mode: str) -> dict[str, Any]:
+    if guard_mode not in {"debug", "warn"}:
+        return {}
+    request = _extract_long_run_process_observer_request(passive_context)
+    if not request:
+        return {}
+    policy = build_long_run_observer_policy(
+        owner_tool=_optional_string(request.get("owner_tool")),
+        stage_name=_optional_string(request.get("stage_name") or request.get("stage")),
+        observe=bool(request.get("observe")),
+        allow_process_probe=bool(request.get("allow_process_probe")),
+        allow_log_read=bool(request.get("allow_log_read")),
+        max_log_bytes=_optional_int(request.get("max_log_bytes")) or 8192,
+        timeout_seconds=_optional_float(request.get("timeout_seconds")) or 2.0,
+        require_explicit_pid_or_log_path=bool(request.get("require_explicit_pid_or_log_path", True)),
+        allowed_log_roots=tuple(_boundary_string_list(request.get("allowed_log_roots"))),
+        expected_silence_budget=_optional_float(request.get("expected_silence_budget")),
+        retry_limit_same_error=_optional_int(request.get("retry_limit_same_error")),
+        retry_limit_total=_optional_int(request.get("retry_limit_total")),
+    )
+    supplied_state = request.get("supplied_state") if isinstance(request.get("supplied_state"), dict) else {}
+    supplied_state = dict(supplied_state)
+    for key in (
+        "task_id",
+        "owner_tool",
+        "stage_name",
+        "stage",
+        "process_status",
+        "status",
+        "elapsed_seconds",
+        "silence_seconds",
+        "retry_count",
+        "retry_count_total",
+        "retry_count_same_error",
+        "current_error_signature",
+        "prior_error_signature",
+        "last_error_signature",
+        "partial_output_present",
+        "timed_out",
+        "phase",
+        "subtask_statuses",
+    ):
+        if key in request and key not in supplied_state:
+            supplied_state[key] = request[key]
+    snapshot = collect_long_run_observer_snapshot(
+        policy,
+        pid=request.get("pid"),
+        log_path=_optional_string(request.get("log_path")),
+        supplied_state=supplied_state,
+    )
+    decision = classify_long_run_observer_snapshot(snapshot, policy)
+    return {
+        "policy": asdict(policy),
+        "snapshot": asdict(snapshot),
+        "decision": asdict(decision),
+        "dashboard": build_long_run_dashboard_summary(snapshot, decision),
+        "warning_only": True,
+        "executes_by_default": False,
+        "process_control_enabled": False,
+    }
+
+
+def _extract_long_run_process_observer_request(passive_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(passive_context, dict):
+        return {}
+    candidates = (
+        passive_context.get("long_run_process_observer"),
+        passive_context.get("long_run_observer"),
+        passive_context.get("process_observer"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return dict(candidate)
+    long_run = passive_context.get("long_run")
+    if isinstance(long_run, dict) and any(
+        key in long_run
+        for key in (
+            "observe",
+            "allow_process_probe",
+            "allow_log_read",
+            "pid",
+            "log_path",
+            "supplied_state",
+        )
+    ):
+        return dict(long_run)
+    return {}
+
+
 def _build_passive_runtime_metadata(
     *,
     runtime_events: list[dict[str, Any]] | None,
@@ -1197,6 +1299,30 @@ def _boundary_string_list(value: Any) -> list[str]:
         return [str(item) for item in value if item is not None and str(item)]
     except TypeError:
         return [str(value)]
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _derive_passive_runtime_events_from_context(

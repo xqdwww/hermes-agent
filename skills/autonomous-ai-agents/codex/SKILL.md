@@ -82,6 +82,9 @@ process(action="kill", session_id="<id>")
 - When a passive runtime ledger exists, use it as the source of truth for final status claims; record explicit phase status, verification freshness, remote write/tag verification, document claim level, and long-run process state as separate events.
 - Derived passive runtime events from runner/report context are advisory until hard enforcement is explicitly enabled; missing context must become unknown/warning, not success.
 - At supported report boundaries, passive context may be derived automatically in debug/warn modes while default/off mode stays silent.
+- The opt-in long-run process observer requires an explicit PID, bounded log path, or supplied status context before producing a dashboard.
+- The observer is read-only: it does not start processes, retry jobs, or perform process control by default.
+- Observer dashboards should show known fields, unknown fields, warning codes, and the next safe action rather than collapsing unknown/running/partial states into completion.
 
 ## Key Flags
 
