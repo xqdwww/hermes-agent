@@ -320,6 +320,15 @@ CASE_CONFIGS: dict[str, CaseConfig] = {
         required_axes=('wiki_or_zim',),
     ),
 
+    "obj_art_012": CaseConfig(
+        case_id="obj_art_012",
+        expected_formal_ready_decision="OBJ_ART_012_FORMAL_READY_APPROVED_WITH_CAVEAT",
+        approved_reviewer_decision="include_for_formal_review",
+        required_terms=('yingzao fashi', 'module', 'cai', 'grading'),
+        required_sections=('spatial_structure', 'historical_layers', 'materials_mechanics', 'theme_tracks'),
+        required_axes=('art_architecture_context_supplementary', 'wiki_or_zim'),
+    ),
+
 }
 
 
