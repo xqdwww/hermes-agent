@@ -4715,6 +4715,217 @@ def _business_market_fit_signals_present(text: str) -> bool:
     return hits >= 3
 
 
+def _business_convergence_market_fit_signals_present(text: str) -> bool:
+    value = text or ""
+    lowered = value.lower()
+    if not value.strip():
+        return False
+
+    def has_any(terms: tuple[str, ...]) -> bool:
+        return any(term in value or term.lower() in lowered for term in terms)
+
+    if not has_any((
+        "market_fit_signals",
+        "market fit signals",
+        "market-fit signals",
+        "product_market_fit",
+        "product-market fit",
+        "PMF",
+        "真实信号",
+        "市场匹配",
+        "产品市场匹配",
+    )):
+        return False
+
+    generic_markers = (
+        "需要验证 PMF",
+        "观察市场反馈",
+        "关注用户需求",
+        "关注市场反馈",
+        "validate PMF",
+        "observe market feedback",
+        "watch feedback",
+        "understand user needs",
+    )
+    concrete_markers = (
+        "paid",
+        "付费",
+        "retention",
+        "留存",
+        "repeatable",
+        "可复制",
+        "implementation",
+        "实施",
+        "urgent",
+        "紧迫",
+        "anti_signal",
+        "反证",
+    )
+    if has_any(generic_markers) and sum(1 for marker in concrete_markers if marker in value or marker.lower() in lowered) < 3:
+        return False
+
+    required_signal_groups = (
+        (
+            "paid conversion",
+            "paid pilot",
+            "paid intent",
+            "willingness to pay",
+            "budget owner",
+            "payment",
+            "付费转化",
+            "付费试点",
+            "付费意愿",
+            "愿意付费",
+            "预算 owner",
+            "预算负责人",
+            "成交",
+        ),
+        (
+            "repeatable sales",
+            "repeatable founder-led",
+            "sales motion",
+            "sales path",
+            "sales cycle",
+            "qualified pipeline",
+            "repeatable motion",
+            "可复制销售",
+            "重复销售",
+            "销售路径",
+            "销售动作",
+            "销售周期",
+            "合格线索",
+        ),
+        (
+            "implementation willingness",
+            "willingness to implement",
+            "implementation",
+            "migration willingness",
+            "workflow adoption",
+            "deployment willingness",
+            "实施意愿",
+            "愿意实施",
+            "愿意迁移",
+            "迁移流程",
+            "工作流采用",
+            "落地配合",
+            "交付配合",
+        ),
+        (
+            "retention",
+            "renewal",
+            "expansion",
+            "repeat usage",
+            "repeated usage",
+            "continued usage",
+            "sustained usage",
+            "留存",
+            "续费",
+            "复购",
+            "扩张",
+            "持续使用",
+            "重复使用",
+            "核心使用",
+        ),
+        (
+            "urgent workflow pain",
+            "urgent pain",
+            "painful workflow",
+            "must-have workflow",
+            "burning pain",
+            "high-frequency pain",
+            "紧迫工作流痛点",
+            "紧迫痛点",
+            "高频痛点",
+            "工作流痛点",
+            "刚需流程",
+            "关键流程",
+        ),
+    )
+    if not all(has_any(group) for group in required_signal_groups):
+        return False
+
+    false_positive_terms = (
+        "false_positive",
+        "false positive",
+        "false signal",
+        "vanity",
+        "traffic",
+        "signup",
+        "trial",
+        "demo",
+        "meeting",
+        "without activation",
+        "without qualified pain",
+        "without paid",
+        "虚假信号",
+        "虚荣指标",
+        "注册",
+        "流量",
+        "试用",
+        "演示",
+        "会议",
+        "没有激活",
+        "无付费",
+        "未限定痛点",
+    )
+    anti_signal_terms = (
+        "anti_signal",
+        "anti-signals",
+        "disconfirming",
+        "unwilling to pay",
+        "not willing to pay",
+        "no migration",
+        "weak retention",
+        "founder heroics",
+        "bespoke work",
+        "feature requests only",
+        "反证信号",
+        "反证",
+        "不愿付费",
+        "不愿迁移",
+        "留存弱",
+        "只要功能",
+        "依赖创始人",
+        "定制化",
+    )
+    decision_terms = (
+        "decision_implication",
+        "decision implications",
+        "GTM",
+        "go-to-market",
+        "founder-led",
+        "PLG",
+        "90-day",
+        "90 day",
+        "feature expansion",
+        "product scope",
+        "stop_or_pause",
+        "决策含义",
+        "GTM 顺序",
+        "90 天",
+        "暂停",
+        "功能扩张",
+        "产品范围",
+    )
+    validation_terms = (
+        "validation_metrics",
+        "validation metric",
+        "monitoring_metrics",
+        "metric",
+        "measure",
+        "验证指标",
+        "监控指标",
+        "观察指标",
+        "复盘指标",
+    )
+    return (
+        has_any(false_positive_terms)
+        and has_any(anti_signal_terms)
+        and has_any(decision_terms)
+        and has_any(validation_terms)
+    )
+
+
 def _business_90_day_plan_present(text: str) -> bool:
     value = _business_section_by_terms(text, ("90 天", "90天", "90-day", "90 day", "执行计划", "阶段计划", "分阶段")) or (text or "")
     lowered = value.lower()
@@ -4819,6 +5030,10 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
             ),
         }
         for name, terms in checks.items():
+            if stage_name == "convergence_report" and name == "missing_market_fit_signals":
+                if not _business_convergence_market_fit_signals_present(value):
+                    errors.append(name)
+                continue
             if not any(term in value or term in lowered for term in terms):
                 errors.append(name)
         if stage_name == "convergence_report":
@@ -7304,6 +7519,7 @@ def _convergence_profile_instruction_lines(profiles: list[str]) -> list[str]:
         lines.extend([
             "Business strategy profile: do not treat every execution plan as a repeated cadence plan.",
             "For business/go-to-market strategy, convergence must include: strategic_sequence or prioritized_order; vanity_metrics_or_false_signals; market_fit_signals; stop_or_pause_conditions; 90_day_or_phased_execution_plan; evidence_or_inference_tiers; monitoring_metrics; and decision_boundary or when_to_reassess.",
+            "For market_fit_signals, do not write generic PMF language. Include concrete observed_or_required_market_fit_signals: paid conversion or paid pilot; repeatable founder-led sales motion; implementation or workflow-migration willingness; retention, renewal, expansion, or sustained usage; and urgent workflow pain. Also include false_positive_or_vanity_signals, anti_signals_or_disconfirming_evidence, validation_metrics, and decision_implications_for_gtm_and_product_scope.",
             "Business/GTM evidence boundary is mandatory and must bind to concrete convergence claims. Include a substantive evidence boundary unit with: evidence_supported_claims; reasonable_inferences; speculative_or_low_confidence_claims; evidence_gaps_or_verification_needs; and decision_boundary_or_use_boundary. Tie the boundary to GTM order, PMF signals, stop/pause conditions, and the 90-day plan; do not write only a generic 'evidence is limited' caveat.",
             "Write a standalone convergence judgment unit with this exact label or heading: stop_or_pause_feature_expansion_condition.",
             "For stop_or_pause_feature_expansion_condition, state concrete conditions for when to stop, pause, freeze, halt, or narrow new feature/product expansion; include what signals trigger the pause and whether resources should shift to validation, sales, retention, delivery, or review.",
@@ -8744,6 +8960,10 @@ def _convergence_report_prompt_from_artifacts(
                 "strategic_sequence_or_prioritized_order",
                 "vanity_metrics_or_false_signals",
                 "market_fit_signals",
+                "false_positive_or_vanity_signals",
+                "anti_signals_or_disconfirming_evidence",
+                "validation_metrics",
+                "decision_implications_for_gtm_and_product_scope",
                 "stop_or_pause_feature_expansion_condition",
                 "90_day_or_phased_execution_plan",
                 "evidence_supported_claims",
