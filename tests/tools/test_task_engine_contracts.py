@@ -5960,6 +5960,206 @@ def test_case06_education_generic_bad():
     _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "template_like_final")
 
 
+def test_case03_architecture_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个本地 AI agent 系统需要在 GPT Bridge、官方 API、本地 70B/72B 模型、AGY/Gemini fallback 之间做执行器架构选择。"
+        "目标是高可靠、低成本、可审计、可恢复，不希望单点失败。请判断：\n"
+        "1. 推荐架构排序；\n2. 哪些任务适合本地模型，哪些必须外部高能力模型；\n3. 如何设计 fallback 和 resume；\n"
+        "4. 最大工程风险是什么；\n5. 哪些判断依赖当前工具状态，哪些是通用工程原则。"
+    )
+    packet = _handoff_leakage_fixture_packet(query)
+    packet["excerpts"]["external_calibration"] = "final_adjustment_recommendation: local 70B capability is unverified; fallback and schema translation must be downgraded to conditional engineering inference."
+    text = executors._final_controller_report_from_packet(packet)
+
+    for term in ("推荐架构", "本地 70B/72B", "GPT Bridge", "官方 API", "AGY/Gemini fallback", "resume", "最大工程风险", "工具状态", "通用工程原则"):
+        assert term in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_case03_architecture_generic_bad():
+    query = (
+        "一个本地 AI agent 系统需要在 GPT Bridge、官方 API、本地 70B/72B 模型、AGY/Gemini fallback 之间做执行器架构选择。请判断：\n"
+        "1. 推荐架构排序；\n2. 哪些任务适合本地模型，哪些必须外部高能力模型；\n3. 如何设计 fallback 和 resume；\n4. 最大工程风险是什么。"
+    )
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. 推荐架构排序",
+        "应该提高可靠性、降低成本、加强审计并建立 fallback。",
+        "## 2. 哪些任务适合本地模型，哪些必须外部高能力模型",
+        "简单任务本地，复杂任务外部，但没有任务分层和边界。",
+        "## 3. 如何设计 fallback 和 resume",
+        "要有 fallback 和恢复机制。",
+        "## 4. 最大工程风险是什么",
+        "最大风险是可靠性不足。",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "missing_architecture_decision")
+
+
+def test_case05_travel_priority_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。目标不是做每日行程，而是判断路线设计原则："
+        "自然景观、驾驶强度、亲子体验、老人舒适度、住宿稳定性、天气和安全冗余之间如何排序。请给出：\n"
+        "1. 路线设计优先级；\n2. 最容易犯的 5 个规划错误；\n3. 哪些信息必须临近出发再核验；\n4. 什么情况下应该缩短路线；\n5. 不要编造当前路况、营业时间或政策。"
+    )
+    text = executors._final_controller_report_from_packet(_handoff_leakage_fixture_packet(query))
+
+    priority_section = text.split("## 1. 路线设计优先级", 1)[1].split("## 2.", 1)[0]
+    assert priority_section.find("天气和安全冗余") < priority_section.find("自然景观")
+    assert "老人舒适度" in text and "驾驶强度" in text
+    assert "临近出发" in text and "缩短" in text and "不编造" in text
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
+def test_case05_travel_priority_copied_bad():
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。目标不是做每日行程，而是判断路线设计原则："
+        "自然景观、驾驶强度、亲子体验、老人舒适度、住宿稳定性、天气和安全冗余之间如何排序。请给出：\n"
+        "1. 路线设计优先级；\n2. 最容易犯的 5 个规划错误；\n3. 哪些信息必须临近出发再核验；\n4. 什么情况下应该缩短路线；\n5. 不要编造当前路况、营业时间或政策。"
+    )
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. 路线设计优先级",
+        "1. 自然景观：作为用户明确列出的排序对象，先看它是否决定安全边界。",
+        "2. 驾驶强度：作为用户明确列出的排序对象，先看它是否决定安全边界。",
+        "3. 亲子体验：作为用户明确列出的排序对象，先看它是否决定安全边界。",
+        "4. 老人舒适度：作为用户明确列出的排序对象，先看它是否决定安全边界。",
+        "5. 住宿稳定性：作为用户明确列出的排序对象，先看它是否决定安全边界。",
+        "6. 天气和安全冗余：作为用户明确列出的排序对象，先看它是否决定安全边界。",
+        "## 2. 最容易犯的 5 个规划错误",
+        "1. 安排太满。2. 信息过时。3. 没有备选。4. 住宿不稳。5. 太赶路。",
+        "## 3. 哪些信息必须临近出发再核验",
+        "天气、道路、住宿和政策。",
+        "## 4. 什么情况下应该缩短路线",
+        "如果风险增加就缩短。",
+        "## 5. 不要编造当前路况、营业时间或政策",
+        "不编造实时信息。",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "mechanical_priority_extractor")
+
+
+def test_case06_education_specific_absorption_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。家长想知道应该把 AI 用在讲解、练习生成、错题复盘、阅读拓展还是写作辅助。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径；\n3. 阅读、数学、写作、AI 工具的优先级；\n4. 哪些判断是教育研究支持，哪些只是合理推断；\n5. 给出家长可执行原则，但不要写成医疗或心理诊断。"
+    )
+    packet = _handoff_leakage_fixture_packet(query)
+    packet["excerpts"]["external_calibration"] = "final_adjustment_recommendation: downgrade specific mechanism claims to reasonable inference; do not present as medical or psychological diagnosis."
+    text = executors._final_controller_report_from_packet(packet)
+
+    for term in ("讲解", "练习生成", "错题复盘", "阅读拓展", "写作辅助", "外包启动", "数学", "教育研究", "合理推断", "医疗或心理诊断"):
+        assert term in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_case06_education_generic_absorption_bad():
+    query = (
+        "一个 10 岁孩子阅读强、数学中等偏弱，未来会大量接触 AI tutor。家长想知道应该把 AI 用在讲解、练习生成、错题复盘、阅读拓展还是写作辅助。请判断：\n"
+        "1. AI tutor 最有价值的 Top 5 使用场景；\n2. 最危险的 5 个依赖路径；\n3. 阅读、数学、写作、AI 工具的优先级；\n4. 哪些判断是教育研究支持，哪些只是合理推断；\n5. 给出家长可执行原则，但不要写成医疗或心理诊断。"
+    )
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 因材施教。2. 家长监督。3. 平衡发展。4. 保持兴趣。5. 适度使用。",
+        "## 2. 最危险的 5 个依赖路径",
+        "1. 过度依赖。2. 缺少监督。3. 使用太多。4. 不够平衡。5. 缺少复盘。",
+        "## 3. 阅读、数学、写作、AI 工具的优先级",
+        "阅读、数学、写作和 AI 工具都要平衡。",
+        "## 4. 哪些判断是教育研究支持，哪些只是合理推断",
+        "有些有研究支持，有些是合理推断。",
+        "## 5. 给出家长可执行原则，但不要写成医疗或心理诊断",
+        "家长要监督，因材施教，保持平衡。",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "missing_education_specificity")
+
+
+def test_caveat_must_bind_to_claim_bad():
+    query = "请判断一个本地 AI agent 系统是否应该采用多执行器 fallback 架构，并说明风险边界。"
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 核心判断",
+        "应该采用多执行器 fallback 架构，因为它更可靠、更低成本、更可审计。",
+        "## 证据边界",
+        "证据有限，需要谨慎。",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "caveat_not_bound_to_claim")
+
+
+def test_calibration_absorption_good():
+    import tools.task_engine_executors as executors
+
+    query = "一个本地 AI agent 系统需要在 GPT Bridge、官方 API、本地 70B/72B 模型、AGY/Gemini fallback 之间做执行器架构选择。请判断：\n1. 推荐架构排序；\n2. 如何设计 fallback 和 resume。"
+    packet = _research_decision_quality_packet(query)
+    packet["excerpts"] = {
+        "external_calibration": "final_adjustment_recommendation: downgrade local model capability and fallback path to conditional inference; unverified tool state must be explicit.",
+        "convergence_report": "Recommend layered local, bridge, official API, fallback architecture with resume checkpoints.",
+    }
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "条件性" in text or "未实测" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_calibration_absorption_gap_bad():
+    query = "一个本地 AI agent 系统需要在 GPT Bridge、官方 API、本地 70B/72B 模型、AGY/Gemini fallback 之间做执行器架构选择。请判断：\n1. 推荐架构排序；\n2. 如何设计 fallback 和 resume。"
+    packet = _research_decision_quality_packet(query)
+    packet["excerpts"] = {"external_calibration": "final_adjustment_recommendation: downgrade local 70B capability; fallback path is unverified and speculative."}
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. 推荐架构排序",
+        "本地 70B/72B、GPT Bridge、官方 API、AGY/Gemini fallback 都可靠，直接按成本排序即可。",
+        "## 2. 如何设计 fallback 和 resume",
+        "多重 fallback 会自动恢复，最大风险很低。",
+    ])
+
+    _assert_final_quality_rejects(packet, bad, "calibration_absorption_gap")
+
+
+def test_raw_leakage_regression_still_blocked():
+    query = "请判断一个本地 AI agent 系统是否应该采用多执行器 fallback 架构。"
+    bad = "# 最终答案\n\nCompact basis: raw evidence snippet. DEFECT. Structured gaps: requires_full_text_verification."
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_compact_basis_leakage")
+
+
+def test_anchor_stuffing_regression_still_blocked():
+    query = "请判断一个教育 AI 使用方案：\n1. AI tutor 最有价值的 Top 5 使用场景；"
+    repeated = "针对讲解、练习生成、错题复盘、阅读拓展、写作辅助，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持。"
+    bad = "\n".join([
+        "# 最终答案",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解：" + repeated,
+        "2. 练习生成：" + repeated,
+        "3. 错题复盘：" + repeated,
+        "4. 阅读拓展：" + repeated,
+        "5. 写作辅助：" + repeated,
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "anchor_stuffed_final")
+
+
+def test_case04_business_absorption_regression_good():
+    import tools.task_engine_executors as executors
+
+    packet = _business_strategy_final_packet()
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "GTM" in text
+    assert "PMF" in text or "产品市场匹配" in text
+    assert "暂停产品功能扩张" in text
+    assert "90 天" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
 def test_case01_finance_final_clean_good():
     import tools.task_engine_executors as executors
 

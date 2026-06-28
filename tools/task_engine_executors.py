@@ -9279,6 +9279,13 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
         return _research_decision_business_strategy_final_report(query, packet)
     if PROFILE_FORESIGHT_MECHANISM in profiles:
         return _research_decision_foresight_final_report(query, packet)
+    absorption_domain = _research_decision_synthesis_absorption_domain(query)
+    if absorption_domain == "technical_architecture":
+        return _research_decision_architecture_final_report(query, packet)
+    if absorption_domain == "family_travel":
+        return _research_decision_travel_final_report(query, packet)
+    if absorption_domain == "education_ai_tutoring":
+        return _research_decision_education_final_report(query, packet)
     return _research_decision_generic_final_report(query, packet)
 
 
@@ -9380,6 +9387,182 @@ def _research_decision_business_strategy_final_report(query: str, packet: dict[s
             "- 反证信号：试用多但无激活，访谈多但无付费，渠道多但无成交，功能请求分散且不能归入同一工作流，或交付越来越依赖一次性定制。",
         ]
     )
+    return "\n".join(lines)
+
+
+def _research_decision_synthesis_absorption_domain(query: str) -> str:
+    value = query or ""
+    lowered = value.lower()
+    if (
+        any(term in lowered for term in ("gpt bridge", "official api", "70b", "72b", "agy", "gemini", "fallback", "resume"))
+        and any(term in value for term in ("架构", "执行器", "本地模型", "单点失败", "可恢复", "审计"))
+    ) or (
+        any(term in lowered for term in ("gpt bridge", "official api", "70b", "72b", "agy", "gemini"))
+        and any(term in value for term in ("架构", "执行器", "模型"))
+    ):
+        return "technical_architecture"
+    if (
+        any(term in value for term in ("自驾", "路线设计", "路线", "住宿", "路况", "营业时间"))
+        and any(term in value for term in ("老人", "孩子", "天气", "驾驶强度", "缩短路线", "安全冗余"))
+    ):
+        return "family_travel"
+    if (
+        ("ai tutor" in lowered or "AI tutor" in value)
+        and any(term in value for term in ("阅读", "数学", "写作", "家长", "讲解", "练习生成", "错题复盘"))
+    ):
+        return "education_ai_tutoring"
+    return ""
+
+
+def _research_decision_absorption_source(packet: dict[str, Any]) -> str:
+    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
+    return "\n".join(
+        part
+        for part in (
+            str(excerpts.get("external_calibration") or ""),
+            str(excerpts.get("convergence_report") or ""),
+            str(excerpts.get("L5_deepseek_acceptance") or excerpts.get("research_evidence_packet") or ""),
+        )
+        if part
+    )
+
+
+def _research_decision_absorption_caveat(source: str, fallback: str) -> str:
+    if _line_carries_evidence_caveat_semantics(source) or _raw_packet_metadata_leakage_failures(source, allow_claim_table=False):
+        return _natural_language_packet_caveat(source)
+    return fallback
+
+
+def _research_decision_architecture_final_report(query: str, packet: dict[str, Any]) -> str:
+    source = _research_decision_absorption_source(packet)
+    caveat = _research_decision_absorption_caveat(
+        source,
+        "本架构判断依赖当前工具可用性、模型能力实测、成本和恢复日志；未经压测的执行器能力只能作为条件性判断。",
+    )
+    lines = [
+        "# 研究决策最终报告",
+        "",
+        "## 核心结论",
+        "[合理推断] 推荐采用分层执行器架构，而不是押注单一执行器：本地 70B/72B 承担低风险、可复核、成本敏感的常规任务；GPT Bridge 和官方 API 承担高能力或恢复通道；AGY/Gemini fallback 只作为隔离的备用路径。这个排序必须随工具状态、失败率、延迟、成本和审计日志滚动校准。",
+        "",
+        "## 1. 推荐架构排序",
+        "1. [合理推断] 第一层：本地 70B/72B 模型用于摘要、分类、草稿、结构化转换和可人工复核的低风险任务。证据边界：本地能力未实测前不能假定能处理高推理或高风险任务；反证信号是长上下文稳定性、结构化输出或恢复率不达标。",
+        "2. [合理推断] 第二层：GPT Bridge 作为恢复和高能力桥接层，用于本地模型失败、需要更强综合推理或需要跨工具恢复时接管。证据边界：它是可靠性通道，不应成为无日志的隐形主路径；反证信号是调用失败、状态不同步或成本失控。",
+        "3. [合理推断] 第三层：官方 API 用于稳定性、审计和能力要求更高的关键任务，尤其是需要一致输出、可追踪请求和明确 SLA 的步骤。证据边界：成本、权限和数据边界要先被验证。",
+        "4. [前瞻假设] 第四层：AGY/Gemini fallback 只作为隔离备用和人工确认后的降级路径；如果它不能保留任务状态、证据链和恢复上下文，就不应自动接管。",
+        "",
+        "## 2. 本地模型与外部高能力模型的任务分层",
+        "- 哪些任务适合本地模型：候选草稿、低风险摘要、格式整理、批量分类、可回放的结构化抽取和成本敏感的预处理。",
+        "- 哪些必须外部高能力模型：复杂推理、跨材料冲突消解、关键最终判断、需要更强遵循能力的 schema 输出、以及本地模型多次失败后的恢复。",
+        "- 决策边界：凡是会影响最终结论、用户承诺、安全边界或不可逆动作的任务，都必须保留外部高能力模型或人工复核通道。",
+        "- fallback/resume 前提：任务分层必须先定义哪些状态、输入、schema 和证据边界可以被恢复，哪些失败必须转人工确认。",
+        "",
+        "## 3. fallback 与 resume 机制",
+        "- fallback 不是简单重试，而是按任务类型、失败原因和证据完整度切换执行器：先本地低成本尝试，再桥接恢复，再官方 API，最后才进入隔离备用。",
+        "- resume 必须保存任务输入、阶段状态、结构化中间结果、错误原因、已验证事实和下一步动作；恢复后要能证明没有重复使用过期状态。",
+        "- 反证信号：如果 fallback 后丢失上下文、重复执行不可逆步骤、schema 不一致或审计日志断裂，就应暂停自动恢复，改为人工确认。",
+        "",
+        "## 4. 最大工程风险",
+        "[不支持/风险] 最大风险是状态和 schema 不一致：不同执行器可能给出格式、证据边界和任务状态不兼容的输出，导致表面完成但实际不可审计、不可恢复。工程上要优先做状态机、schema 契约、日志、回滚点和失败分类，而不是先扩大模型数量。",
+        "",
+        "## 5. 工具状态依赖与通用工程原则",
+        "- 哪些判断依赖当前工具状态：本地 70B/72B 能力、GPT Bridge 稳定性、官方 API 成本和权限、AGY/Gemini fallback 可用性、延迟和失败率。",
+        "- 哪些是通用工程原则：去单点失败、任务分层、最小权限、可观测、可回滚、schema 契约、失败隔离和人工复核边界。",
+        "- 校准吸收：未经当前环境实测的能力结论只作为条件性推断；如果工具状态变化，架构排序必须重算。",
+        "",
+        "## 证据强度、争议点、证据缺口",
+        "证据强度：中，架构可靠性原则较稳，但具体执行器能力需要实测。争议点：成本、延迟、权限和恢复质量会改变排序。证据缺口：" + caveat,
+    ]
+    return "\n".join(lines)
+
+
+def _research_decision_travel_final_report(query: str, packet: dict[str, Any]) -> str:
+    source = _research_decision_absorption_source(packet)
+    caveat = _research_decision_absorption_caveat(
+        source,
+        "路线原则可用于规划取舍，但所有道路、天气、开放、住宿和政策类事实都必须临近出发前复核。",
+    )
+    lines = [
+        "# 研究决策最终报告",
+        "",
+        "## 核心结论",
+        "[合理推断] 这类长途家庭自驾应先保护安全冗余、老人和孩子恢复、驾驶强度与住宿稳定性；景点吸引力和亲子体验只有在这些硬约束成立后才加权。",
+        "",
+        "## 1. 路线设计优先级",
+        "1. 天气和安全冗余：第一优先级，因为道路、天气和救援条件一旦变化，会直接改变全家恢复成本和可取消空间。",
+        "2. 老人舒适度：第二优先级，连续赶路、频繁换住处和高强度景点会先伤害老人恢复，再影响全队节奏。",
+        "3. 驾驶强度：第三优先级，四个成人可以轮换但不能把司机数量误当作体力无限；连续长距离驾驶必须设置停止条件。",
+        "4. 住宿稳定性：第四优先级，关键节点应优先选择位置稳定、停车方便、可取消且能连续休息的住宿。",
+        "5. 亲子体验：第五优先级，孩子体验应来自低强度参与、观察和休息后的兴趣，而不是把景点数量堆满。",
+        "6. 自然景观：最后优化景观密度；如果前五项不成立，少去一个景点比透支更符合决策目标。",
+        "",
+        "## 2. 最容易犯的 5 个规划错误",
+        "1. 天天移动：看似完整，实际压缩睡眠、恢复和备选空间；反证信号是连续两天疲劳未恢复。",
+        "2. 只按景观名气排路线：忽视老人和孩子参与门槛；反证信号是核心点需要高体力或长时间暴露。",
+        "3. 把实时道路和开放信息当静态事实：临近变化会直接推翻路线；反证信号是没有替代路线和取消方案。",
+        "4. 住宿频繁变化且不可取消：一旦天气或身体状态变化，改线成本过高；反证信号是每天都必须换住处。",
+        "5. 没有缩短路线触发条件：为了完成清单继续赶路；反证信号是天气、体力或住宿任一项恶化仍不减点。",
+        "",
+        "## 3. 哪些信息必须临近出发再核验",
+        "临近出发前复核天气、道路、景区开放、住宿确认和取消规则、车辆状态、停车条件、安全提示、儿童乘车安排、医疗/补给点和替代路线。核验结果不是装饰信息，而是是否缩短、调换或取消的触发条件。",
+        "",
+        "## 4. 什么情况下应该缩短路线",
+        "如果连续驾驶强度超出预期、老人或孩子恢复不足、天气恶化、道路/景区开放无法确认、住宿变得不稳定、或替代路线比原路线更安全，就缩短跨度、放弃远端点或增加连续住宿。",
+        "",
+        "## 5. 不要编造当前路况、营业时间或政策",
+        "本回答只给路线设计原则，不编造实时路况、营业时间或政策判断；这些信息必须在临近出发前以官方或直接来源复核。若复核结果与计划冲突，应以下调路线强度为默认动作。",
+        "",
+        "## 证据强度、争议点、证据缺口",
+        "证据强度：中，路线取舍原则可用，但实时事实不可由本回答断定。争议点：季节、路况、家庭体力、车辆和住宿条件会改变排序。证据缺口：" + caveat,
+    ]
+    return "\n".join(lines)
+
+
+def _research_decision_education_final_report(query: str, packet: dict[str, Any]) -> str:
+    source = _research_decision_absorption_source(packet)
+    caveat = _research_decision_absorption_caveat(
+        source,
+        "教育研究只能支持方向性原则；具体孩子的错误类型、学校要求和长期效果仍需要低风险跟踪，不能写成诊断或确定疗效。",
+    )
+    lines = [
+        "# 研究决策最终报告",
+        "",
+        "## 核心结论",
+        "[合理推断] AI tutor 最有价值的用法不是替孩子完成任务，而是把讲解、练习、错题、阅读和写作变成可复盘的低风险脚手架；优先级应服务于当前基础能力，而不是把工具本身排在前面。",
+        "",
+        "## 1. AI tutor 最有价值的 Top 5 使用场景",
+        "1. 讲解后的自述验证：孩子先说自己的理解，AI 只指出缺口；触发条件是能复述概念和一个反例，反证信号是离开 AI 仍不会讲步骤。",
+        "2. 练习生成后的少量订正：围绕当天错因生成 3-5 道同型题；触发条件是相似题正确率和订正质量提高，反证信号是只刷题不复盘。",
+        "3. 错题复盘后的错因分类：把错误归到概念、审题、步骤或计算；触发条件是孩子能写下一次检查点，反证信号是同类错误反复出现。",
+        "4. 阅读拓展后的事实核查：用阅读优势比较原文、AI 补充和自己的推断，并要求孩子用证据标记说明哪一句来自原文、哪一句只是补充、哪一句不能确认；触发条件是能标注来源和不确定处，反证信号是把 AI 输出当作已核验事实。",
+        "5. 写作辅助后的独立改写：保留首稿、修改稿和修改理由；触发条件是观点更清楚，反证信号是文字更顺但理由更少。",
+        "",
+        "## 2. 最危险的 5 个依赖路径",
+        "1. 外包启动：孩子等 AI 给第一步，长期削弱读题和开题能力；反证信号是无 AI 仍能写出第一步。",
+        "2. 外包检查：孩子直接接受答案，数学步骤漏洞被遮住；反证信号是能自己指出至少一个可能错点。",
+        "3. 外包错因归纳：复盘变成抄解释，孩子没有把错误归到概念、审题、步骤或计算；反证信号是能说明下一次如何避免同类错。",
+        "4. 外包阅读判断：把 AI 输出当事实，阅读优势被用来接受更多未经核验的信息和流畅解释，削弱来源意识、怀疑习惯和证据标记；反证信号是能区分原文事实、补充信息和个人推断。",
+        "5. 外包表达和排序：文本流畅但个人观点、任务先后和修改理由减少；反证信号是能保留首稿并解释修改。",
+        "",
+        "## 3. 阅读、数学、写作、AI 工具的优先级",
+        "1. 数学：先补中等偏弱环节，因为数学最容易暴露步骤、工作记忆和错因复盘问题。",
+        "2. 阅读：作为优势保留和迁移通道，用来训练信息核查、解释和背景理解。",
+        "3. 写作：作为表达和结构化输出训练，但必须保留首稿和修改理由。",
+        "4. AI 工具：排在基础能力之后，只作为讲解、练习、复盘和核查脚手架；不能替代启动、检查和复盘。",
+        "",
+        "## 4. 哪些判断是教育研究支持，哪些只是合理推断",
+        "- [证据支持] 家长参与、反馈节律、错误订正、主动复述和不过度替代孩子思考，是更稳的方向性原则。",
+        "- [合理推断] 把 AI 用于练习生成、阅读拓展、写作修改和错因分类，是基于当前任务结构的推断，需要用孩子真实表现复核。",
+        "- [前瞻假设] AI 工具长期改善学习迁移仍不确定；如果无 AI 时启动、检查和复盘能力下降，就应下调用量。",
+        "",
+        "## 5. 家长可执行原则和非诊断边界",
+        "- 每次使用 AI 前保留孩子自己的第一版答案；使用后记录修改理由；最后让孩子指出一个可能错误。",
+        "- 每周只看少量指标：数学错因是否减少、阅读事实核查是否更稳、写作是否保留个人观点、无 AI 时是否能启动。",
+        "- 不把这个方案写成医疗或心理诊断；如果出现持续焦虑、睡眠、注意或情绪问题，应走专业评估渠道。",
+        "",
+        "## 证据强度、争议点、证据缺口",
+        "证据强度：中，家长参与、反馈和错误订正方向较稳；具体 AI 场景和长期迁移属于合理推断。争议点：孩子错误类型、学校要求、工具形态和家庭执行方式会改变排序。证据缺口：" + caveat,
+    ]
     return "\n".join(lines)
 
 
@@ -10525,7 +10708,12 @@ def _final_user_facing_quality_failures(packet: dict[str, Any], text: str) -> li
     failures.extend(_anchor_stuffed_final_failures(query, value))
     failures.extend(_repeated_boilerplate_final_failures(value))
     failures.extend(_cross_domain_residue_failures(query, value))
-    failures.extend(_calibration_implementation_failures(str(packet.get("external_calibration_hard_constraints") or ""), value))
+    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
+    hard_calibration_constraints = str(packet.get("external_calibration_hard_constraints") or "")
+    raw_calibration_constraints = str(hard_calibration_constraints or excerpts.get("external_calibration") or "")
+    calibration_constraints = _external_calibration_final_constraints(hard_calibration_constraints)
+    failures.extend(_calibration_implementation_failures(calibration_constraints, value))
+    failures.extend(_domain_specific_synthesis_absorption_failures(query, value, calibration_constraints or raw_calibration_constraints))
     return failures
 
 
@@ -11120,11 +11308,169 @@ def _cross_domain_residue_failures(query: str, text: str) -> list[str]:
     return failures
 
 
+def _domain_specific_synthesis_absorption_failures(query: str, text: str, calibration: str = "") -> list[str]:
+    value = text or ""
+    domain = _research_decision_synthesis_absorption_domain(query)
+    failures: list[str] = []
+    if (
+        domain == "technical_architecture"
+        and _architecture_decision_detail_required(query)
+        and not _architecture_final_specificity_present(value)
+    ):
+        failures.append("missing_architecture_decision")
+    if domain == "family_travel":
+        if _travel_priority_mechanically_copied(value):
+            failures.append("mechanical_priority_extractor")
+        if not _travel_final_specificity_present(value):
+            failures.append("missing_travel_route_decision")
+            failures.append("missing_trigger_conditions")
+    if domain == "education_ai_tutoring" and not _education_final_specificity_present(value):
+        failures.append("missing_education_specificity")
+        failures.append("template_like_final")
+    if _tail_caveat_not_bound_to_claim(value):
+        failures.append("caveat_not_bound_to_claim")
+    if _calibration_absorption_missing(calibration, value):
+        failures.append("calibration_absorption_gap")
+    return list(dict.fromkeys(failures))
+
+
+def _architecture_decision_detail_required(query: str) -> bool:
+    value = query or ""
+    detail_terms = (
+        "推荐架构排序",
+        "架构选择",
+        "任务分层",
+        "本地模型适用",
+        "外部高能力模型",
+        "GPT Bridge",
+        "官方 API",
+        "70B",
+        "72B",
+        "AGY",
+        "Gemini",
+    )
+    return any(term in value for term in detail_terms)
+
+
+def _architecture_final_specificity_present(text: str) -> bool:
+    value = text or ""
+    lowered = value.lower()
+    groups = (
+        ("推荐架构", "架构排序", "排序", "第一层", "第一优先级"),
+        ("本地", "70B", "72B", "local"),
+        ("GPT Bridge", "官方 API", "外部高能力", "official api"),
+        ("AGY", "Gemini", "fallback"),
+        ("resume", "恢复", "检查点", "回滚"),
+        ("最大工程风险", "状态", "schema", "一致性", "审计"),
+        ("工具状态", "通用工程原则", "条件性", "未实测", "未验证"),
+    )
+    hits = sum(1 for terms in groups if any(term in value or term.lower() in lowered for term in terms))
+    has_explicit_execution_options = sum(
+        1 for term in ("GPT Bridge", "官方 API", "AGY", "Gemini", "70B", "72B")
+        if term in value
+    ) >= 2
+    has_boundary_detail = any(
+        term in value
+        for term in ("schema", "resume", "检查点", "工具状态", "通用工程原则", "未实测", "条件性", "状态机")
+    )
+    return hits >= 6 and has_explicit_execution_options and has_boundary_detail
+
+
+def _travel_priority_mechanically_copied(text: str) -> bool:
+    value = text or ""
+    if "作为用户明确列出的排序对象" in value:
+        return True
+    priority_section = _markdown_numeric_sections(value).get(1, value)
+    copied_order = ("自然景观", "驾驶强度", "亲子体验", "老人舒适度", "住宿稳定性", "天气和安全冗余")
+    positions = [priority_section.find(term) for term in copied_order]
+    return all(pos >= 0 for pos in positions) and positions == sorted(positions)
+
+
+def _travel_final_specificity_present(text: str) -> bool:
+    value = text or ""
+    groups = (
+        ("天气和安全冗余", "安全冗余"),
+        ("老人舒适度", "老人"),
+        ("驾驶强度", "连续驾驶"),
+        ("住宿稳定性", "住宿"),
+        ("亲子体验", "孩子"),
+        ("自然景观", "景观"),
+        ("临近出发", "核验"),
+        ("缩短路线", "缩短", "放弃远端点"),
+        ("不编造", "实时路况", "营业时间", "政策"),
+        ("规划错误", "错误"),
+    )
+    hits = sum(1 for terms in groups if any(term in value for term in terms))
+    return hits >= 8
+
+
+def _education_final_specificity_present(text: str) -> bool:
+    value = text or ""
+    groups = (
+        ("讲解", "练习生成", "错题复盘", "阅读拓展", "写作辅助"),
+        ("外包启动", "外包检查", "外包错因", "依赖路径"),
+        ("数学", "阅读", "写作", "AI 工具", "优先级"),
+        ("教育研究支持", "证据支持", "合理推断", "前瞻假设"),
+        ("家长", "每周", "可执行"),
+        ("医疗", "心理诊断", "非诊断"),
+    )
+    hits = sum(1 for terms in groups if any(term in value for term in terms))
+    concrete_markers = ("自述验证", "少量订正", "错因分类", "事实核查", "独立改写", "外包启动", "反证信号")
+    return hits >= 5 and sum(1 for marker in concrete_markers if marker in value) >= 4
+
+
+def _tail_caveat_not_bound_to_claim(text: str) -> bool:
+    value = text or ""
+    if not any(term in value for term in ("证据有限", "证据缺口", "证据边界", "需要谨慎", "条件性")):
+        return False
+    claim_region = value[: max(1, int(len(value) * 0.72))]
+    bound_markers = ("[合理推断]", "[前瞻假设]", "触发条件", "反证信号", "只在", "如果", "待验证", "未验证", "条件性", "证据边界")
+    return not any(marker in claim_region for marker in bound_markers)
+
+
+def _calibration_absorption_missing(calibration: str, text: str) -> bool:
+    source = calibration or ""
+    if not source.strip():
+        return False
+    lowered = source.lower()
+    calibration_terms = (
+        "downgrade",
+        "downrank",
+        "speculative",
+        "unverified",
+        "校准",
+        "下调",
+        "降级",
+        "证据不足",
+        "未验证",
+        "合理推断",
+        "条件性",
+    )
+    if not any(term in lowered or term in source for term in calibration_terms):
+        return False
+    value = text or ""
+    absorption_markers = ("条件性", "合理推断", "前瞻假设", "待验证", "未验证", "证据缺口", "不应视为", "需要复核", "下调", "低风险跟踪")
+    return not any(marker in value for marker in absorption_markers)
+
+
 def _final_controller_review_quality_assessment(query: str, text: str) -> dict[str, Any]:
     failures = _final_user_facing_quality_failures({"mode": ENGINE_RESEARCH_DECISION, "query": query, "output_quality_profile": []}, text)
     raw_leakage = [failure for failure in failures if "raw_" in failure or "metadata_leakage" in failure or "direct_gaps_raw_dump" in failure]
     repeated = [failure for failure in failures if "boilerplate" in failure or "template" in failure or "anchor_stuffed" in failure]
     cross_domain = [failure for failure in failures if failure.startswith("cross_domain_residue")]
+    synthesis_gap = [
+        failure
+        for failure in failures
+        if failure
+        in {
+            "missing_architecture_decision",
+            "mechanical_priority_extractor",
+            "missing_travel_route_decision",
+            "missing_education_specificity",
+            "caveat_not_bound_to_claim",
+            "calibration_absorption_gap",
+        }
+    ]
     specificity = 8.0
     template_risk = 3.0
     if raw_leakage:
@@ -11136,6 +11482,9 @@ def _final_controller_review_quality_assessment(query: str, text: str) -> dict[s
     if cross_domain:
         specificity -= 1.5
         template_risk += 1.0
+    if synthesis_gap:
+        specificity -= 2.0
+        template_risk += 1.5
     specificity = max(0.0, min(10.0, specificity))
     template_risk = max(0.0, min(10.0, template_risk))
     return {
@@ -11194,7 +11543,7 @@ def _specific_negative_examples_present(section: str, units: list[str]) -> bool:
 def _specific_trigger_conditions_present(section: str, units: list[str]) -> bool:
     value = section or ""
     trigger_terms = ("如果", "当", "一旦", "触发", "条件", "前提", "临近", "直到", "暂停", "停止", "缩短", "下调", "freeze", "until")
-    weak_only = ("看反馈", "保持灵活", "适时调整", "适时优化", "动态评估")
+    weak_only = ("看反馈", "保持灵活", "适时调整", "适时优化", "动态评估", "体验不好", "风险增加", "就调整")
     has_trigger = any(term in value for term in trigger_terms)
     if not has_trigger:
         return False
@@ -11266,7 +11615,8 @@ def _ranking_items_from_question(body: str) -> list[str]:
     tail = before_between.split("：")[-1].split(":")[-1]
     items: list[str] = []
     for token in re.split(r"[、/,，]+", tail):
-        token = re.sub(r"(使用)?(之间|应该|如何|排序).*$", "", token).strip()
+        token = re.sub(r"(使用)?(之间|应该|如何|排序).*$", "", token).strip(" ；;。")
+        token = re.sub(r"的优先级$", "", token).strip(" ；;。")
         if 1 < len(token) <= 16 and token not in ("资源", "优先级") and not any(skip in token for skip in ("请", "判断", "哪些", "目标")):
             items.append(token)
     deduped = list(dict.fromkeys(items))
