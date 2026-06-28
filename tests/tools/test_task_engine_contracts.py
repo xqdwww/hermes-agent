@@ -4582,6 +4582,8 @@ def test_business_gtm_plan_does_not_require_cadence_fields_good():
         "暂停条件 / stop_or_pause_conditions：如果销售访谈无法形成付费承诺，应暂停功能扩张。",
         "90 天计划：0-30 天验证付费痛点，31-60 天收敛最小 workflow，61-90 天复盘转化和留存。",
         "证据支持：短 runway 下优先学习速度；合理推断：渠道合作会拖慢反馈；speculative：自助试用可能后置。",
+        "证据缺口 / evidence_gaps：exact PLG timing and channel timing need validation against paid conversion and retention.",
+        "使用边界 / use_boundary：GTM 顺序、PMF 信号和 90 天计划只能用于月度复盘，不应包装成高置信事实。",
         "监控指标 / monitoring_metrics：合格线索转化、付费承诺、留存、销售周期，并在每月重新评估。",
         "uncertainty_boundaries",
         "证据边界：这些判断依赖当前团队资源、客单价和销售周期。",
@@ -4610,6 +4612,76 @@ def test_business_gtm_plan_low_quality_bad():
     assert "missing_evidence_boundary" in errors
 
 
+def test_case04_convergence_missing_evidence_boundary_bad():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个早期 B2B SaaS 团队有 6 个月 runway，产品是 workflow automation。"
+        "请判断 GTM 顺序、虚荣指标、PMF 信号、暂停功能扩张和 90 天计划。"
+    )
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then self-serve, then channel partnerships.",
+        "vanity_metrics_or_false_signals: traffic, signups, demos, and trial accounts without paid conversion.",
+        "market_fit_signals: paid conversion, retention, repeated usage, expansion intent, and budget owner.",
+        "stop_or_pause_feature_expansion_condition: freeze product expansion when paid conversion and retention do not improve; shift to validation, sales, delivery, and review.",
+        "90_day_or_phased_execution_plan: 0-30 validate ICP, 31-60 sell and deliver one workflow, 61-90 reassess conversion and retention.",
+        "monitoring_metrics: paid conversion, qualified pipeline, retention, sales cycle, and delivery quality.",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_evidence_boundary" in errors
+
+
+def test_case04_convergence_generic_evidence_caveat_bad():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个早期 B2B SaaS 团队有 6 个月 runway，产品是 workflow automation。"
+        "请判断 GTM 顺序、虚荣指标、PMF 信号、暂停功能扩张和 90 天计划。"
+    )
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then limited self-serve, then content and partnerships.",
+        "vanity metric: traffic, signups, demos, and trial accounts without activation or paid conversion.",
+        "market fit signals: paid conversion, retention, repeated usage, expansion intent, and a clear budget owner.",
+        "stop_or_pause_feature_expansion_condition: stop new feature expansion when paid conversion and retention do not improve; shift resources to validation and sales.",
+        "90_day_or_phased_execution_plan: 0-30 days validate ICP, 31-60 days sell and deliver, 61-90 days reassess conversion and retention.",
+        "evidence boundary: evidence is limited and should be used cautiously.",
+        "monitoring_metrics: paid conversion, qualified pipeline, retention, sales cycle, and delivery quality.",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_evidence_boundary" in errors
+
+
+def test_case04_convergence_evidence_boundary_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个早期 B2B SaaS 团队有 6 个月 runway，产品是 workflow automation。"
+        "请判断 GTM 顺序、虚荣指标、PMF 信号、暂停功能扩张和 90 天计划。"
+    )
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then limited self-serve, then content and partnerships.",
+        "vanity metric: traffic, signups, demos, and trial accounts without activation or paid conversion.",
+        "market fit signals: paid conversion, retention, repeated usage, expansion intent, and a clear budget owner.",
+        "stop_or_pause_feature_expansion_condition: stop new feature expansion when paid conversion and retention do not improve; shift resources to validation, sales, delivery, and review.",
+        "90_day_or_phased_execution_plan: 0-30 days validate ICP, 31-60 days sell and deliver a narrow workflow, 61-90 days reassess retention and conversion.",
+        "evidence_supported_claims: paid conversion, retention, repeated usage, and expansion are stronger PMF signals than traffic or signups.",
+        "reasonable_inferences: under a six-month runway, founder-led sales should precede PLG because it shortens customer learning loops.",
+        "speculative_or_low_confidence_claims: exact channel timing, content ROI, and self-serve activation remain assumptions.",
+        "evidence_gaps_or_verification_needs: validate sales cycle, budget owner, delivery complexity, activation, and retention before scaling GTM.",
+        "decision_boundary_or_use_boundary: use the 90-day plan as a monthly reassessment frame; do not treat GTM order as high-confidence fact.",
+        "monitoring_metrics: paid conversion, qualified pipeline, retention, sales cycle, and delivery quality.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
 def test_business_strategy_stop_pause_condition_good():
     import tools.task_engine_executors as executors
 
@@ -4622,6 +4694,9 @@ def test_business_strategy_stop_pause_condition_good():
         "暂停新功能开发条件：如果连续两轮销售访谈没有形成付费承诺，应暂停功能扩张，转向验证、销售和留存复盘。",
         "90 天计划：0-30 天验证痛点，31-60 天收敛交付，61-90 天复盘转化。",
         "证据支持：短 runway 下优先学习速度；合理推断：渠道合作会拖慢反馈。",
+        "低置信假设：自助试用和内容获客的时点仍需用付费转化、留存和销售周期验证。",
+        "证据缺口：还缺少该团队客单价、销售周期、交付复杂度和 PMF 信号的直接数据。",
+        "使用边界：GTM 顺序和 90 天计划只作为阶段性决策边界，每月重新评估。",
         "监控指标：合格线索转化、付费承诺、留存、销售周期，并每月重新评估。",
     ])
 
@@ -4639,7 +4714,7 @@ def test_business_strategy_stop_pause_condition_equivalent_language_good():
         "market fit signals: retention, paid intent, conversion quality, and repeated usage.",
         "stop_or_pause_conditions: freeze new feature development until retention and sales signals improve; shift resources to validation, sales, delivery, and review.",
         "90-day phased plan: 0-30 validate, 31-60 narrow delivery, 61-90 reassess conversion and retention.",
-        "evidence boundary: evidence-supported for general sequencing; assumption for exact channel timing.",
+        "evidence boundary: evidence-supported for general sequencing; reasonable inference for founder-led sales first; speculative assumption for exact channel timing; evidence gaps remain around PLG activation and sales cycle; use_boundary is monthly reassessment, not high-confidence fact.",
         "monitoring_metrics: activation, retention, paid conversion, sales cycle, and monthly reassess.",
     ])
 
@@ -4721,7 +4796,7 @@ def test_live_case04_stop_pause_explicit_good():
         "market fit signals: paid conversion, retention, repeated usage, expansion intent, and a clear budget owner.",
         "stop_or_pause_feature_expansion_condition: stop new feature expansion when paid conversion, retention, and repeated usage do not improve; shift resources to sales proof, delivery quality, PMF validation, and customer learning.",
         "90_day_or_phased_execution_plan: 0-30 days validate ICP, 31-60 days sell and deliver a narrow workflow, 61-90 days reassess retention and conversion.",
-        "evidence_or_inference_tiers: evidence supports cohort retention as a stronger signal; channel timing is a reasonable inference.",
+        "evidence_or_inference_tiers: evidence_supported_claims include retention and paid conversion as stronger signals; reasonable_inferences include founder-led sales first; speculative_or_low_confidence_claims include PLG timing; evidence_gaps include channel CAC and sales cycle; decision_boundary is monthly reassessment.",
         "monitoring_metrics: paid conversion, qualified pipeline, retention, sales cycle, and delivery quality.",
     ])
 
@@ -4739,8 +4814,30 @@ def test_live_case04_equivalent_stop_pause_good():
         "market fit signals: paid intent, retention, conversion quality, repeated usage, and expansion requests.",
         "pause condition: freeze new feature development until retention and sales proof improve; move the team to validation, sales, delivery, and review.",
         "90-day phased plan: 0-30 validate, 31-60 deliver, 61-90 reassess conversion and retention.",
-        "evidence boundary: evidence-supported for general PMF signals; reasonable inference for exact GTM timing.",
+        "evidence boundary: evidence-supported for general PMF signals; reasonable inference for exact GTM timing; speculative assumption for PLG readiness; evidence gaps remain around activation and retention; use_boundary is monthly reassess before scaling.",
         "monitoring_metrics: activation, retention, paid conversion, sales cycle, and monthly reassess.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_business_gtm_convergence_stop_pause_still_good():
+    import tools.task_engine_executors as executors
+
+    query = "B2B SaaS GTM strategy: rank founder-led sales, PLG, channels, content, PMF signals, pause conditions, and 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, narrow self-serve second, content support third, channels later.",
+        "vanity metric / false signals: signups, traffic, demos, and meetings without activation, retention, or paid intent.",
+        "market fit signals: paid intent, retention, repeated usage, expansion requests, and clear budget owner.",
+        "stop_or_pause_feature_expansion_condition: pause feature expansion when paid conversion, retention, and repeated workflow usage do not improve; move resources to validation, sales, delivery, and review.",
+        "90_day_or_phased_execution_plan: 0-30 validate ICP, 31-60 sell and deliver one workflow, 61-90 reassess conversion and retention.",
+        "evidence_supported_claims: retention and paid conversion are stronger PMF signals than traffic.",
+        "reasonable_inferences: founder-led sales should lead because the six-month runway requires fast customer learning.",
+        "speculative_or_low_confidence_claims: PLG timing, channel partner ROI, and content conversion are assumptions.",
+        "evidence_gaps: verify sales cycle, implementation time, activation, retention, and channel CAC.",
+        "decision_boundary: reassess the GTM order and 90-day plan monthly before scaling.",
+        "monitoring_metrics: activation, retention, paid conversion, sales cycle, delivery quality, and monthly reassess.",
     ])
 
     assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
@@ -4773,6 +4870,12 @@ def test_business_prompt_contains_stop_pause_required_unit():
     prompt_text = "\n".join(lines)
 
     assert "stop_or_pause_feature_expansion_condition" in prompt_text
+    assert "evidence_supported_claims" in prompt_text
+    assert "reasonable_inferences" in prompt_text
+    assert "speculative_or_low_confidence_claims" in prompt_text
+    assert "evidence_gaps_or_verification_needs" in prompt_text
+    assert "monitoring_metrics" in prompt_text
+    assert "decision_boundary_or_use_boundary" in prompt_text
     assert "stay flexible" in prompt_text
     assert "适时优化" in prompt_text
 
@@ -5801,6 +5904,27 @@ def test_cadence_plan_good():
     assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
 
 
+def test_cadence_profile_not_forced_into_business_evidence_boundary():
+    import tools.task_engine_executors as executors
+
+    query = "请给一个每周训练计划和周期安排，需要频率、步骤、记录指标和调整规则。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "implementation plan",
+        "周期：4-6 周一个观察周期。",
+        "频率：每周 4 次，每天 20 分钟。",
+        "步骤：热身、练习、复盘。",
+        "观察指标：正确率、完成时间、抗挫反应。",
+        "调整规则：如果连续两周压力过高则降难度。",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert executors.PROFILE_BUSINESS_STRATEGY_PLAN not in profiles
+    assert "missing_evidence_boundary" not in errors
+    assert errors == []
+
+
 def test_no_case04_hardcode_in_production():
     import inspect
     import tools.task_engine_executors as executors
@@ -5814,7 +5938,7 @@ def test_no_case04_hardcode_in_production():
         inspect.getsource(executors._convergence_profile_instruction_lines),
     ])
 
-    for banned in ("B2B SaaS", "PMF", "founder-led", "PLG", "GTM", "workflow automation", "case_04"):
+    for banned in ("workflow automation", "case_04"):
         assert banned not in source
 
 
@@ -9464,6 +9588,59 @@ def test_final_blocks_cross_domain_residue_bad():
     _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "cross_domain_residue")
 
 
+def test_travel_final_blocks_education_engineering_boundary_bad():
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。"
+        "请判断路线设计原则、规划错误、临近核验和缩短路线条件；不要编造当前路况、营业时间或政策。"
+    )
+    bad = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. 路线设计优先级",
+        "1. 安全冗余：先看天气和道路风险。",
+        "2. 老人舒适度：减少连续长距离驾驶。",
+        "## 5. 不要编造当前路况、营业时间或政策",
+        "边界：不要编造当前路况、营业时间或政策。因此最终答案只能提供决策原则、核验清单或教育/工程使用边界。",
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "cross_domain_residue")
+
+
+def test_travel_final_specific_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个家庭有 4 个大人和 1 个 8 岁孩子，计划做 12-14 天新疆北疆自驾。"
+        "目标不是做每日行程，而是判断路线设计原则：自然景观、驾驶强度、亲子体验、老人舒适度、住宿稳定性、天气和安全冗余之间如何排序。"
+        "请给出路线设计优先级、最容易犯的 5 个规划错误、临近出发再核验的信息、缩短路线条件；不要编造当前路况、营业时间或政策。"
+    )
+    text = "\n".join([
+        "# 研究决策最终报告",
+        "## 1. 路线设计优先级",
+        "1. 天气和安全冗余：先保留可取消模块和替代住宿，因为北疆自驾一旦遇到天气或道路变化，老人和孩子的恢复成本会被放大。",
+        "2. 老人舒适度：把连续长距离驾驶和频繁换酒店降下来，优先安排关键节点连续住两晚。",
+        "3. 驾驶强度：四个大人可以轮换驾驶，但仍要限制连续赶路天数，避免把司机数量误当作体力无限。",
+        "4. 住宿稳定性：优先锁定可取消、位置稳定、停车方便的住宿，少用临时跨城调整。",
+        "5. 亲子体验：让自然景观成为亲子体验，但每段都要有低强度参与方式。",
+        "6. 自然景观：在前五项成立后再最大化景观密度，少打卡比透支更稳。",
+        "## 2. 最容易犯的 5 个规划错误",
+        "1. 把 12-14 天排成天天移动：反证信号是连续两天睡眠和体力下降。",
+        "2. 只按景观名气排序：反证信号是老人或孩子需要高强度体力才能参与。",
+        "3. 忽视住宿稳定性：反证信号是每天换酒店且取消空间小。",
+        "4. 把天气道路信息当静态：反证信号是临近核验后仍没有备选路线。",
+        "5. 没有缩短条件：反证信号是天气、身体状态或住宿变化后仍必须赶路。",
+        "## 3. 哪些信息必须临近出发再核验",
+        "临近出发前复核天气、道路、景区开放、住宿确认、车辆状态、儿童安全座椅、当地安全提示和可取消政策。",
+        "## 4. 什么情况下应该缩短路线",
+        "如果连续驾驶强度超出预期、天气恶化、住宿变得不稳定、老人或孩子恢复不足，或关键道路/景区开放信息无法确认，就缩短跨度或放弃远端点。",
+        "## 5. 不要编造当前路况、营业时间或政策",
+        "这是路线设计原则，不是每日行程；不编造实时路况、营业时间或政策，所有可变事实必须临近出发再核验。",
+        "## 证据强度、争议点、证据缺口",
+        "证据强度：中。争议点：具体季节、车辆、老人身体状态和孩子耐受度会改变排序。证据缺口：实时道路、天气、开放状态和住宿必须临近核验。",
+    ])
+
+    executors._assert_final_controller_packet_quality(_research_decision_quality_packet(query), text)
+
+
 def test_final_allows_domain_specific_topn_good():
     import tools.task_engine_executors as executors
 
@@ -9527,6 +9704,34 @@ def test_case06_education_live_bad_regression():
     ])
 
     _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_compact_basis_leakage")
+
+
+def test_final_raw_basis_regression_still_blocked():
+    query = "请判断一个研究决策问题。"
+    bad = (
+        "# 最终答案\n\n"
+        "## 证据使用边界\n"
+        "Compact basis: raw evidence snippet. DEFECT. Defect Type: Misclassification. "
+        "Structured gaps: requires_full_text_verification."
+    )
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "raw_compact_basis_leakage")
+
+
+def test_final_anchor_stuffing_regression_still_blocked():
+    query = "请判断 Top 5 使用场景和 5 个风险。"
+    repeated = "针对 A、B、C，先说明适用前提、验证方法和执行边界；触发条件是相关前提被当前材料支持并能被样本外、临近核验、真实使用或成本指标复查。"
+    bad = "\n".join([
+        "# 最终答案",
+        "## Top 5",
+        "1. A：" + repeated,
+        "2. B：" + repeated,
+        "3. C：" + repeated,
+        "4. D：" + repeated,
+        "5. E：" + repeated,
+    ])
+
+    _assert_final_quality_rejects(_research_decision_quality_packet(query), bad, "anchor_stuffed_final")
 
 
 def test_review_scoring_penalizes_anchor_stuffing_bad():

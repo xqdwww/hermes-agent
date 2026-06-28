@@ -4807,16 +4807,6 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
                 "90 day",
                 "phased plan",
             ),
-            "missing_evidence_boundary": (
-                "证据支持",
-                "合理推断",
-                "前瞻假设",
-                "假设",
-                "evidence",
-                "inference",
-                "speculative",
-                "assumption",
-            ),
             "missing_monitoring_metrics": (
                 "监控指标",
                 "观察指标",
@@ -4831,6 +4821,23 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
         for name, terms in checks.items():
             if not any(term in value or term in lowered for term in terms):
                 errors.append(name)
+        if stage_name == "convergence_report":
+            if not _business_convergence_evidence_boundary_present(value):
+                errors.append("missing_evidence_boundary")
+        elif not any(
+            term in value or term in lowered
+            for term in (
+                "证据支持",
+                "合理推断",
+                "前瞻假设",
+                "假设",
+                "evidence",
+                "inference",
+                "speculative",
+                "assumption",
+            )
+        ):
+            errors.append("missing_evidence_boundary")
         if not _business_stop_pause_condition_present(value):
             errors.append("missing_stop_pause_condition")
         if stage_name == "final_controller_report":
@@ -4847,6 +4854,57 @@ def _quality_profile_errors(text: str, profiles: list[str], *, stage_name: str) 
             if not any(term in value or term in lowered for term in terms):
                 errors.append(name)
     return errors
+
+
+def _business_convergence_evidence_boundary_present(text: str) -> bool:
+    value = text or ""
+    lowered = value.lower()
+
+    def has_any(terms: tuple[str, ...]) -> bool:
+        return any(term in value or term in lowered for term in terms)
+
+    required_groups = (
+        ("证据支持", "evidence_supported", "evidence-supported", "supported claim"),
+        ("合理推断", "reasonable_inference", "reasonable inference", "inference"),
+        ("低置信", "低信心", "前瞻假设", "待验证假设", "speculative", "low_confidence", "low confidence", "assumption"),
+        ("证据缺口", "核验", "验证需求", "verification", "evidence_gap", "evidence gaps", "needs validation"),
+        ("使用边界", "决策边界", "use_boundary", "decision_boundary", "when_to_reassess", "reassess"),
+    )
+    if not all(has_any(group) for group in required_groups):
+        return False
+
+    claim_binding_terms = (
+        "GTM",
+        "go-to-market",
+        "PLG",
+        "founder-led",
+        "self-serve",
+        "channel",
+        "content",
+        "PMF",
+        "market fit",
+        "90 天",
+        "90-day",
+        "90 day",
+        "runway",
+        "sales",
+        "retention",
+        "conversion",
+        "feature expansion",
+        "product expansion",
+        "虚荣指标",
+        "付费",
+        "留存",
+        "转化",
+        "渠道",
+        "内容获客",
+        "自助试用",
+        "暂停",
+        "功能扩张",
+        "客户学习",
+    )
+    binding_count = sum(1 for term in claim_binding_terms if term in value or term.lower() in lowered)
+    return binding_count >= 3
 
 
 def _foresight_final_judgment_unit_errors(text: str) -> list[str]:
@@ -7246,6 +7304,7 @@ def _convergence_profile_instruction_lines(profiles: list[str]) -> list[str]:
         lines.extend([
             "Business strategy profile: do not treat every execution plan as a repeated cadence plan.",
             "For business/go-to-market strategy, convergence must include: strategic_sequence or prioritized_order; vanity_metrics_or_false_signals; market_fit_signals; stop_or_pause_conditions; 90_day_or_phased_execution_plan; evidence_or_inference_tiers; monitoring_metrics; and decision_boundary or when_to_reassess.",
+            "Business/GTM evidence boundary is mandatory and must bind to concrete convergence claims. Include a substantive evidence boundary unit with: evidence_supported_claims; reasonable_inferences; speculative_or_low_confidence_claims; evidence_gaps_or_verification_needs; and decision_boundary_or_use_boundary. Tie the boundary to GTM order, PMF signals, stop/pause conditions, and the 90-day plan; do not write only a generic 'evidence is limited' caveat.",
             "Write a standalone convergence judgment unit with this exact label or heading: stop_or_pause_feature_expansion_condition.",
             "For stop_or_pause_feature_expansion_condition, state concrete conditions for when to stop, pause, freeze, halt, or narrow new feature/product expansion; include what signals trigger the pause and whether resources should shift to validation, sales, retention, delivery, or review.",
             "This unit must answer the user's stop/pause question directly: what signals mean the team should stop adding features and instead focus on sales proof, delivery quality, retention, PMF validation, or customer learning.",
@@ -8672,6 +8731,29 @@ def _convergence_report_prompt_from_artifacts(
     profiles = _task_engine_profiles_from_query(query)
     foresight_sections = _convergence_foresight_template_lines(profiles)
     profile_instruction_lines = _convergence_profile_instruction_lines(profiles)
+    required_sections = [
+        "divergence_role_summary",
+        "conflicts_to_resolve",
+        "convergence_decision_framework",
+        "uncertainty_boundaries",
+        "handoff_questions_for_external_calibration",
+    ]
+    if PROFILE_BUSINESS_STRATEGY_PLAN in profiles:
+        required_sections.extend(
+            [
+                "strategic_sequence_or_prioritized_order",
+                "vanity_metrics_or_false_signals",
+                "market_fit_signals",
+                "stop_or_pause_feature_expansion_condition",
+                "90_day_or_phased_execution_plan",
+                "evidence_supported_claims",
+                "reasonable_inferences",
+                "speculative_or_low_confidence_claims",
+                "evidence_gaps_or_verification_needs",
+                "monitoring_metrics",
+                "decision_boundary_or_use_boundary",
+            ]
+        )
     return "\n".join(
         [
             "Run RESEARCH_DECISION stage 14: convergence_report using R1-32B only.",
@@ -8685,9 +8767,10 @@ def _convergence_report_prompt_from_artifacts(
             *foresight_sections,
             *profile_instruction_lines,
             (
-                "Return the hard-template headings exactly as listed above; include divergence_role_summary, conflicts_to_resolve, convergence_decision_framework, uncertainty_boundaries, and handoff_questions_for_external_calibration content inside those headings."
+                "Return the hard-template headings exactly as listed above; also include these required convergence sections with substantive body text: "
+                + ", ".join(required_sections)
                 if foresight_sections
-                else "Return only these sections: divergence_role_summary, conflicts_to_resolve, convergence_decision_framework, uncertainty_boundaries, handoff_questions_for_external_calibration."
+                else "Return only these sections, each with substantive body text: " + ", ".join(required_sections) + "."
             ),
             "Do not write final_controller_report, PIPELINE_COMPLETE markers, or a final user-facing report.",
             f"Current run root: {base}",
@@ -10025,7 +10108,7 @@ def _action_boundary_answer_lines(query: str, body: str, combined: str) -> list[
     ]
     negative = _negative_constraint_excerpt(combined)
     if negative:
-        lines.append(f"- 边界：{negative}。因此最终答案只能提供决策原则、核验清单或教育/工程使用边界，不替代被用户排除的建议类型。")
+        lines.append(f"- 边界：{negative}。因此最终答案只能提供决策原则、核验清单或当前场景的使用边界，不替代被用户排除的建议类型。")
     return lines
 
 def _ranking_item_priority(item: str) -> int:
@@ -10725,6 +10808,8 @@ def _cross_domain_residue_failures(query: str, text: str) -> list[str]:
     if any(term in query_value for term in ("自驾", "住宿", "路线", "路况", "营业时间")):
         if any(term in value or term in lowered for term in ("PMF", "plg", "GTM", "销售转化", "founder-led")):
             failures.append("cross_domain_residue:travel_business")
+        if any(term in value for term in ("教育/工程使用边界", "教育使用边界", "工程使用边界", "医疗/心理诊断边界")):
+            failures.append("cross_domain_residue:travel_education_engineering_boundary")
     if any(term in query_value for term in ("B2B", "SaaS", "GTM", "founder-led", "PMF", "runway")):
         if any(term in value for term in ("路况", "营业时间", "景区开放", "天气和安全冗余")):
             failures.append("cross_domain_residue:business_travel")
