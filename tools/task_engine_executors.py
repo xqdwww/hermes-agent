@@ -4721,55 +4721,52 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
     if not value.strip():
         return False
 
-    def has_any(terms: tuple[str, ...]) -> bool:
-        return any(term in value or term.lower() in lowered for term in terms)
+    def has_any(terms: tuple[str, ...], haystack: str | None = None) -> bool:
+        target = value if haystack is None else haystack
+        lowered_target = target.lower()
+        return any(term in target or term.lower() in lowered_target for term in terms)
 
-    if not has_any((
+    market_fit_unit = _business_unit_by_terms(value, (
         "market_fit_signals",
         "market fit signals",
         "market-fit signals",
+        "pmf signals",
         "product_market_fit",
         "product-market fit",
+        "product market fit",
         "PMF",
         "真实信号",
         "市场匹配",
         "产品市场匹配",
-    )):
+    ))
+    if not market_fit_unit:
         return False
 
     generic_markers = (
         "需要验证 PMF",
+        "验证 PMF",
         "观察市场反馈",
         "关注用户需求",
         "关注市场反馈",
+        "根据反馈调整",
+        "持续监控转化",
         "validate PMF",
         "observe market feedback",
         "watch feedback",
         "understand user needs",
+        "adjust based on feedback",
+        "monitor conversion",
     )
-    concrete_markers = (
-        "paid",
-        "付费",
-        "retention",
-        "留存",
-        "repeatable",
-        "可复制",
-        "implementation",
-        "实施",
-        "urgent",
-        "紧迫",
-        "anti_signal",
-        "反证",
-    )
-    if has_any(generic_markers) and sum(1 for marker in concrete_markers if marker in value or marker.lower() in lowered) < 3:
-        return False
-
-    required_signal_groups = (
+    positive_signal_groups = (
         (
             "paid conversion",
+            "paid conversions",
             "paid pilot",
+            "paid pilots",
             "paid intent",
             "willingness to pay",
+            "revenue conversion",
+            "budget commitment",
             "budget owner",
             "payment",
             "付费转化",
@@ -4783,11 +4780,15 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
         (
             "repeatable sales",
             "repeatable founder-led",
+            "founder-led sales repeatability",
             "sales motion",
             "sales path",
             "sales cycle",
             "qualified pipeline",
+            "qualified sales conversation",
+            "sales repeatability",
             "repeatable motion",
+            "repeatable icp conversion",
             "可复制销售",
             "重复销售",
             "销售路径",
@@ -4800,8 +4801,12 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
             "willingness to implement",
             "implementation",
             "migration willingness",
+            "workflow migration",
+            "willingness to migrate workflow",
             "workflow adoption",
             "deployment willingness",
+            "onboarding commitment",
+            "operational adoption",
             "实施意愿",
             "愿意实施",
             "愿意迁移",
@@ -4814,6 +4819,8 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
             "retention",
             "renewal",
             "expansion",
+            "activation",
+            "activation rate",
             "repeat usage",
             "repeated usage",
             "continued usage",
@@ -4822,6 +4829,7 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
             "续费",
             "复购",
             "扩张",
+            "激活",
             "持续使用",
             "重复使用",
             "核心使用",
@@ -4829,9 +4837,14 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
         (
             "urgent workflow pain",
             "urgent pain",
+            "critical workflow pain",
+            "critical workflow pain points",
             "painful workflow",
+            "painful workflow bottleneck",
+            "must-solve workflow problem",
             "must-have workflow",
             "burning pain",
+            "high-urgency pain",
             "high-frequency pain",
             "紧迫工作流痛点",
             "紧迫痛点",
@@ -4841,22 +4854,35 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
             "关键流程",
         ),
     )
-    if not all(has_any(group) for group in required_signal_groups):
+    positive_hits = sum(1 for group in positive_signal_groups if has_any(group, market_fit_unit))
+    if has_any(generic_markers, market_fit_unit) and positive_hits == 0:
         return False
 
     false_positive_terms = (
         "false_positive",
         "false positive",
+        "false-positive",
         "false signal",
         "vanity",
         "traffic",
         "signup",
+        "signups",
         "trial",
         "demo",
         "meeting",
+        "high nps without retention",
+        "without retention",
+        "without revenue",
         "without activation",
         "without qualified pain",
         "without paid",
+        "custom development request",
+        "custom development requests",
+        "custom feature requests without payment",
+        "traffic without pipeline",
+        "trial without activation",
+        "demos without qualified pain",
+        "signups without activation",
         "虚假信号",
         "虚荣指标",
         "注册",
@@ -4871,14 +4897,23 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
     anti_signal_terms = (
         "anti_signal",
         "anti-signals",
+        "anti_signals",
         "disconfirming",
+        "declining retention",
+        "low activation",
+        "lack of repeatable sales motion",
+        "no repeatable sales motion",
         "unwilling to pay",
         "not willing to pay",
+        "unwillingness to pay",
+        "unwillingness to migrate workflow",
         "no migration",
         "weak retention",
         "founder heroics",
+        "founder heroics only",
         "bespoke work",
         "feature requests only",
+        "feature requests without budget",
         "反证信号",
         "反证",
         "不愿付费",
@@ -4891,14 +4926,21 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
     decision_terms = (
         "decision_implication",
         "decision implications",
+        "decision_implications",
+        "implications for GTM",
         "GTM",
         "go-to-market",
         "founder-led",
         "PLG",
         "90-day",
         "90 day",
+        "90-day validation",
         "feature expansion",
+        "pause feature expansion",
         "product scope",
+        "focus on sales",
+        "delivery",
+        "retention",
         "stop_or_pause",
         "决策含义",
         "GTM 顺序",
@@ -4910,6 +4952,13 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
     validation_terms = (
         "validation_metrics",
         "validation metric",
+        "activation rate",
+        "retention rate",
+        "paid conversion rate",
+        "expansion rate",
+        "repeat sales rate",
+        "sean ellis",
+        "implementation completion rate",
         "monitoring_metrics",
         "metric",
         "measure",
@@ -4919,10 +4968,9 @@ def _business_convergence_market_fit_signals_present(text: str) -> bool:
         "复盘指标",
     )
     return (
-        has_any(false_positive_terms)
-        and has_any(anti_signal_terms)
-        and has_any(decision_terms)
-        and has_any(validation_terms)
+        positive_hits >= 1
+        and (has_any(false_positive_terms) or has_any(anti_signal_terms))
+        and (has_any(validation_terms) or has_any(decision_terms))
     )
 
 
@@ -4947,7 +4995,7 @@ def _business_90_day_plan_present(text: str) -> bool:
 
 def _business_section_by_terms(text: str, terms: tuple[str, ...]) -> str:
     value = text or ""
-    matches = list(re.finditer(r"(?m)^##\s+(.+)$", value))
+    matches = list(re.finditer(r"(?m)^#{2,6}\s+(.+)$", value))
     lowered_terms = tuple(term.lower() for term in terms)
     for index, match in enumerate(matches):
         heading = match.group(1)
@@ -4955,6 +5003,42 @@ def _business_section_by_terms(text: str, terms: tuple[str, ...]) -> str:
         if any(term in heading or term in lowered_heading for term in terms) or any(term in lowered_heading for term in lowered_terms):
             end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
             return value[match.start():end].strip()
+    return ""
+
+
+def _business_unit_by_terms(text: str, terms: tuple[str, ...]) -> str:
+    section = _business_section_by_terms(text, terms)
+    if section:
+        return section
+    value = text or ""
+    lowered_terms = tuple(term.lower() for term in terms)
+    lines = value.splitlines()
+    for index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        lowered_line = line.lower()
+        if not any(term in line or term in lowered_line for term in terms) and not any(
+            term in lowered_line for term in lowered_terms
+        ):
+            continue
+        selected = [raw_line]
+        for follow in lines[index + 1:]:
+            stripped = follow.strip()
+            lowered_follow = stripped.lower()
+            if not stripped:
+                selected.append(follow)
+                continue
+            if stripped.startswith("#"):
+                break
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_ /\-]{2,80}\s*[:：]", stripped) or re.match(
+                r"^[\u4e00-\u9fffA-Za-z /]{2,40}\s*[:：]",
+                stripped,
+            ):
+                break
+            if stripped.startswith(("-", "*")) or follow.startswith((" ", "\t")) or any(term in lowered_follow for term in lowered_terms):
+                selected.append(follow)
+                continue
+            break
+        return "\n".join(selected).strip()
     return ""
 
 

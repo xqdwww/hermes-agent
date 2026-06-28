@@ -4786,6 +4786,190 @@ def test_case04_convergence_market_fit_tied_to_decision_good():
     assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
 
 
+def test_captured_case04_market_fit_raw_output_good():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "一个早期 B2B SaaS 团队有 6 个月 runway，产品是面向专业服务公司的 workflow automation。"
+        "团队在纠结 PLG、自助试用、founder-led sales、渠道合作和内容获客。请判断 GTM 顺序、虚荣指标、PMF 信号、暂停功能扩张和 90 天计划。"
+    )
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "### strategic_sequence_or_prioritized_order",
+        "Founder-led sales first; PLG and self-serve after repeatable sales motion; channels and content later.",
+        "### vanity_metrics_or_false_signals",
+        "Registered users are a vanity metric; high NPS without retention or revenue growth is a false signal.",
+        "### market_fit_signals",
+        "Sean Ellis 40% disappointment test; retention and activation curves; Paid Conversions from founder-led sales; Implementation Willingness from professional services firms adopting workflow automation.",
+        "### false_positive_or_vanity_signals",
+        "High NPS Scores Without Context and Custom Development Requests can mask weak product-market fit.",
+        "### anti_signals_or_disconfirming_evidence",
+        "Declining Retention Rates, Low Activation Rates, and Lack of Repeatable Sales Motion disconfirm PMF.",
+        "### validation_metrics",
+        "Activation Rate, Retention Rate, Paid Conversion Rate, and Sean Ellis test results.",
+        "### decision_implications_for_gtm_and_product_scope",
+        "Focus on founder-led sales and core workflow pain points; pause feature expansion if these signals do not improve.",
+        "### stop_or_pause_feature_expansion_condition",
+        "Pause product feature expansion when retention curves fail, paid conversion is weak, or runway drops below four months; shift to sales, delivery, retention, and validation.",
+        "### 90_day_or_phased_execution_plan",
+        "Weeks 1-4 founder-led sales; Weeks 5-8 test activation and retention; Weeks 9-12 reassess GTM and product scope.",
+        "### evidence_supported_claims",
+        "Founder-led sales and retention/activation evidence are stronger than top-of-funnel interest.",
+        "### reasonable_inferences",
+        "PLG can be tested after a repeatable sales motion appears.",
+        "### speculative_or_low_confidence_claims",
+        "Channel partnership timing and content-led acquisition remain assumptions.",
+        "### evidence_gaps_or_verification_needs",
+        "Verify sales cycle, workflow migration cost, activation, retention, expansion, and implementation load before scaling.",
+        "### monitoring_metrics",
+        "Activation Rate, Retention Rate, Paid Conversion Rate, and monthly reassessment.",
+        "### decision_boundary_or_use_boundary",
+        "Use this as a 90-day decision frame, not a high-confidence market fact.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_market_fit_equivalence_critical_workflow_pain_good():
+    import tools.task_engine_executors as executors
+
+    query = "B2B SaaS GTM strategy with PMF signals, vanity metrics, stop conditions, and 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then self-serve, then channels.",
+        "vanity_metrics_or_false_signals: demos without qualified pain and signups without activation are vanity metrics / false signals.",
+        "market-fit signals: critical workflow pain points, paid pilots, operational adoption, and activation rate improvement.",
+        "anti_signals_or_disconfirming_evidence: low activation and lack of repeatable sales motion disconfirm PMF.",
+        "validation_metrics: activation rate, paid conversion rate, implementation completion rate, and repeat sales rate.",
+        "decision_implications_for_gtm_and_product_scope: use these signals to decide GTM order, product scope, feature expansion pause, and 90-day validation.",
+        "stop_or_pause_feature_expansion_condition: pause new features when paid pilots, activation, and implementation completion do not improve; shift to sales and delivery.",
+        "90_day_or_phased_execution_plan: 0-30 validate pain, 31-60 close paid pilots, 61-90 reassess activation and retention.",
+        "evidence_supported_claims: paid pilots and activation are stronger than signups.",
+        "reasonable_inferences: founder-led sales should lead until repeatability appears.",
+        "speculative_or_low_confidence_claims: channel timing remains uncertain.",
+        "evidence_gaps_or_verification_needs: verify sales cycle, implementation effort, retention, and expansion.",
+        "decision_boundary_or_use_boundary: reassess monthly before broadening GTM or product scope.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_market_fit_equivalence_paid_implementation_retention_good():
+    import tools.task_engine_executors as executors
+
+    query = "Business GTM convergence for PMF signals and 90-day execution."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "prioritized_order: founder-led sales, then narrow self-serve, then content and partners.",
+        "vanity_metrics_or_false_signals: traffic without pipeline and trial without activation are vanity metrics / false signals.",
+        "PMF signals: paid conversions, implementation willingness, workflow migration, activation rate, retention rate, expansion, and sustained usage.",
+        "anti_signals_or_disconfirming_evidence: feature requests without budget and unwillingness to migrate workflow disconfirm PMF.",
+        "validation_metrics: activation rate, retention rate, paid conversion rate, expansion rate, and implementation completion rate.",
+        "decision_implications_for_gtm_and_product_scope: these metrics decide GTM order, product scope, pause feature expansion, and the 90-day validation gate.",
+        "stop_or_pause_feature_expansion_condition: stop feature expansion when paid conversion, implementation willingness, activation, or retention do not improve.",
+        "90_day_or_phased_execution_plan: 0-30 validate ICP, 31-60 sell and migrate one workflow, 61-90 reassess retention and expansion.",
+        "evidence_supported_claims: paid conversion and retention are stronger than trial volume.",
+        "reasonable_inferences: repeatable founder-led sales should precede PLG.",
+        "speculative_or_low_confidence_claims: content and channel ROI are still assumptions.",
+        "evidence_gaps_or_verification_needs: verify migration effort, retention, sales cycle, and expansion.",
+        "decision_boundary_or_use_boundary: monthly reassessment before scaling.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_market_fit_false_positive_and_anti_signals_good():
+    import tools.task_engine_executors as executors
+
+    query = "B2B SaaS business strategy: PMF signals, false positives, anti-signals, and GTM implications."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then PLG tests, then partners.",
+        "false_positive_or_vanity_signals: high NPS without retention or revenue growth, custom feature requests without payment, and demos without qualified pain are vanity metrics / false signals.",
+        "market_fit_signals: revenue conversion, paid pilots, sales repeatability, onboarding commitment, retention, and critical workflow pain points.",
+        "anti_signals_or_disconfirming_evidence: declining retention, low activation, no repeatable sales motion, unwillingness to pay, founder heroics only, and feature requests without budget.",
+        "validation_metrics: retention rate, paid conversion rate, repeat sales rate, and implementation completion rate.",
+        "decision_implications_for_gtm_and_product_scope: focus on sales, delivery, retention, product scope, pause feature expansion, and 90-day validation.",
+        "stop_or_pause_feature_expansion_condition: pause features if retention declines, activation stays low, or paid pilots do not convert; move resources to sales proof and delivery.",
+        "90_day_or_phased_execution_plan: 0-30 validate pain, 31-60 sell and implement, 61-90 reassess.",
+        "evidence_supported_claims: paid pilots and retention are stronger evidence than demos.",
+        "reasonable_inferences: founder-led sales should lead under short runway.",
+        "speculative_or_low_confidence_claims: channel ROI remains uncertain.",
+        "evidence_gaps_or_verification_needs: verify sales cycle, migration effort, activation, and retention.",
+        "decision_boundary_or_use_boundary: use as a monthly decision boundary.",
+    ])
+
+    assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_generic_pmf_caveat_still_bad():
+    import tools.task_engine_executors as executors
+
+    query = "B2B SaaS GTM strategy: PMF signals, vanity metrics, pause conditions, and 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "strategic_sequence: founder-led sales first, then limited self-serve, then channels.",
+        "vanity_metrics_or_false_signals: signups and traffic can be misleading.",
+        "market_fit_signals: 需要验证 PMF、观察用户需求、关注市场反馈、持续监控转化，并根据反馈调整产品。",
+        "stop_or_pause_feature_expansion_condition: pause feature expansion when concrete evidence is weak; shift to validation and review.",
+        "90_day_or_phased_execution_plan: 0-30 validate, 31-60 deliver, 61-90 reassess.",
+        "evidence_supported_claims: evidence is limited.",
+        "reasonable_inferences: timing is uncertain.",
+        "speculative_or_low_confidence_claims: PLG readiness is speculative.",
+        "evidence_gaps_or_verification_needs: verify conversion and retention.",
+        "decision_boundary_or_use_boundary: reassess monthly.",
+        "monitoring_metrics: metrics should be watched.",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_market_fit_signals" in errors
+
+
+def test_market_fit_section_header_case_dash_variants_good():
+    import tools.task_engine_executors as executors
+
+    query = "B2B SaaS GTM strategy: PMF signals, vanity metrics, pause conditions, and 90-day plan."
+    profiles = executors._task_engine_profiles_from_query(query)
+    for heading in ("### market_fit_signals", "### market-fit signals", "### PMF signals", "### market fit signals"):
+        text = "\n".join([
+            "strategic_sequence: founder-led sales first, self-serve second, channels later.",
+            "vanity_metrics_or_false_signals: signups without activation and demos without qualified pain are vanity metrics / false signals.",
+            heading,
+            "Paid pilot, budget commitment, repeatable founder-led sales, workflow migration, activation rate, retention rate, and critical workflow pain points.",
+            "anti_signals_or_disconfirming_evidence: declining retention, low activation, no repeatable sales motion, and unwillingness to pay.",
+            "validation_metrics: activation rate, retention rate, paid conversion rate, Sean Ellis test, and implementation completion rate.",
+            "decision_implications_for_gtm_and_product_scope: these signals decide GTM order, product scope, feature expansion pause, and 90-day validation.",
+            "stop_or_pause_feature_expansion_condition: pause new features when paid conversion, retention, and implementation do not improve.",
+            "90_day_or_phased_execution_plan: 0-30 validate, 31-60 sell and implement, 61-90 reassess.",
+            "evidence_supported_claims: paid conversion and retention are stronger than signups.",
+            "reasonable_inferences: founder-led sales should lead.",
+            "speculative_or_low_confidence_claims: PLG timing remains uncertain.",
+            "evidence_gaps_or_verification_needs: verify sales cycle, implementation load, activation, and retention.",
+            "decision_boundary_or_use_boundary: reassess monthly before scaling.",
+        ])
+
+        assert executors._quality_profile_errors(text, profiles, stage_name="convergence_report") == []
+
+
+def test_cadence_profile_not_forced_into_market_fit_good():
+    import tools.task_engine_executors as executors
+
+    query = "请设计一个 4-6 周的练习 cadence，包括周期、频率、步骤、记录指标和调整规则。"
+    profiles = executors._task_engine_profiles_from_query(query)
+    text = "\n".join([
+        "周期：4-6 周为一轮。",
+        "频率：每周三次，每次 30 分钟。",
+        "步骤：先复盘，再练习，再记录错因。",
+        "记录指标：正确率、完成时间、错因类型和复盘质量。",
+        "调整规则：连续两次错误增加就降难度，连续两周稳定再加难度。",
+    ])
+
+    errors = executors._quality_profile_errors(text, profiles, stage_name="convergence_report")
+
+    assert "missing_market_fit_signals" not in errors
+
+
 def test_business_strategy_stop_pause_condition_good():
     import tools.task_engine_executors as executors
 
