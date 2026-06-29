@@ -67,14 +67,14 @@ BLOCKED_ARTIFACT_PATH_ESCAPE = "BLOCKED_ARTIFACT_PATH_ESCAPE"
 BLOCKED_INVALID_TOPIC_STATE = "BLOCKED_INVALID_TOPIC_STATE"
 BLOCKED_TOPIC_STATE_RUN_DIR_MISMATCH = "BLOCKED_TOPIC_STATE_RUN_DIR_MISMATCH"
 
-FINAL_V1_NAMES = ("final_controller_report.md", "final.md", "final_answer.md")
+FINAL_V1_NAMES = ("final_controller_report.md", "final_decision_report.md", "final.md", "final_answer.md")
 QUALITY_REVIEW_NAMES = ("case_quality_review.md", "final_quality_gate.md", "quality_review.md")
 ARTIFACT_SPECS = {
     "final_v1": FINAL_V1_NAMES,
     "quality_review": QUALITY_REVIEW_NAMES,
     "convergence_report": ("convergence_report.md",),
     "calibration_report": ("calibration_report.md",),
-    "research_evidence_packet": ("research_evidence_packet.md",),
+    "research_evidence_packet": ("research_evidence_packet.md", "evidence_packet.md"),
     "original_user_question": ("original_user_question.txt",),
     "runner_result": ("runner_result.json",),
     "failure_report": ("failure_report.md",),

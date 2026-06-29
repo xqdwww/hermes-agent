@@ -47,7 +47,7 @@ from tools.task_engine_executors import (
     run_research_l1_l3_smoke,
     run_research_l1_l4_smoke,
     run_research_l1_l5_smoke,
-    run_simulated_pipeline,
+    run_simulated_pipeline as _executor_run_simulated_pipeline,
 )
 
 LEGACY_RESEARCH_DECISION_BANNED_TERMS = (
@@ -290,6 +290,12 @@ def task_engine_runner(
     if action == "simulated-run":
         target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "simulated")
         result = run_simulated_pipeline(resolved_mode, base_dir=target_dir)
+        _write_simulated_run_advisory_aliases(
+            resolved_mode,
+            query=query,
+            base_dir=target_dir,
+            result=result,
+        )
         return _finalize_result(result, target_dir=target_dir)
 
     if action == "archived-research-decision":
@@ -591,6 +597,283 @@ def task_engine_runner(
         indent=2,
     )
 
+
+
+# Keep the public runner.run_simulated_pipeline patch point local to this module.
+# The executor-side fixture still exists, but this safe entrypoint emits artifacts
+# that satisfy the current L5 evidence-packet contract without model/network use.
+def run_simulated_pipeline(mode: str, *, base_dir: str | Path) -> dict[str, Any]:
+    return _run_safe_simulated_pipeline(mode, base_dir=base_dir)
+
+
+def _run_safe_simulated_pipeline(mode: str, *, base_dir: str | Path) -> dict[str, Any]:
+    """Write deterministic no-network simulated artifacts, then validate/render."""
+    normalized = normalize_mode(mode)
+    base = Path(base_dir)
+    stages: list[dict[str, Any]] = []
+    for stage in CANONICAL_STAGES[normalized]:
+        content = _safe_simulated_stage_text(stage.stage_name)
+        artifact_path, outputs = _write_safe_simulated_stage_outputs(stage, content, base)
+        record = make_stage_record(
+            stage,
+            base_dir=base,
+            artifact_path=artifact_path,
+            outputs=outputs,
+            created=True,
+            valid=True,
+            status="simulated",
+            executor_model=stage.model,
+        )
+        stages.append(record.__dict__)
+    run = {"mode": normalized, "execution_mode": "simulated-run", "stages": stages}
+    validation = validate_pipeline(normalized, run, base_dir=base)
+    markdown = render_final_markdown(normalized, run, validation, base_dir=base)
+    return {
+        "status": "ok" if validation["valid"] else "blocked",
+        "pipeline_status": validation["pipeline_status"],
+        "run": run,
+        "validation": validation,
+        "markdown": markdown,
+    }
+
+
+def _write_safe_simulated_stage_outputs(stage: Any, content: str, base_dir: Path) -> tuple[Path, dict[str, str]]:
+    outputs = planned_outputs(stage, base_dir)
+    primary_path: Path | None = None
+    for required, raw_path in outputs.items():
+        output_path = Path(raw_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            _safe_simulated_output_text(stage.stage_name, required, output_path.name, content),
+            encoding="utf-8",
+        )
+        if primary_path is None:
+            primary_path = output_path
+    if primary_path is None:
+        primary_path = base_dir / stage.stage_name / "report.md"
+        primary_path.parent.mkdir(parents=True, exist_ok=True)
+        primary_path.write_text(content, encoding="utf-8")
+    return primary_path, outputs
+
+
+def _safe_simulated_output_text(stage_name: str, required: str, filename: str, content: str) -> str:
+    if filename.endswith(".json"):
+        payload = {
+            "simulated_fixture": True,
+            "stage": stage_name,
+            "required_output": required,
+            "source_basis": "deterministic_no_network_fixture",
+            "full_text_verified": False,
+        }
+        if filename == "source_candidates.json":
+            payload["source_candidates"] = [
+                {
+                    "source_id": "SIM-S1",
+                    "title": "Simulated fixture source candidate",
+                    "basis": "no external fetch; contract-only fixture",
+                    "full_text_verified": False,
+                }
+            ]
+        if filename == "ddgs_gap_sources.json":
+            payload["gap_sources"] = [
+                {
+                    "source_id": "SIM-G1",
+                    "gap": "fixture evidence boundary retained",
+                    "full_text_verified": False,
+                }
+            ]
+        return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    if filename.endswith(".csv"):
+        return "field,value\nsimulated_fixture,true\nfull_text_verified,false\nsource_basis,deterministic_no_network_fixture\n"
+    return content
+
+
+def _safe_simulated_stage_text(stage_name: str) -> str:
+    if stage_name == "L5_deepseek_acceptance":
+        return _safe_simulated_research_evidence_packet()
+    if stage_name == "external_calibration":
+        return (
+            "calibration_scope\n"
+            "Deterministic simulated calibration keeps fixture claims bounded to current artifacts and does not upgrade confidence. " * 4
+            + "claim_strength_table\n"
+            "| Claim | Strength | Calibration Notes |\n"
+            "| --- | --- | --- |\n"
+            "| Fixture claim A | bounded | Use only as simulated contract material. |\n"
+            "| Fixture claim B | plausible | Requires user-visible caveats before final use. |\n"
+            "over_inference_checks\n"
+            "The simulated calibration prevents confidence inflation and requires caveat preservation. " * 4
+            + "calibration_verdict\n"
+            "verdict: calibrated_for_final_controller; no model call, no source acquisition, no full-text claim.\n"
+            "handoff_notes_for_final_controller\n"
+            "Use bounded claims only and preserve source limitations.\n"
+        )
+    if stage_name == "convergence_report":
+        return (
+            "convergence_report\n"
+            "The deterministic fixture converges on a cautious decision frame, but the simulated final may remain too generic. " * 5
+            + "convergence not absorbed signal: final should make tradeoffs, priorities, and stop conditions explicit.\n"
+        )
+    if stage_name == "final_controller_report":
+        return (
+            "FINAL CONTROLLER BODY\n\n"
+            "This is the simulated final controller report. It gives a bounded answer from deterministic fixture artifacts only, "
+            "keeps source limitations visible, and does not claim full-text verification or evidence acquisition.\n\n"
+            "Recommendation: use observable signals, run a small reversible pilot, define stop conditions, and keep confidence bounded "
+            "to the simulated fixture evidence boundary.\n"
+        )
+    return (
+        f"{stage_name} simulated artifact\n"
+        "Deterministic no-network fixture content for task-engine contract validation. " * 6
+        + "No model call, no external source acquisition, and no final user advice is generated by this stage.\n"
+    )
+
+
+def _safe_simulated_research_evidence_packet() -> str:
+    return "\n".join(
+        [
+            "research_evidence_packet",
+            "verdict: ACCEPTED",
+            "accepted: true",
+            "checked_stages: [L1_gemini_search, L2_ddgs_supplement, L2_5_codex_evidence_organizer, L3_r1_synthesis, L4_gemini_audit]",
+            "missing_or_invalid_artifacts: []",
+            "critical_defects: []",
+            "noncritical_defects: []",
+            "verification_required: []",
+            "evidence_gaps: [simulated_fixture_gap, direct_domain_source_gap]",
+            "handoff_caveats: [simulated_fixture_grade_only, preserve_source_limitations]",
+            "audit_summary: L4 simulated audit accepted the compact fixture packet with explicit limitations.",
+            "evidence_packet_ready_for_decision: true",
+            "verification_status: simulated_fixture_only; full_text_verified false; no external acquisition performed",
+            "evidence_boundary: deterministic simulated packet for validation only; do not treat as full-text verified evidence",
+            "source_limitations: source anchors are fixture anchors and not live fetched sources",
+            "caveats: use only for no-network/no-LLM validation of pipeline shape and advisory sidecar behavior",
+            "unsupported_or_speculative_claims: future or domain-transfer claims remain bounded hypotheses and must not raise confidence",
+            "",
+            "## evidence_strength",
+            "Evidence strength is fixture-grade and bounded. Current simulated artifacts support only pipeline-shape validation, not real-world factual confidence. Direct domain facts, full-text verification, and live evidence acquisition are intentionally absent, so downstream stages must preserve caveats and avoid confidence upgrades.",
+            "",
+            "## claim_table",
+            "- claim_id: SIM-C1",
+            "  claim_text: Simulated artifacts can exercise the Research/Decision handoff and advisory sidecar without external calls.",
+            "  epistemic_tier: evidence_supported",
+            "  evidence_strength: medium_for_fixture_contract_only",
+            "  source_anchors: SIM-S1 (simulated_fixture; no_network_fixture; local deterministic artifact)",
+            "  full_text_verified: false",
+            "  support_level: supported_for_fixture_contract_only",
+            "  source_basis: simulated_fixture",
+            "  applicability_boundary: Applies only to validating artifact contract shape and safe sidecar behavior.",
+            "  counter_signal_or_failure_condition: Any use as real external evidence should block or require source authorization.",
+            "  evidence_gap: direct_real_world_evidence_absent",
+            "  decision_use: can_support_simulated_pipeline_validation_only",
+            "  caveat: Does not verify factual claims or support confidence upgrades.",
+            "- claim_id: SIM-C2",
+            "  claim_text: Final outputs generated from this packet must preserve source limitations and avoid full-text verification claims.",
+            "  epistemic_tier: reasonable_inference",
+            "  evidence_strength: bounded_fixture_inference",
+            "  source_anchors: SIM-S2 (simulated_fixture; no_external_fetch; local deterministic artifact)",
+            "  full_text_verified: false",
+            "  support_level: plausible_for_fixture_contract_only",
+            "  source_basis: simulated_fixture",
+            "  applicability_boundary: Applies to no-network validation and not to domain truth.",
+            "  counter_signal_or_failure_condition: If a stronger domain conclusion is needed, request source acquisition or full-text verification.",
+            "  evidence_gap: domain_specific_validation_gap",
+            "  decision_use: preserve_boundary_in_final_and_advisory",
+            "  caveat: Keep confidence bounded to fixture evidence.",
+            "",
+            "## controversy",
+            "Controversy remains because simulated fixture material is not a live literature review. It can prove that the chain carries caveats and structured claims, but it cannot settle domain disputes, quantify effects, or replace user-authorized source work.",
+            "",
+            "## evidence_gap",
+            "Evidence gap includes missing live sources, missing full-text checks, and missing domain-specific validation. These gaps are intentional in the safe simulated-run entrypoint and should remain visible to downstream final and advisory artifacts.",
+            "",
+            "## evidence_supported",
+            "Evidence supported material is limited to deterministic local artifacts proving that required sections, claim rows, source anchors, and caveat fields exist. It supports contract validation only, not substantive domain certainty.",
+            "",
+            "## reasonable_inference",
+            "Reasonable inference may connect the fixture claim table to process behavior: if the packet is accepted, the runner can reach PIPELINE_COMPLETE and optionally emit a report-only advisory sidecar. This inference remains about system behavior, not external facts.",
+            "",
+            "## foresight_hypothesis",
+            "Foresight hypothesis is only a bounded placeholder: future or domain-transfer claims should remain tentative, require counter-signals, and should never be treated as verified from the simulated packet alone.",
+            "",
+            "scope: acceptance gate plus compact simulated evidence packet; no raw artifact dump, no user-facing final advice, no source acquisition, and no full-text verification claim.",
+        ]
+    )
+
+
+def _write_simulated_run_advisory_aliases(
+    mode: str,
+    *,
+    query: str,
+    base_dir: Path,
+    result: dict[str, Any],
+) -> None:
+    if result.get("pipeline_status") != PIPELINE_COMPLETE:
+        return
+    base = Path(base_dir)
+    _write_text_if_missing(base / "original_user_question.txt", (query or "").strip() + "\n")
+    _write_json_if_missing(
+        base / "runner_result.json",
+        {
+            "status": result.get("status"),
+            "pipeline_status": result.get("pipeline_status"),
+            "mode": normalize_mode(mode),
+            "execution_mode": "simulated-run",
+            "contract": "stable",
+        },
+    )
+    _copy_text_if_missing(
+        base / "L5_deepseek_acceptance" / "research_evidence_packet.md",
+        base / "research_evidence_packet.md",
+    )
+    _copy_text_if_missing(
+        base / "L5_deepseek_acceptance" / "research_evidence_packet.md",
+        base / "evidence_packet.md",
+    )
+    _copy_text_if_missing(
+        base / "convergence_report" / "convergence_report.md",
+        base / "convergence_report.md",
+    )
+    _copy_text_if_missing(
+        base / "external_calibration" / "external_calibration.md",
+        base / "calibration_report.md",
+    )
+    _copy_text_if_missing(
+        base / "final_controller_report" / "final_decision_report.md",
+        base / "final_controller_report.md",
+    )
+    run_payload = result.get("run") if isinstance(result.get("run"), dict) else {}
+    if run_payload.get("execution_mode") == "simulated-run":
+        _write_text_if_missing(
+            base / "case_quality_review.md",
+            (
+                "case_quality_review\n"
+                "final too generic and low specificity signals are retained for deterministic advisory validation.\n"
+                "missing obligation and weak ranking may require explicit user-confirmed TOPIC_REFINEMENT, unless source boundaries dominate.\n"
+                "No automatic execution, no candidate generation, and no final rewrite are allowed.\n"
+            ),
+        )
+
+
+def _copy_text_if_missing(source: Path, target: Path) -> None:
+    if target.exists() or not source.exists():
+        return
+    try:
+        _write_text_if_missing(target, source.read_text(encoding="utf-8"))
+    except OSError:
+        return
+
+
+def _write_text_if_missing(path: Path, text: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _write_json_if_missing(path: Path, payload: dict[str, Any]) -> None:
+    if path.exists():
+        return
+    _write_text_if_missing(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 def _coerce_advisory_bool(value: Any, *, default: bool) -> bool:
     if value is None:
