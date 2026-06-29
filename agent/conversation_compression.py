@@ -464,6 +464,19 @@ def compress_context(
         _release_lock()  # compression aborted — no rotation will happen
         return messages, _existing_sp
 
+    if getattr(agent.context_compressor, "_last_context_replacement_applied", True) is False:
+        _diag = getattr(agent.context_compressor, "_last_context_reducer_diagnostics", {}) or {}
+        _effective_messages = compressed if _diag.get("raw_ref_reducer_applied") else messages
+        _existing_sp = getattr(agent, "_cached_system_prompt", None)
+        if not _existing_sp:
+            _existing_sp = agent._build_system_prompt(system_message)
+        try:
+            agent._emit_warning("ℹ Context compression is shadow-only; no messages were replaced.")
+        except Exception:
+            pass
+        _release_lock()
+        return _effective_messages, _existing_sp
+
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
     if summary_error:
         if getattr(agent, "_last_compression_summary_warning", None) != summary_error:

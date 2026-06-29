@@ -31,6 +31,13 @@ from agent.model_metadata import (
     estimate_messages_tokens_rough,
 )
 from agent.redact import redact_sensitive_text
+from agent.compression_safety import (
+    classify_text_block,
+    compression_metadata_line,
+    sha256_text,
+    validate_compressed_text,
+    write_raw_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +404,84 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
     return result if changed else messages
 
 
+def _strip_images_from_content_with_raw_ref(content: Any) -> tuple[Any, bool, bool]:
+    """Strip image parts only when the original content can be recovered.
+
+    Returns ``(content, stripped, raw_ref_missing)``.  The original multimodal
+    payload is written to a raw_ref before image parts are replaced; if that
+    write fails, the original content is returned unchanged.
+    """
+    if not _content_has_images(content):
+        return content, False, False
+    original = json.dumps(content, ensure_ascii=False, default=str)
+    raw_ref = write_raw_ref(original, block_type="multimodal_content")
+    if not raw_ref:
+        return content, False, True
+    stripped = _strip_images_from_content(content)
+    compressed = json.dumps(stripped, ensure_ascii=False, default=str)
+    metadata = compression_metadata_line(
+        block_type="multimodal_content",
+        original=original,
+        compressed=compressed,
+        compression_applied=True,
+        fallback_used=False,
+        reason="raw_ref_backed_multimodal_stripping",
+        raw_ref=raw_ref,
+    )
+    return [*stripped, {"type": "text", "text": metadata}], True, False
+
+
+def _strip_historical_media_with_raw_ref(
+    messages: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], int, int]:
+    """Raw-ref-backed variant of ``_strip_historical_media``."""
+    if not messages:
+        return messages, 0, 0
+
+    anchor = -1
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "user" and _content_has_images(msg.get("content")):
+            anchor = i
+            break
+    if anchor <= 0:
+        return messages, 0, 0
+
+    result: List[Dict[str, Any]] = []
+    stripped_count = 0
+    raw_ref_missing = 0
+    for i, msg in enumerate(messages):
+        if i >= anchor or not isinstance(msg, dict) or not _content_has_images(msg.get("content")):
+            result.append(msg)
+            continue
+        new_content, stripped, missing = _strip_images_from_content_with_raw_ref(msg.get("content"))
+        raw_ref_missing += 1 if missing else 0
+        if stripped:
+            stripped_count += 1
+            result.append({**msg, "content": new_content})
+        else:
+            result.append(msg)
+    return (result if stripped_count else messages), stripped_count, raw_ref_missing
+
+
+def _reduced_tool_card(summary: str, original: str, *, reason: str) -> str | None:
+    """Return a reducer card with a raw_ref, or None if raw persistence failed."""
+    raw_ref = write_raw_ref(original, block_type="tool_output")
+    if not raw_ref:
+        return None
+    body = summary
+    meta = compression_metadata_line(
+        block_type="tool_output",
+        original=original,
+        compressed=summary,
+        compression_applied=True,
+        fallback_used=False,
+        reason=reason,
+        raw_ref=raw_ref,
+    )
+    return f"{body}\n{meta}"
+
+
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Create an informative 1-line summary of a tool call + result.
 
@@ -544,6 +629,8 @@ class ContextCompressor(ContextEngine):
         self._last_summary_dropped_count = 0
         self._last_summary_fallback_used = False
         self._last_aux_model_failure_error = None
+        self._last_summary_validation_failed = False
+        self._last_summary_critical_bypass = False
         self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
@@ -596,6 +683,10 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        shadow_only: bool = True,
+        allow_llm_replacement: bool = False,
+        allow_multimodal_stripping: bool = False,
+        allow_tool_call_arg_truncation: bool = False,
     ):
         self.model = model
         self.base_url = base_url
@@ -612,6 +703,12 @@ class ContextCompressor(ContextEngine):
         # When False (default = historical behavior), insert a
         # deterministic "summary unavailable" handoff and drop the middle window.
         self.abort_on_summary_failure = abort_on_summary_failure
+
+        self.allow_llm_replacement = bool(allow_llm_replacement)
+        self.shadow_only = bool(shadow_only) and not self.allow_llm_replacement
+        self.allow_multimodal_stripping = bool(allow_multimodal_stripping)
+        self.allow_tool_call_arg_truncation = bool(allow_tool_call_arg_truncation)
+        self._last_context_reducer_diagnostics: Dict[str, Any] = {}
 
         self.context_length = get_model_context_length(
             model, base_url=base_url, api_key=api_key,
@@ -669,6 +766,8 @@ class ContextCompressor(ContextEngine):
         self._last_summary_dropped_count: int = 0
         self._last_summary_fallback_used: bool = False
         # When summary generation fails we now ABORT compression entirely
+        self._last_summary_validation_failed: bool = False
+        self._last_summary_critical_bypass: bool = False
         # and return the original messages unchanged instead of dropping
         # the middle window with a static placeholder.  Callers inspect
         # this flag to know "compression was attempted but aborted, freeze
@@ -680,6 +779,38 @@ class ContextCompressor(ContextEngine):
         # succeeded.  Silent recovery would hide the broken config.
         self._last_aux_model_failure_error: Optional[str] = None
         self._last_aux_model_failure_model: Optional[str] = None
+        self._last_shadow_summary_preview: Optional[str] = None
+        self._last_context_replacement_applied: bool = False
+        self._reset_context_reducer_diagnostics()
+
+    def _reset_context_reducer_diagnostics(self) -> None:
+        self._last_shadow_summary_preview = None
+        self._last_context_replacement_applied = False
+        self._last_context_reducer_diagnostics = {
+            "shadow_only": self.shadow_only,
+            "allow_llm_replacement": self.allow_llm_replacement,
+            "allow_multimodal_stripping": self.allow_multimodal_stripping,
+            "allow_tool_call_arg_truncation": self.allow_tool_call_arg_truncation,
+            "safe_for_replacement": False,
+            "would_replace": False,
+            "replacement_applied": False,
+            "raw_ref_coverage_complete": True,
+            "fallback_used": False,
+            "bypass_reasons": [],
+            "compressed_preview_length": 0,
+            "raw_ref_reducer_applied": False,
+        }
+
+    def _record_context_bypass(self, reason: str) -> None:
+        diag = getattr(self, "_last_context_reducer_diagnostics", None)
+        if not isinstance(diag, dict):
+            return
+        reasons = diag.setdefault("bypass_reasons", [])
+        if reason not in reasons:
+            reasons.append(reason)
+        diag["safe_for_replacement"] = False
+        if "raw_ref" in reason:
+            diag["raw_ref_coverage_complete"] = False
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -850,8 +981,16 @@ class ContextCompressor(ContextEngine):
             h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
             if h in content_hashes:
                 # This is an older duplicate — replace with back-reference
-                result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
-                pruned += 1
+                replacement = _reduced_tool_card(
+                    "[Duplicate tool output — same content as a more recent call]",
+                    content,
+                    reason="duplicate_tool_output",
+                )
+                if replacement:
+                    result[i] = {**msg, "content": replacement}
+                    self._last_context_reducer_diagnostics["raw_ref_reducer_applied"] = True
+                    self._last_context_reducer_diagnostics["safe_for_replacement"] = True
+                    pruned += 1
             else:
                 content_hashes[h] = (i, msg.get("tool_call_id", "?"))
 
@@ -866,14 +1005,47 @@ class ContextCompressor(ContextEngine):
             # Without this, an old computer_use screenshot (~1MB base64 +
             # ~1500 real tokens) survives every compression pass forever.
             if isinstance(content, list):
+                if not self.allow_multimodal_stripping:
+                    if _content_has_images(content):
+                        self._record_context_bypass("multimodal_no_raw_ref_bypass")
+                    continue
+                original = json.dumps(content, ensure_ascii=False, default=str)
+                raw_ref = write_raw_ref(original, block_type="multimodal_tool_output")
+                if not raw_ref:
+                    self._record_context_bypass("multimodal_raw_ref_missing_bypass")
+                    continue
                 stripped = _strip_image_parts_from_parts(content)
                 if stripped is not None:
+                    compressed_text = json.dumps(stripped, ensure_ascii=False, default=str)
+                    stripped = [
+                        *stripped,
+                        {
+                            "type": "text",
+                            "text": compression_metadata_line(
+                                block_type="multimodal_tool_output",
+                                original=original,
+                                compressed=compressed_text,
+                                compression_applied=True,
+                                fallback_used=False,
+                                reason="raw_ref_backed_multimodal_tool_output_stripping",
+                                raw_ref=raw_ref,
+                            ),
+                        },
+                    ]
                     result[i] = {**msg, "content": stripped}
                     pruned += 1
                 continue
             if isinstance(content, dict) and content.get("_multimodal"):
-                summary = content.get("text_summary") or "[screenshot removed to save context]"
-                result[i] = {**msg, "content": f"[screenshot removed] {summary[:200]}"}
+                if not self.allow_multimodal_stripping:
+                    self._record_context_bypass("multimodal_no_raw_ref_bypass")
+                    continue
+                original = json.dumps(content, ensure_ascii=False, default=str)
+                raw_ref = write_raw_ref(original, block_type="multimodal_tool_output")
+                if not raw_ref:
+                    self._record_context_bypass("multimodal_raw_ref_missing_bypass")
+                    continue
+                summary = f"[screenshot removed] {(content.get('text_summary') or '')[:200]}"
+                result[i] = {**msg, "content": summary + "\n" + compression_metadata_line(block_type="multimodal_tool_output", original=original, compressed=summary, compression_applied=True, fallback_used=False, reason="raw_ref_backed_multimodal_tool_output_stripping", raw_ref=raw_ref)}
                 pruned += 1
                 continue
             if not isinstance(content, str):
@@ -887,9 +1059,14 @@ class ContextCompressor(ContextEngine):
             if len(content) > 200:
                 call_id = msg.get("tool_call_id", "")
                 tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
-                summary = _summarize_tool_result(tool_name, tool_args, content)
-                result[i] = {**msg, "content": summary}
-                pruned += 1
+                replacement = _reduced_tool_card(
+                    _summarize_tool_result(tool_name, tool_args, content), content, reason="old_tool_output"
+                )
+                if replacement:
+                    result[i] = {**msg, "content": replacement}
+                    self._last_context_reducer_diagnostics["raw_ref_reducer_applied"] = True
+                    self._last_context_reducer_diagnostics["safe_for_replacement"] = True
+                    pruned += 1
 
         # Pass 3: Truncate large tool_call arguments in assistant messages
         # outside the protected tail. write_file with 50KB content, for
@@ -909,9 +1086,34 @@ class ContextCompressor(ContextEngine):
                 if isinstance(tc, dict):
                     args = tc.get("function", {}).get("arguments", "")
                     if len(args) > 500:
+                        if not self.allow_tool_call_arg_truncation:
+                            self._record_context_bypass("tool_call_args_no_raw_ref_bypass")
+                            new_tcs.append(tc)
+                            continue
+                        raw_ref = write_raw_ref(args, block_type="tool_call_arguments")
+                        if not raw_ref:
+                            self._record_context_bypass("tool_call_args_raw_ref_missing_bypass")
+                            new_tcs.append(tc)
+                            continue
                         new_args = _truncate_tool_call_args_json(args)
                         if new_args != args:
-                            tc = {**tc, "function": {**tc["function"], "arguments": new_args}}
+                            metadata = {
+                                "block_type": "tool_call_arguments",
+                                "compression_applied": True,
+                                "fallback_used": False,
+                                "reason": "raw_ref_backed_tool_call_arg_truncation",
+                                "original_sha256": sha256_text(args),
+                                "original_length": len(args),
+                                "compressed_length": len(new_args),
+                                "raw_ref": raw_ref,
+                            }
+                            tc = {
+                                **tc,
+                                "function": {**tc["function"], "arguments": new_args},
+                                "_context_reducer": metadata,
+                            }
+                            self._last_context_reducer_diagnostics["raw_ref_reducer_applied"] = True
+                            self._last_context_reducer_diagnostics["safe_for_replacement"] = True
                             modified = True
                 new_tcs.append(tc)
             if modified:
@@ -1247,6 +1449,19 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
 
+        unsafe_blocks = []
+        for idx, msg in enumerate(turns_to_summarize):
+            text = _content_text_for_contains(msg.get("content"))
+            cls = classify_text_block(text, role=msg.get("role"))
+            if not cls.allow_compression:
+                unsafe_blocks.append((idx, cls.block_type, cls.reason))
+        if unsafe_blocks:
+            preview = ", ".join(f"{idx}:{block_type}" for idx, block_type, _ in unsafe_blocks[:5])
+            self._last_summary_error = f"critical block bypassed in compression window: {preview}"
+            self._last_summary_critical_bypass = True
+            logger.warning("Context compression bypassed unsafe blocks: %s", unsafe_blocks[:10])
+            return None
+
         # Preamble shared by both first-compaction and iterative-update prompts.
         # Keep the wording deliberately plain: Azure/OpenAI-compatible content
         # filters have flagged stronger "injection" / "do not respond" framing.
@@ -1400,12 +1615,44 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
+            completion_tokens = None
+            try:
+                completion_tokens = int(getattr(getattr(response, "usage", None), "completion_tokens", 0) or 0)
+            except Exception:
+                completion_tokens = None
+            validation = validate_compressed_text(
+                content_to_summarize,
+                summary,
+                max_tokens=call_kwargs.get("max_tokens"),
+                completion_tokens=completion_tokens,
+            )
+            if not validation.ok:
+                self._last_summary_error = "summary validator failed: " + "; ".join(validation.reasons)
+                self._last_summary_validation_failed = True
+                logger.warning("Context compression validator failed: %s", validation.reasons)
+                return None
+            raw_ref = write_raw_ref(content_to_summarize, block_type="context_summary_source")
+            if not raw_ref:
+                self._last_summary_error = "summary validator failed: raw_ref_missing"
+                self._last_summary_validation_failed = True
+                self._record_context_bypass("summary_raw_ref_missing_bypass")
+                logger.warning("Context compression validator failed: raw_ref missing")
+                return None
+            summary_with_metadata = summary + "\n\n" + compression_metadata_line(
+                block_type="low_risk_prose_summary",
+                original=content_to_summarize,
+                compressed=summary,
+                compression_applied=True,
+                fallback_used=False,
+                reason="validated_llm_context_summary",
+                raw_ref=raw_ref,
+            )
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0
             self._summary_model_fallen_back = False
             self._last_summary_error = None
-            return self._with_summary_prefix(summary)
+            return self._with_summary_prefix(summary_with_metadata)
         except RuntimeError:
             # No provider configured — long cooldown, unlikely to self-resolve
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
@@ -1853,7 +2100,10 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         self._last_summary_error = None
         self._last_aux_model_failure_error = None
         self._last_aux_model_failure_model = None
+        self._last_summary_validation_failed = False
+        self._last_summary_critical_bypass = False
         self._last_compress_aborted = False
+        self._reset_context_reducer_diagnostics()
 
         # Manual /compress (force=True) bypasses the failure cooldown so the
         # user can retry immediately after an auto-compress abort.  Without
@@ -1932,9 +2182,29 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 tail_msgs,
             )
 
-        # Phase 3: Generate structured summary
+        # Phase 3: Generate structured summary / shadow preview.
         summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        diag = self._last_context_reducer_diagnostics
+        if summary:
+            self._last_shadow_summary_preview = summary
+            diag["would_replace"] = True
+            diag["compressed_preview_length"] = len(summary)
 
+        if not self.allow_llm_replacement:
+            diag["shadow_only"] = True
+            diag["allow_llm_replacement"] = False
+            diag["replacement_applied"] = False
+            diag["safe_for_replacement"] = bool(diag.get("raw_ref_reducer_applied")) and not diag.get("bypass_reasons")
+            if self._last_summary_validation_failed or self._last_summary_critical_bypass or not summary:
+                diag["fallback_used"] = True
+            if not self.quiet_mode:
+                logger.info(
+                    "Context compression ran in shadow-only mode; no LLM summary replacement applied"
+                )
+            return messages
+
+        diag["shadow_only"] = False
+        diag["allow_llm_replacement"] = True
         # If summary generation failed, behavior splits on
         # ``abort_on_summary_failure`` (config: compression.abort_on_summary_failure):
         #   True  → ABORT compression entirely. Return messages unchanged
@@ -1946,15 +2216,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         #           _last_summary_dropped_count for gateway hygiene to
         #           surface a warning.
         # Default is False (historical behavior).
-        if not summary and self.abort_on_summary_failure:
+        if not summary and (
+            self.abort_on_summary_failure
+            or self._last_summary_validation_failed
+            or self._last_summary_critical_bypass
+            or self.allow_llm_replacement
+        ):
             n_skipped = compress_end - compress_start
             self._last_summary_dropped_count = 0  # nothing actually dropped
             self._last_summary_fallback_used = False
             self._last_compress_aborted = True
             if not self.quiet_mode:
                 logger.warning(
-                    "Summary generation failed — aborting compression "
-                    "(compression.abort_on_summary_failure=true). "
+                    "Summary generation failed or failed safety validation — aborting compression. "
                     "%d message(s) preserved unchanged. Conversation is "
                     "frozen until the next /compress or /new.",
                     n_skipped,
@@ -2052,10 +2326,23 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # payloads forever, which can push every subsequent API request
         # past the provider's body-size limit and wedge the session.
         # Port of Kilo-Org/kilocode#9434.
-        compressed = _strip_historical_media(compressed)
+        if self.allow_multimodal_stripping:
+            compressed, stripped_count, raw_ref_missing = _strip_historical_media_with_raw_ref(compressed)
+            if raw_ref_missing:
+                self._record_context_bypass("multimodal_raw_ref_missing_bypass")
+            if stripped_count:
+                self._last_context_reducer_diagnostics["raw_ref_reducer_applied"] = True
+        elif any(_content_has_images(m.get("content")) for m in compressed if isinstance(m, dict)):
+            self._record_context_bypass("multimodal_no_raw_ref_bypass")
 
         new_estimate = estimate_messages_tokens_rough(compressed)
         saved_estimate = display_tokens - new_estimate
+        self._last_context_replacement_applied = True
+        self._last_context_reducer_diagnostics["replacement_applied"] = True
+        self._last_context_reducer_diagnostics["safe_for_replacement"] = (
+            not self._last_context_reducer_diagnostics.get("bypass_reasons")
+            and self._last_context_reducer_diagnostics.get("raw_ref_coverage_complete", True)
+        )
 
         # Anti-thrashing: track compression effectiveness
         savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0

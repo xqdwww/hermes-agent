@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agent.compression_safety import classify_text_block
+
 
 _OBS_BASE_DIR = Path("/tmp/hermes/observations")
 _RUN_ID = os.getenv("HERMES_RUN_ID") or os.getenv("HERMES_CURRENT_RUN_ID") or (
@@ -318,6 +320,9 @@ def _reduce_read_file(tool_name: str, raw: str) -> tuple[str, str | None]:
         return raw, None
     if _is_code_path(path) or _looks_like_code(content):
         return raw, None
+    classification = classify_text_block(content, source_path=path)
+    if not classification.allow_compression:
+        return raw, None
 
     stem = _next_stem(tool_name)
     raw_path = _OBS_DIR / f"{stem}.txt"
@@ -351,37 +356,8 @@ def _extract_sections(content: str) -> list[tuple[str, int, int]]:
 
 
 def _reduce_skill_view(tool_name: str, raw: str) -> tuple[str, str | None]:
-    parsed = _try_json(raw)
-    if not isinstance(parsed, dict):
-        return raw, None
-    content = _stringify(parsed.get("content") or "")
-    if not content:
-        return raw, None
-    sections = _extract_sections(content)
-    if not sections:
-        return raw, None
-
-    stem = _next_stem(tool_name)
-    raw_path = _OBS_DIR / f"{stem}.json"
-    _write_text(raw_path, raw)
-
-    selected_title, selected_start, selected_end = sections[0]
-    for title, start, end in sections:
-        if title.strip().upper() == "COMMANDS":
-            selected_title, selected_start, selected_end = title, start, end
-            break
-
-    section_names = ", ".join(title for title, _, _ in sections)
-    selected = content[selected_start:selected_end].strip()
-    skill_name = parsed.get("name") or "unknown"
-    summary = f"sections: {section_names}"[:500]
-    card = (
-        f"[OBSERVATION:skill_view] skill: {skill_name} | section: {selected_title}\n"
-        f"summary: {summary}\n"
-        f"full: {_OBS_DIR}\n\n"
-        f"{selected}"
-    )
-    return card, str(_OBS_DIR)
+    """Skill contracts are executable guidance; keep skill_view output verbatim."""
+    return raw, None
 
 
 def _extract_web_items(value: Any) -> list[dict[str, Any]]:

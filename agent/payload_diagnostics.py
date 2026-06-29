@@ -14,6 +14,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.compression_safety import diagnose_payload_reduction
+
 logger = logging.getLogger(__name__)
 
 # ── Token estimation (rough: chars / 4, same as existing code) ─────────
@@ -249,6 +251,11 @@ def payload_breakdown(
     dup_info = detect_duplicate_blocks(api_messages)
     breakdown["duplicate_blocks"] = dup_info
 
+    breakdown["context_reducer_diagnostics"] = diagnose_payload_reduction(
+        [_message_to_text(msg) for msg in api_messages],
+        [_message_to_text(msg) for msg in api_messages],
+    )
+
     return breakdown
 
 
@@ -346,6 +353,16 @@ def log_payload_summary(breakdown: Dict[str, Any]) -> None:
         lines.append(
             f"  top5 [{m['index']:3d}] {m['role']:10s} "
             f"~{m['token_estimate']:>6,d}t  {m['content_preview_120'][:80]}"
+        )
+
+    reducer = breakdown.get("context_reducer_diagnostics", {})
+    if reducer:
+        lines.append(
+            "  reducer: "
+            f"bypass={reducer.get('bypass_blocks', 0)} "
+            f"prose={reducer.get('compressed_prose_blocks', 0)} "
+            f"fallback={reducer.get('fallback_blocks', 0)} "
+            f"safe_for_replacement={reducer.get('safe_for_replacement', False)}"
         )
 
     logger.info("\n".join(lines))
