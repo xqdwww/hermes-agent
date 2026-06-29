@@ -10,6 +10,7 @@ Use this as an operator skill. It does not integrate with runtime, change the ma
 ## Purpose
 
 - Treat the first-pass final as a draft, not the endpoint.
+- Use the loop shape `first_pass_final -> feedback -> refinement -> quality review -> revised_final`.
 - Convert quality review into a concrete next action.
 - Prefer section-level or stage-level targeted continuation.
 - Do not treat full rerun as default.
@@ -54,15 +55,23 @@ topic_refinement_state:
   topic_id:
   original_question:
   current_final_version:
+  final_versions:
+    final_v1:
+    refinement_v1:
+    revised_final_v2:
   artifact_paths:
   quality_failures:
   user_feedback:
   refinement_history:
+  prior_failure_types:
   preserved_caveats:
   unresolved_evidence_gaps:
+  iteration_count:
   next_action:
   stop_reason:
 ```
+
+Never overwrite a previous final. Append each refinement as a new version such as `final_v1`, `refinement_v1`, and `revised_final_v2`, and record the changed sections plus what stayed unchanged. Keep short-term feedback scoped to this topic state; do not write it to global or long-term memory by default.
 
 ## Failure taxonomy
 
@@ -100,6 +109,19 @@ topic_refinement_state:
 | `executor_or_environment_blocker` | Run environment triage; do not repair prompts or rewrite answers. |
 | `user_feedback_requests_deeper_specificity` | Restate feedback and refine only the requested area. |
 
+## Selection tie-breaker
+
+Use this order when failures overlap:
+
+1. Environment, dependency, branch/head, dirty scope, missing artifacts, or unauthorized acquisition -> stop or `environment_triage`; do not rewrite the answer.
+2. Topic changed, domain is wrong, or sources are stale/missing -> stop; full rerun is only allowed after explicit authorization.
+3. Evidence gap or full-text verification gap affects a claim -> `targeted_evidence_acquisition` if authorized; otherwise stop or keep the claim conditional.
+4. Calibration/convergence is present but not absorbed across the final -> `final_absorption_pass`.
+5. Only one section is weak or missing -> `section_rewrite`.
+6. User feedback requests deeper specificity -> `user_feedback_refinement`, bounded by evidence and artifact constraints.
+
+When `section_rewrite` and `final_absorption_pass` both seem possible, choose `section_rewrite` for local defects and choose `final_absorption_pass` for whole-final failures in calibration, convergence, confidence, or decision boundaries.
+
 ## Refinement modes
 
 ### section_rewrite
@@ -125,29 +147,43 @@ topic_refinement_state:
 - Use when a true evidence gap changes the conclusion.
 - Mark the exact source need.
 - Do not treat snippets as full-text verification.
+- Require authorization before acquisition or full-text verification.
+- If acquisition is unavailable, stop or write only a conditional rewrite that preserves the evidence gap.
 
 ### user_feedback_refinement
 
 - Use when the user identifies a specific dissatisfaction.
 - Restate the feedback before editing.
 - Modify only the relevant part unless the user asks for wider revision.
+- User preference can change emphasis, ordering, and specificity, but cannot override evidence boundaries or make thin evidence stronger.
 
 ### environment_triage
 
 - Use for DDGS, OMLX, dependency, executor, or resource issues.
 - Do not rewrite the answer while the environment blocker is unresolved.
+- Do not treat environment blockers as prompt repair or answer quality failures.
+
+## Confidence and evidence rules
+
+- Confidence cannot increase without new evidence or stronger artifact support.
+- Thin evidence must remain conditional.
+- Calibration can decrease or qualify confidence without new evidence.
+- Full-text verification is required before upgrading snippet-only support.
+- User feedback cannot remove caveats, erase uncertainty, or strengthen unsupported claims.
 
 ## Refinement workflow checklist
 
 - [ ] Load `topic_refinement_state`.
 - [ ] Verify branch/head/worktree if repo work is involved.
+- [ ] Read `refinement_history` and prior failure types before choosing the next action.
 - [ ] Classify failure.
 - [ ] Choose the minimal refinement mode.
 - [ ] Preserve artifacts and caveats.
 - [ ] Perform refinement.
 - [ ] Run quality review.
+- [ ] Run the output quality gate.
 - [ ] Update `topic_refinement_state`.
-- [ ] Write revised final.
+- [ ] Append the revised final as a new version; do not overwrite previous final text.
 - [ ] Write what changed / what did not change.
 - [ ] Decide next action.
 
@@ -158,14 +194,29 @@ Each refinement must output:
 - `refinement_scope`
 - `failure_type`
 - `selected_refinement_mode`
+- `previous_final_version`
+- `new_final_version`
 - `preserved_artifacts`
 - `changed_sections`
 - `new_or_reused_evidence`
+- `source_need`
 - `confidence_changes`
 - `revised_final`
 - `caveats_preserved`
 - `what_was_not_changed`
+- `output_quality_gate`
 - `next_recommended_action`
+
+## Output quality gate
+
+Before accepting a refinement, check:
+
+- changed sections are traceable to the selected failure type.
+- unchanged sections are named and intentionally preserved.
+- `new_or_reused_evidence` states whether evidence was reused, newly acquired, or unavailable.
+- `confidence_changes` states no increase unless new evidence or stronger artifact support exists.
+- caveats and thin-evidence boundaries are preserved.
+- the same failure did not repeat without improvement.
 
 ## Stop conditions
 
@@ -178,6 +229,9 @@ Stop and ask before continuing when:
 - full-text verification is required but unavailable.
 - DDGS, OMLX, dependency, executor, or resource blocker appears.
 - user changed topic.
+- the same failure repeats after two refinement attempts.
+- quality review shows no material improvement after two attempts.
+- user feedback conflicts with evidence boundaries.
 - proposed change would alter runtime, tools, final controller, evidence packet, convergence, or calibration.
 - output would require unsupported inference or speculation.
 
@@ -185,13 +239,17 @@ Stop and ask before continuing when:
 
 - Treating full rerun as the default action.
 - Overwriting an old final with a new final without recording changes.
+- Replacing `final_v1` instead of appending `revised_final_v2`.
 - Deleting caveats to sound more certain.
 - Upgrading thin evidence into strong evidence.
+- Increasing confidence without new evidence or stronger artifact support.
 - Changing headings while leaving generic content intact.
 - Adding more anchors instead of improving reasoning.
 - Hard-coding case-specific answers.
 - Letting Travel-specific route/place logic leak into Research core.
 - Treating environment failure as an answer quality issue.
+- Treating environment failure as prompt repair.
+- Letting user feedback override evidence boundaries.
 - Running an infinite self-reflection loop without external signal.
 - Passing only by self-score with no artifact-backed review.
 - Claiming this operator is already connected to runtime.
@@ -213,6 +271,7 @@ Current topic artifacts:
 - topic_id or run_id:
 - original_user_question:
 - first_pass_final:
+- final_versions / refinement_history:
 - case_quality_review or final_quality_gate:
 - convergence_report:
 - calibration_report:
@@ -234,5 +293,6 @@ Return:
 - refined section or revised final
 - quality review
 - topic_refinement_state update
+- output quality gate
 - summary of what changed and what did not change
 ```
