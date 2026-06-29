@@ -16,6 +16,7 @@ from tools.task_engine_contracts import (
     ENGINE_RESEARCH,
     ENGINE_RESEARCH_DECISION,
     PIPELINE_BLOCKED,
+    PIPELINE_COMPLETE,
     build_dry_run_plan,
     build_engine_contract,
     canonical_schema,
@@ -172,6 +173,26 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "description": "Opt-in debug report of deterministic passive-intelligence guard trigger matches.",
                     "default": False,
                 },
+                "emit_topic_refinement_advisory": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicit opt-in report-only post-final Topic Refinement advisory. "
+                        "Default false; only runs after PIPELINE_COMPLETE and never executes TOPIC_REFINEMENT."
+                    ),
+                    "default": False,
+                },
+                "topic_refinement_advisory_output_dir": {
+                    "type": "string",
+                    "description": (
+                        "Optional sidecar output directory for the report-only Topic Refinement advisory. "
+                        "Defaults to <artifact_dir>/topic_refinement_advisory when the advisory flag is true."
+                    ),
+                },
+                "topic_refinement_advisory_strict": {
+                    "type": "boolean",
+                    "description": "Strict mode passed to the report-only advisory wrapper. Defaults to true.",
+                    "default": True,
+                },
             },
             "required": ["query"],
         },
@@ -189,9 +210,14 @@ def task_engine_runner(
     research_packet_path: str | None = None,
     allow_archived_research_decision: bool = False,
     passive_guard_debug: bool = False,
+    emit_topic_refinement_advisory: bool = False,
+    topic_refinement_advisory_output_dir: str | None = None,
+    topic_refinement_advisory_strict: bool = True,
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
+    emit_topic_refinement_advisory = _coerce_advisory_bool(emit_topic_refinement_advisory, default=False)
+    topic_refinement_advisory_strict = _coerce_advisory_bool(topic_refinement_advisory_strict, default=True)
 
     if resolved_mode is None:
         return json.dumps(
@@ -214,6 +240,19 @@ def task_engine_runner(
         action = "smoke-research-decision-final"
     elif action == "full":
         action = _full_action_for_mode(resolved_mode)
+
+    def _finalize_result(result: dict[str, Any], *, target_dir: Path) -> str:
+        result["artifact_dir"] = str(target_dir)
+        if emit_topic_refinement_advisory:
+            _emit_topic_refinement_advisory_sidecar(
+                result=result,
+                query=query,
+                mode=resolved_mode,
+                artifact_dir=target_dir,
+                advisory_output_dir=topic_refinement_advisory_output_dir,
+                strict=topic_refinement_advisory_strict,
+            )
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     if action == "contract":
         payload = {
@@ -251,8 +290,7 @@ def task_engine_runner(
     if action == "simulated-run":
         target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "simulated")
         result = run_simulated_pipeline(resolved_mode, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action == "archived-research-decision":
         return json.dumps(
@@ -281,8 +319,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l2")
         result = run_research_l1_l2_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action == "smoke-research-l1-l3":
         if normalize_mode(resolved_mode) not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
@@ -297,8 +334,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l3")
         result = run_research_l1_l3_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action == "smoke-research-l1-l4":
         if normalize_mode(resolved_mode) not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
@@ -313,8 +349,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l4")
         result = run_research_l1_l4_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action == "smoke-research-l1-l5":
         if normalize_mode(resolved_mode) not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
@@ -329,8 +364,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l5")
         result = run_research_l1_l5_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action == "smoke-decision-final":
         if normalize_mode(resolved_mode) != ENGINE_DECISION:
@@ -368,8 +402,7 @@ def task_engine_runner(
         if resolved_research_packet_path:
             kwargs["research_packet_path"] = resolved_research_packet_path
         result = run_decision_final_smoke(query, **kwargs)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-intelligence", "smoke-research-decision-d1"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -384,8 +417,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_intelligence")
         result = run_research_decision_l1_l7_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-search", "smoke-research-decision-d2"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -400,8 +432,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_search")
         result = run_research_decision_l1_l8_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-structure", "smoke-research-decision-d3"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -416,8 +447,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_structure")
         result = run_research_decision_l1_l9_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-evidence", "smoke-research-decision-d4"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -432,8 +462,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_evidence")
         result = run_research_decision_l1_l10_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-premise", "smoke-research-decision-d5"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -448,8 +477,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_premise")
         result = run_research_decision_l1_l11_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-alternative", "smoke-research-decision-d6"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -464,8 +492,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_alternative")
         result = run_research_decision_l1_l12_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-insight", "smoke-research-decision-d7"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -480,8 +507,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_insight")
         result = run_research_decision_l1_l13_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-convergence", "smoke-research-decision-d8"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -496,8 +522,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_convergence")
         result = run_research_decision_l1_l14_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-calibration", "smoke-research-decision-d9"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -512,8 +537,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_calibration")
         result = run_research_decision_l1_l15_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action in {"smoke-research-decision-final", "smoke-research-decision-d10"}:
         if normalize_mode(resolved_mode) != ENGINE_RESEARCH_DECISION:
@@ -528,8 +552,7 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_final")
         result = run_research_decision_l1_l16_smoke(query, base_dir=target_dir)
-        result["artifact_dir"] = str(target_dir)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action not in {"validate", "render"}:
         return json.dumps(
@@ -567,6 +590,106 @@ def task_engine_runner(
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _coerce_advisory_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "no", "n", ""}:
+            return False
+    return bool(value)
+
+
+def _topic_refinement_advisory_topic_id(mode: str | None) -> str:
+    normalized = normalize_mode(mode or "") or "task_engine"
+    return f"{normalized.lower()}_post_final"
+
+
+def _emit_topic_refinement_advisory_sidecar(
+    *,
+    result: dict[str, Any],
+    query: str,
+    mode: str | None,
+    artifact_dir: str | Path | None,
+    advisory_output_dir: str | None,
+    strict: bool,
+) -> None:
+    if result.get("pipeline_status") != PIPELINE_COMPLETE or artifact_dir is None:
+        return
+
+    run_dir = Path(artifact_dir).expanduser().resolve(strict=False)
+    output_dir = (
+        Path(advisory_output_dir).expanduser().resolve(strict=False)
+        if advisory_output_dir
+        else run_dir / "topic_refinement_advisory"
+    )
+    topic_id = _topic_refinement_advisory_topic_id(mode)
+
+    try:
+        from tools import topic_refinement_post_final_advisory_report as advisory_report
+
+        advisory_report.generate_post_final_topic_refinement_advisory_report(
+            run_dir=run_dir,
+            topic_id=topic_id,
+            output_dir=output_dir,
+            user_feedback=query,
+            strict=strict,
+        )
+    except Exception as exc:  # pragma: no cover - defensive sidecar isolation
+        _write_topic_refinement_advisory_failed_sidecar(
+            output_dir=output_dir,
+            run_dir=run_dir,
+            topic_id=topic_id,
+            reason=str(exc),
+            query=query,
+        )
+
+
+def _write_topic_refinement_advisory_failed_sidecar(
+    *,
+    output_dir: Path,
+    run_dir: Path,
+    topic_id: str,
+    reason: str,
+    query: str,
+) -> None:
+    payload = {
+        "status": "BLOCKED_TOPIC_REFINEMENT_ADVISORY_SIDECAR_FAILED",
+        "quality_verdict": "REPORT_ONLY_NEEDS_REPAIR",
+        "topic_id": topic_id,
+        "run_dir": str(run_dir),
+        "reason": reason,
+        "query_preview": (query or "")[:240],
+        "auto_execution": False,
+        "auto_adoption": False,
+        "no_adapter_called": True,
+        "no_manual_task_called": True,
+        "no_llm_called": True,
+        "no_pipeline_rerun": True,
+        "no_candidate_generated": True,
+        "no_final_rewritten": True,
+    }
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "post_final_topic_refinement_advisory_failed.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        lines = ["# Post-Final Topic Refinement Advisory Sidecar Failed", ""]
+        for key, value in payload.items():
+            lines.append(f"- {key}: {value}")
+        (output_dir / "post_final_topic_refinement_advisory_failed.md").write_text(
+            "\n".join(lines) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        return
 
 
 def _attach_passive_guard_debug(payload: dict[str, Any], *, query: str, enabled: bool) -> None:
@@ -819,6 +942,9 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         base_dir=args.get("base_dir"),
         research_packet_path=args.get("research_packet_path"),
         allow_archived_research_decision=bool(args.get("allow_archived_research_decision", False)),
+        emit_topic_refinement_advisory=_coerce_advisory_bool(args.get("emit_topic_refinement_advisory"), default=False),
+        topic_refinement_advisory_output_dir=args.get("topic_refinement_advisory_output_dir"),
+        topic_refinement_advisory_strict=_coerce_advisory_bool(args.get("topic_refinement_advisory_strict"), default=True),
     )
 
 
