@@ -77,6 +77,37 @@ Stop immediately when:
 
 Untracked `outputs/**` can be allowed only when the task declares output artifacts as uncommitted evidence. Never stage those outputs unless the user gives an explicit, separate instruction.
 
+## Lifecycle Safety Layering
+
+Guarded validation is not a shortcut to accepted state. Treat candidate,
+provisional, smoke, dry-run, external-calibration, and guarded-execution
+outputs as audit inputs until a separate accepted-result or baseline/result
+write phase is explicitly authorized.
+
+Apply these lifecycle boundaries:
+
+- If a previous request was blocked by branch or HEAD mismatch, continue on the
+  observed branch only when the user explicitly authorizes that exact branch
+  and HEAD for the current audit-only or repair task.
+- If review accepts only part of a run, sample set, or artifact set, narrow the
+  accepted scope to that reviewed subset. Do not promote unreviewed deltas,
+  samples, or StageRecords into the final result.
+- Keep `RESEARCH`, `DECISION`, and `RESEARCH_DECISION` artifacts isolated by
+  current run id, source commit, and output root. Do not mix artifacts across
+  modes, repositories, branches, or unrelated product lines.
+- A StageRecord, ledger, validation JSON, closeout report, and final answer
+  must agree on status, stage count, run identity, and accepted scope. Any
+  contradiction blocks PASS until reconciled in a report or a separate repair
+  task.
+- Runtime metadata, public release notes, and final status summaries may follow
+  accepted state; they must not create or expand accepted state.
+- Preserve caveats, uncertainty, executor failures, source weakness, and
+  rejected evidence boundaries. Rejected or weak evidence cannot be promoted
+  into supported claims by a cleaner closeout summary.
+- `passive_guard_mode` remains default off. Debug, warn, and
+  block-destructive passive-guard modes are opt-in validation boundaries and
+  must not change normal `RESEARCH`, `DECISION`, or `RESEARCH_DECISION` paths.
+
 ## Runtime / Python Interpreter Preflight
 
 Run this preflight before any L2/DDGS check, Research pipeline run, cross-domain rerun, stage rerun, pytest, or `py_compile` command. Interpreter mismatch is a validation blocker because it can make dependencies appear missing in one runtime while available in another.

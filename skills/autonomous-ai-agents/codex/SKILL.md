@@ -38,6 +38,37 @@ standalone Codex CLI, a valid CLI OAuth session may live under
 `~/.codex/auth.json`; do not treat a missing `OPENAI_API_KEY` alone as proof
 that Codex auth is missing.
 
+## Lifecycle Execution Safety
+
+Before asking Codex to change source, write a result, close out a lifecycle
+task, or prepare a release, record the repository path, branch, HEAD, tracked
+diff, staged diff, and untracked-file classification. `outputs/**` artifacts
+are evidence by default; do not stage or commit them unless the user gives a
+separate explicit instruction for those artifacts.
+
+If the branch or HEAD moved from the expected source identity, staged files
+exist, tracked files are dirty outside the allowed scope, or another task is
+writing the same repository, stop and narrow the task before continuing. Do not
+merge artifacts from multiple source commits into one claimed pass.
+
+Keep lifecycle states separate:
+
+- Candidate-only, dry-run, smoke, controlled, guarded, and provisional outputs
+  are not accepted, final, official, or baseline state.
+- Controlled or guarded execution must not write a final result, accepted
+  result, baseline, production target, or runtime metadata inside the same task
+  unless the user explicitly authorizes that separate write phase.
+- Baseline or final result writes must be their own reviewed phase. Runtime
+  metadata updates follow accepted state; they do not create accepted state.
+- Preserve caveats and evidence weakness. Rejected, deferred, weak, or
+  wrong-context evidence must not be promoted into supported claims.
+- When approval is blocked, partial, or contradictory, reduce the task to the
+  reviewed scope and rerun or report; do not widen the task to force a pass.
+
+Do not push, tag, or release from Codex unless the user gives exact
+authorization for the remote, branch or tag refs, and release scope. Use the
+GitHub repository-management skill for exact-ref push and release safety.
+
 ## One-Shot Tasks
 
 ```

@@ -52,6 +52,42 @@ OWNER=$(echo "$OWNER_REPO" | cut -d/ -f1)
 REPO=$(echo "$OWNER_REPO" | cut -d/ -f2)
 ```
 
+### Exact-Ref Push and Release Safety
+
+Use this section when a task asks to push, tag-push, or create a GitHub
+Release. Normal repo operations remain available, but release pushes require a
+stricter gate.
+
+Before any real push or release:
+
+- Require explicit user authorization naming the remote, remote URL or
+  owner/repo, every branch refspec, every tag refspec, release tag, release
+  title, and release-notes file.
+- Verify repository identity with `git remote -v` and, when available,
+  `gh repo view <owner>/<repo> --json nameWithOwner,viewerPermission,isPrivate,visibility,url`.
+- Confirm the remote is the intended user-owned target or fork. Do not push to
+  an upstream or canonical maintainer remote unless the user explicitly names
+  that remote as the target.
+- Record remote visibility. If the target is public, require and record an
+  explicit acknowledgement that pushing may disclose repository code.
+- Verify permission is `WRITE`, `MAINTAIN`, or `ADMIN`, or that an exact
+  dry-run push proves write access.
+- Precheck remote tags with `git ls-remote --tags <remote> <tag>`. An existing
+  tag is allowed only when its target already matches the local target; never
+  force-move a tag.
+- Precheck remote branches with `git ls-remote --heads <remote> <branch>`.
+  Existing branches must be fast-forward targets; otherwise stop.
+- Run a dry-run with the exact same refspecs before the real push.
+
+Never use `--force`, `--force-with-lease`, `--tags`, `--all`, `--mirror`, remote
+ref deletion, or wildcard refspecs for a guarded release push. Push only the
+enumerated `src:dst` refs authorized by the user.
+
+Create a GitHub Release only for the authorized tag, title, and notes file. Do
+not upload bundle assets or other release assets unless separately authorized.
+Keep local bundle and restore instructions in the release notes or report, and
+do not stage or commit generated `outputs/**` reports as part of the push.
+
 ---
 
 ## 1. Cloning Repositories

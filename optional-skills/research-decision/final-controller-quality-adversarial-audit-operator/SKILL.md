@@ -80,6 +80,28 @@ During this skill:
 - Do not accept fixture-specific production branches, templates, or answer shortcuts.
 - Do not let developer diagnostics, logs, or summaries define user-facing quality.
 
+## Layered Evidence Boundaries
+
+The final controller must respect lifecycle and evidence boundaries:
+
+- Evidence packets, convergence reports, external calibration, and final
+  controller output are separate artifacts. External calibration and convergence
+  may inform the final answer, but they are not themselves final accepted
+  results.
+- Candidate, provisional, smoke, dry-run, and guarded-validation outputs cannot
+  be restated as accepted or final user-facing conclusions without a separate
+  accepted-scope review.
+- If a review accepts only a subset of samples, claims, or deltas, the final
+  answer must not promote unaccepted material into the accepted result.
+- Caveats, uncertainty, disagreement, weak evidence, and rejected-evidence
+  boundaries must survive synthesis. A smoother final answer must not strengthen
+  a weak claim, erase a caveat, or turn rejected evidence into support.
+- Keep current-run provenance intact. Do not import examples, case rules, or
+  release facts from other repositories or product lines into Research/Decision
+  final-controller behavior.
+- This wording is an audit contract only. It must not change the normal
+  `RESEARCH`, `DECISION`, or `RESEARCH_DECISION` execution path.
+
 ## product-quality contract
 
 A final-controller answer is acceptable only when the user can use it without opening the internal artifacts. Check for these properties directly in the final text:
