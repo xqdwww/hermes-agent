@@ -271,6 +271,9 @@ curl -sS --max-time 5 http://127.0.0.1:18890/health
 
 The wrapper handles its own token. Do not read, print, or write the token.
 
+Coordinate Copy note: after a failed first coordinate Copy pass, the worker must skip coordinates already tried in the same response-read attempt. The second pass should expand to remaining left-toolbar candidates rather than repeat the short-answer toolbar points.
+For long or multi-line answers, only click the lower-left assistant Copy button cluster directly under the final visible line. Do not scan upper response areas or broad fallback rows; if that cluster fails, fail cleanly.
+
 ## GPT Bridge Official Executor Discovery
 
 The formal ChatGPT App Bridge executor is the wrapper:
