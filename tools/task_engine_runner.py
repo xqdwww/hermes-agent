@@ -193,6 +193,27 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "description": "Strict mode passed to the report-only advisory wrapper. Defaults to true.",
                     "default": True,
                 },
+                "emit_evidence_backed_sidecar": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicit opt-in evidence-backed sidecar status/scaffold emission. "
+                        "Default false; never performs source acquisition, packet generation, final rewrite, or TOPIC_REFINEMENT."
+                    ),
+                    "default": False,
+                },
+                "evidence_backed_sidecar_stage": {
+                    "type": "string",
+                    "enum": [
+                        "status_only",
+                        "source_registry_gate",
+                        "fulltext_handoff_gate",
+                        "evidence_packet_gate",
+                        "final_traceability_gate",
+                        "advisory_report_gate",
+                    ],
+                    "description": "Evidence-backed sidecar status gate to inspect when the sidecar flag is true.",
+                    "default": "status_only",
+                },
             },
             "required": ["query"],
         },
@@ -213,11 +234,15 @@ def task_engine_runner(
     emit_topic_refinement_advisory: bool = False,
     topic_refinement_advisory_output_dir: str | None = None,
     topic_refinement_advisory_strict: bool = True,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
     emit_topic_refinement_advisory = _coerce_advisory_bool(emit_topic_refinement_advisory, default=False)
     topic_refinement_advisory_strict = _coerce_advisory_bool(topic_refinement_advisory_strict, default=True)
+    emit_evidence_backed_sidecar = _coerce_advisory_bool(emit_evidence_backed_sidecar, default=False)
+    evidence_backed_sidecar_stage = (evidence_backed_sidecar_stage or "status_only").strip()
 
     if resolved_mode is None:
         return json.dumps(
@@ -251,6 +276,12 @@ def task_engine_runner(
                 artifact_dir=target_dir,
                 advisory_output_dir=topic_refinement_advisory_output_dir,
                 strict=topic_refinement_advisory_strict,
+            )
+        if emit_evidence_backed_sidecar:
+            _emit_evidence_backed_runner_sidecar(
+                artifact_dir=target_dir,
+                mode=resolved_mode,
+                stage=evidence_backed_sidecar_stage,
             )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -975,6 +1006,57 @@ def _write_topic_refinement_advisory_failed_sidecar(
         return
 
 
+def _emit_evidence_backed_runner_sidecar(
+    *,
+    artifact_dir: str | Path | None,
+    mode: str | None,
+    stage: str,
+) -> None:
+    if artifact_dir is None:
+        return
+    run_dir = Path(artifact_dir).expanduser().resolve(strict=False)
+    try:
+        from tools import evidence_backed_runner_sidecar as evidence_sidecar
+
+        evidence_sidecar.maybe_emit_sidecar(
+            run_dir=run_dir,
+            enabled=True,
+            stage=stage,
+            mode=normalize_mode(mode or "") or "task_engine",
+        )
+    except Exception as exc:  # pragma: no cover - defensive sidecar isolation
+        _write_evidence_backed_sidecar_failed_sidecar(run_dir=run_dir, stage=stage, reason=str(exc))
+
+
+def _write_evidence_backed_sidecar_failed_sidecar(*, run_dir: Path, stage: str, reason: str) -> None:
+    output_dir = run_dir / "evidence_backed_sidecar"
+    payload = {
+        "status": "BLOCKED_EVIDENCE_BACKED_SIDECAR_FAILED",
+        "run_dir": str(run_dir),
+        "sidecar_stage": stage,
+        "reason": reason,
+        "no_auto_execution": True,
+        "semantic_evaluator_used": False,
+        "source_acquisition_performed_by_sidecar": False,
+        "final_modified_by_sidecar": False,
+        "topic_refinement_auto_executed": False,
+        "no_llm_called": True,
+        "no_network_called": True,
+    }
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "evidence_backed_sidecar_failed.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        lines = ["# Evidence-Backed Sidecar Failed", ""]
+        for key, value in payload.items():
+            lines.append(f"- {key}: {value}")
+        (output_dir / "evidence_backed_sidecar_failed.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        return
+
+
 def _attach_passive_guard_debug(payload: dict[str, Any], *, query: str, enabled: bool) -> None:
     if not enabled:
         return
@@ -1228,6 +1310,8 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         emit_topic_refinement_advisory=_coerce_advisory_bool(args.get("emit_topic_refinement_advisory"), default=False),
         topic_refinement_advisory_output_dir=args.get("topic_refinement_advisory_output_dir"),
         topic_refinement_advisory_strict=_coerce_advisory_bool(args.get("topic_refinement_advisory_strict"), default=True),
+        emit_evidence_backed_sidecar=_coerce_advisory_bool(args.get("emit_evidence_backed_sidecar"), default=False),
+        evidence_backed_sidecar_stage=str(args.get("evidence_backed_sidecar_stage", "status_only")),
     )
 
 
