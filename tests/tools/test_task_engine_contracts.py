@@ -82,6 +82,7 @@ from tools.task_mode_runtime import TaskModeRuntime, TaskModeState
 from tools.task_engine_runner import (
     DIRECT_LEGACY_RESEARCH_DECISION_FULL,
     LEGACY_RESEARCH_DECISION_BANNED_TERMS,
+    RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE,
     TERMINOLOGY_LEAKAGE,
     apply_legacy_research_decision_term_guard,
     audit_legacy_research_decision_terms,
@@ -382,14 +383,15 @@ def test_research_decision_full_is_archived_by_default(tmp_path: Path):
 
     assert result["status"] == "blocked"
     assert result["pipeline_status"] == "PIPELINE_BLOCKED"
-    assert result["blocked_reason"] == DIRECT_LEGACY_RESEARCH_DECISION_FULL
-    assert result["entrypoint_guard"] == DIRECT_LEGACY_RESEARCH_DECISION_FULL
+    assert result["blocked_reason"] == RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
+    assert result["entrypoint_guard"] == RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
     assert result["mode"] == ENGINE_RESEARCH_DECISION
     assert result["two_step_recommendation"] == [
         "RESEARCH full -> research_evidence_packet.md",
         "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
     ]
-    assert result["allow_override"]["function_arg"] == "allow_archived_research_decision=True"
+    assert result["archived_smoke_policy"]["allow_archived_flag_alone_allows_production_full"] is False
+    assert result["archived_smoke_policy"]["explicit_smoke_or_integration_action_required"] is True
     serialized = json.dumps(result, ensure_ascii=False)
     assert not audit_legacy_research_decision_terms(serialized)
 

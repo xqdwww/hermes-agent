@@ -67,6 +67,9 @@ LEGACY_RESEARCH_DECISION_ALLOWED_TERMS = (
 )
 LEGACY_RESEARCH_DECISION_AUDIT_CONTEXTS = {"legacy_term_audit", "banned_term_check", "test_assertion"}
 DIRECT_LEGACY_RESEARCH_DECISION_FULL = "DIRECT_LEGACY_RESEARCH_DECISION_FULL"
+RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE = (
+    "research_decision_combined_full_requires_fresh_two_stage_production_path"
+)
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
 TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
 TASK_ENGINE_RUNNER_MODULE = "tools.task_engine_runner"
@@ -167,6 +170,10 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "type": "string",
                     "description": "Optional base directory used to resolve relative artifact paths.",
                 },
+                "artifact_dir": {
+                    "type": "string",
+                    "description": "Optional artifact directory alias for base_dir. If both are supplied they must match.",
+                },
                 "research_packet_path": {
                     "type": "string",
                     "description": "Optional research_evidence_packet.md path for two-step RESEARCH -> DECISION runs.",
@@ -236,6 +243,7 @@ def task_engine_runner(
     action: str = "contract",
     run: dict[str, Any] | None = None,
     base_dir: str | None = None,
+    artifact_dir: str | None = None,
     research_packet_path: str | None = None,
     allow_archived_research_decision: bool = False,
     passive_guard_debug: bool = False,
@@ -265,27 +273,46 @@ def task_engine_runner(
             indent=2,
         )
 
+    try:
+        run_base_dir = _resolve_runner_base_dir(base_dir=base_dir, artifact_dir=artifact_dir)
+    except _ArtifactDirPolicyBlocked as exc:
+        target_dir = Path(base_dir or artifact_dir or ".").resolve()
+        return json.dumps(
+            {
+                "status": "blocked",
+                "BLOCKED_STATUS": PIPELINE_BLOCKED,
+                "pipeline_status": PIPELINE_BLOCKED,
+                "blocked_stage": "artifact_dir_policy",
+                "blocked_reason": str(exc),
+                "artifact_dir": str(target_dir),
+                "mode": normalize_mode(resolved_mode) or resolved_mode,
+                "recommended_next_step": "Pass only one of base_dir or artifact_dir, or pass matching paths.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
     if action == "full" and normalize_mode(resolved_mode) == ENGINE_RESEARCH_DECISION:
-        if not _research_decision_archive_allowed(allow_archived_research_decision):
-            target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "blocked_full_run")
-            return json.dumps(
-                _archived_research_decision_response(
-                    action="full",
-                    artifact_dir=target_dir,
-                    requested_action=requested_action,
-                    effective_action="archived-research-decision",
-                    emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
-                    evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
-                ),
-                ensure_ascii=False,
-                indent=2,
-            )
-        action = "smoke-research-decision-final"
+        target_dir = _resolve_artifact_dir(run_base_dir, resolved_mode, "blocked_full_run")
+        return json.dumps(
+            _archived_research_decision_response(
+                action="full",
+                artifact_dir=target_dir,
+                requested_action=requested_action,
+                effective_action="archived-research-decision",
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
     elif action == "full":
         action = _full_action_for_mode(resolved_mode)
 
     def _finalize_result(result: dict[str, Any], *, target_dir: Path) -> str:
         result["artifact_dir"] = str(target_dir)
+        if _is_archived_research_decision_real_action(resolved_mode, action):
+            _mark_non_production_smoke_result(result, action=action)
         if full_run_requested:
             _attach_full_run_entrypoint_metadata(
                 result,
@@ -339,7 +366,7 @@ def task_engine_runner(
         payload = {
             "status": "ok",
             "mode": resolved_mode,
-            "plan": build_dry_run_plan(resolved_mode, base_dir=base_dir),
+            "plan": build_dry_run_plan(resolved_mode, base_dir=run_base_dir),
             "not_executed": True,
             "execution_state": "dry_run_not_executed",
         }
@@ -351,7 +378,7 @@ def task_engine_runner(
         )
 
     if action == "simulated-run":
-        target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "simulated")
+        target_dir = _resolve_artifact_dir(run_base_dir, resolved_mode, "simulated")
         result = run_simulated_pipeline(resolved_mode, base_dir=target_dir)
         _write_simulated_run_advisory_aliases(
             resolved_mode,
@@ -362,7 +389,7 @@ def task_engine_runner(
         return _finalize_result(result, target_dir=target_dir)
 
     if action == "archived-research-decision":
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "blocked_archived_research_decision")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "blocked_archived_research_decision")
         return json.dumps(
             _archived_research_decision_response(
                 action="full",
@@ -377,7 +404,7 @@ def task_engine_runner(
         )
 
     if _is_archived_research_decision_real_action(resolved_mode, action) and not _research_decision_archive_allowed(allow_archived_research_decision):
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, f"blocked_{action}")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, f"blocked_{action}")
         return json.dumps(
             _archived_research_decision_response(
                 action=action,
@@ -402,7 +429,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l2")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "real_smoke_l1_l2")
         result = run_research_l1_l2_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -417,7 +444,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l3")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "real_smoke_l1_l3")
         result = run_research_l1_l3_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -432,7 +459,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l4")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "real_smoke_l1_l4")
         result = run_research_l1_l4_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -447,7 +474,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH, "real_smoke_l1_l5")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "real_smoke_l1_l5")
         result = run_research_l1_l5_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -462,12 +489,12 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
         )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_DECISION, "real_smoke_decision_final")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_DECISION, "real_smoke_decision_final")
         try:
             resolved_research_packet_path = _resolve_decision_research_packet_path(
                 query=query,
                 mode=resolved_mode,
-                base_dir=base_dir,
+                base_dir=run_base_dir,
                 research_packet_path=research_packet_path,
             )
         except _ResearchPacketDiscoveryBlocked as exc:
@@ -512,7 +539,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_intelligence")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_intelligence")
         result = run_research_decision_l1_l7_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -527,7 +554,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_search")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_search")
         result = run_research_decision_l1_l8_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -542,7 +569,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_structure")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_structure")
         result = run_research_decision_l1_l9_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -557,7 +584,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_evidence")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_evidence")
         result = run_research_decision_l1_l10_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -572,7 +599,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_premise")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_premise")
         result = run_research_decision_l1_l11_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -587,7 +614,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_alternative")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_alternative")
         result = run_research_decision_l1_l12_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -602,7 +629,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_insight")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_insight")
         result = run_research_decision_l1_l13_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -617,7 +644,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_convergence")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_convergence")
         result = run_research_decision_l1_l14_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -632,7 +659,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_calibration")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_calibration")
         result = run_research_decision_l1_l15_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -647,7 +674,7 @@ def task_engine_runner(
                 ensure_ascii=False,
                 indent=2,
             )
-        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_final")
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, "real_smoke_research_decision_final")
         result = run_research_decision_l1_l16_smoke(query, base_dir=target_dir)
         return _finalize_result(result, target_dir=target_dir)
 
@@ -669,7 +696,7 @@ def task_engine_runner(
             indent=2,
         )
 
-    validation = validate_pipeline(resolved_mode, run, base_dir=base_dir)
+    validation = validate_pipeline(resolved_mode, run, base_dir=run_base_dir)
     if action == "validate":
         return json.dumps(
             {"status": "ok" if validation["valid"] else "blocked", "validation": validation},
@@ -677,7 +704,7 @@ def task_engine_runner(
             indent=2,
         )
 
-    markdown = render_final_markdown(resolved_mode, run, validation, base_dir=base_dir)
+    markdown = render_final_markdown(resolved_mode, run, validation, base_dir=run_base_dir)
     return json.dumps(
         {
             "status": "ok" if validation["valid"] else "blocked",
@@ -1162,7 +1189,11 @@ def _archived_research_decision_response(
     emit_evidence_backed_sidecar: bool = False,
     evidence_backed_sidecar_stage: str = "status_only",
 ) -> dict[str, Any]:
-    reason = DIRECT_LEGACY_RESEARCH_DECISION_FULL if action == "full" else "RESEARCH_DECISION_ARCHIVED"
+    reason = (
+        RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
+        if action == "full"
+        else "RESEARCH_DECISION_ARCHIVED"
+    )
     target_dir = Path(artifact_dir).resolve() if artifact_dir is not None else _resolve_artifact_dir(None, ENGINE_RESEARCH_DECISION, "blocked_full_run")
     payload = {
         "status": "blocked",
@@ -1178,13 +1209,21 @@ def _archived_research_decision_response(
             "a current-run research_evidence_packet.md, then run DECISION full with research_packet_path."
         ),
         "entrypoint_guard": reason,
+        "recommended_next_step": (
+            "Run RESEARCH full to produce a fresh current-run research_evidence_packet.md, "
+            "then run DECISION full with research_packet_path=<that packet>."
+        ),
         "two_step_recommendation": [
             "RESEARCH full -> research_evidence_packet.md",
             "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
         ],
-        "allow_override": {
-            "function_arg": "allow_archived_research_decision=True",
-            "environment": "HERMES_ENABLE_RESEARCH_DECISION=1",
+        "archived_smoke_policy": {
+            "allow_archived_flag_alone_allows_production_full": False,
+            "explicit_smoke_or_integration_action_required": True,
+            "allowed_action_prefix": "smoke-research-decision",
+            "override_function_arg": "allow_archived_research_decision=True",
+            "override_environment": "HERMES_ENABLE_RESEARCH_DECISION=1",
+            "smoke_output_marks_non_production": True,
         },
     }
     _attach_full_run_entrypoint_metadata(
@@ -1197,6 +1236,28 @@ def _archived_research_decision_response(
         evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
     )
     return payload
+
+
+def _mark_non_production_smoke_result(payload: dict[str, Any], *, action: str) -> None:
+    payload.setdefault("non_production_smoke_run", True)
+    payload.setdefault("production_run", False)
+    payload.setdefault("pipeline_completion_scope", "non_production_smoke_run")
+    payload.setdefault(
+        "production_freshness_guard",
+        {
+            "required": False,
+            "not_required_reason": "explicit_archived_smoke_or_integration_action",
+            "action": action,
+        },
+    )
+    payload.setdefault(
+        "smoke_run_policy",
+        {
+            "allow_as_production_full_run": False,
+            "requires_explicit_smoke_or_integration_intent": True,
+            "pipeline_complete_is_production_complete": False,
+        },
+    )
 
 
 def _attach_full_run_entrypoint_metadata(
@@ -1319,6 +1380,24 @@ def _resolve_artifact_dir(base_dir: str | None, mode: str, label: str) -> Path:
         )
     )
     return (root / f"{int(time.time())}_{mode.lower()}_{label}").resolve()
+
+
+class _ArtifactDirPolicyBlocked(Exception):
+    pass
+
+
+def _resolve_runner_base_dir(*, base_dir: str | None, artifact_dir: str | None) -> str | None:
+    base_value = (base_dir or "").strip()
+    artifact_value = (artifact_dir or "").strip()
+    if not base_value:
+        return artifact_value or None
+    if not artifact_value:
+        return base_value
+    base_path = Path(base_value).expanduser().resolve()
+    artifact_path = Path(artifact_value).expanduser().resolve()
+    if base_path != artifact_path:
+        raise _ArtifactDirPolicyBlocked("base_dir_artifact_dir_conflict")
+    return str(base_path)
 
 
 class _ResearchPacketDiscoveryBlocked(Exception):
@@ -1453,6 +1532,7 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         action=str(args.get("action", "contract")),
         run=args.get("run"),
         base_dir=args.get("base_dir"),
+        artifact_dir=args.get("artifact_dir"),
         research_packet_path=args.get("research_packet_path"),
         allow_archived_research_decision=bool(args.get("allow_archived_research_decision", False)),
         emit_topic_refinement_advisory=_coerce_advisory_bool(args.get("emit_topic_refinement_advisory"), default=False),
@@ -1483,6 +1563,7 @@ __all__ = [
     "LEGACY_RESEARCH_DECISION_BANNED_TERMS",
     "LEGACY_RESEARCH_DECISION_ALLOWED_TERMS",
     "DIRECT_LEGACY_RESEARCH_DECISION_FULL",
+    "RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE",
     "TERMINOLOGY_LEAKAGE",
     "apply_legacy_research_decision_term_guard",
     "audit_legacy_research_decision_terms",

@@ -64,7 +64,7 @@ def test_research_decision_full_fixture_blocks_with_status_not_routecard(tmp_pat
     assert result["BLOCKED_STATUS"] == PIPELINE_BLOCKED
     assert result["pipeline_status"] == PIPELINE_BLOCKED
     assert result["blocked_stage"] == "research_decision_archived"
-    assert result["blocked_reason"] == runner.DIRECT_LEGACY_RESEARCH_DECISION_FULL
+    assert result["blocked_reason"] == runner.RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
     assert result["artifact_dir"] == str(tmp_path / "adhd")
     assert result["execution_state"] == "blocked"
     assert result["not_executed"] is True
@@ -121,6 +121,7 @@ def test_adhd_fixture_is_generic_full_run_fixture_not_special_cased(tmp_path: Pa
     )
 
     assert generic_result["blocked_reason"] == adhd_result["blocked_reason"]
+    assert generic_result["blocked_reason"] == runner.RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
     assert generic_result["selected_entrypoint"] == adhd_result["selected_entrypoint"] == "task_engine_runner"
     assert generic_result["full_run_request"]["mode"] == adhd_result["full_run_request"]["mode"] == ENGINE_RESEARCH_DECISION
     assert "ADHD" not in generic_result["generated_command"]

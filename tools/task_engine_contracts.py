@@ -275,7 +275,13 @@ def detect_task_engine_mode(text: str) -> str | None:
     return None
 
 
-def validate_pipeline(mode: str, run: dict[str, Any], *, base_dir: str | Path | None = None) -> dict[str, Any]:
+def validate_pipeline(
+    mode: str,
+    run: dict[str, Any],
+    *,
+    base_dir: str | Path | None = None,
+    production: bool = False,
+) -> dict[str, Any]:
     """Validate a completed run against the canonical contract.
 
     Validation is fail-closed: any absent stage, wrong binding, missing artifact,
@@ -344,6 +350,11 @@ def validate_pipeline(mode: str, run: dict[str, Any], *, base_dir: str | Path | 
     if normalized in {ENGINE_DECISION, ENGINE_RESEARCH_DECISION}:
         _validate_divergence_models(errors, by_name)
 
+    production_freshness_errors: list[str] = []
+    if production:
+        production_freshness_errors = _validate_production_freshness(normalized, run, by_name, base)
+        errors.extend(production_freshness_errors)
+
     status = PIPELINE_COMPLETE if not errors else PIPELINE_BLOCKED
     return {
         "valid": not errors,
@@ -353,7 +364,80 @@ def validate_pipeline(mode: str, run: dict[str, Any], *, base_dir: str | Path | 
         "stage_count": len(stage_records),
         "expected_stage_count": len(specs),
         "divergence_unique_model_count": _divergence_unique_model_count(by_name),
+        "production_freshness_required": production,
+        "production_freshness_valid": (not production_freshness_errors) if production else None,
+        "production_freshness_errors": production_freshness_errors,
     }
+
+
+def _validate_production_freshness(
+    mode: str,
+    run: dict[str, Any],
+    by_name: dict[str, dict[str, Any]],
+    base_dir: Path | None,
+) -> list[str]:
+    errors: list[str] = []
+    execution_mode = str(run.get("execution_mode") or "")
+    if "smoke" in execution_mode.lower():
+        errors.append(f"production_freshness:execution_mode_smoke_not_allowed:{execution_mode}")
+
+    if mode not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
+        return errors
+
+    l2_5 = by_name.get("L2_5_codex_evidence_organizer")
+    if l2_5 and str(l2_5.get("status") or "").lower() == "handoff-smoke":
+        errors.append("production_freshness:L2_5_codex_evidence_organizer:handoff_smoke_not_allowed")
+
+    l5 = by_name.get("L5_deepseek_acceptance")
+    if not l5:
+        return errors
+
+    artifact_path = l5.get("artifact_path")
+    if not artifact_path:
+        errors.append("production_freshness:L5_deepseek_acceptance:missing_research_packet_path")
+        return errors
+
+    packet_path = _resolve_path(artifact_path, base_dir)
+    if not packet_path.exists():
+        errors.append(f"production_freshness:L5_deepseek_acceptance:research_packet_not_found:{packet_path}")
+        return errors
+
+    text = packet_path.read_text(encoding="utf-8", errors="replace")
+    errors.extend(_validate_research_packet_current_run_provenance(text, base_dir))
+    return errors
+
+
+def _validate_research_packet_current_run_provenance(text: str, base_dir: Path | None) -> list[str]:
+    errors: list[str] = []
+    required = ("current_run_id", "current_query_hash", "current_artifact_dir")
+    values = {_field: _packet_scalar_value(text, _field) for _field in required}
+    for field, value in values.items():
+        if not value:
+            errors.append(f"production_freshness:L5_deepseek_acceptance:missing_provenance:{field}")
+
+    artifact_dir = values.get("current_artifact_dir")
+    if artifact_dir and base_dir is not None:
+        try:
+            packet_dir = Path(artifact_dir).expanduser().resolve()
+            expected_dir = base_dir.expanduser().resolve()
+        except OSError:
+            errors.append("production_freshness:L5_deepseek_acceptance:invalid_current_artifact_dir")
+        else:
+            if packet_dir != expected_dir:
+                errors.append(
+                    "production_freshness:L5_deepseek_acceptance:current_artifact_dir_mismatch:"
+                    f"{packet_dir}"
+                )
+    return errors
+
+
+def _packet_scalar_value(text: str, field: str) -> str:
+    prefix = f"{field}:"
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def render_final_markdown(
