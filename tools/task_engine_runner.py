@@ -68,6 +68,14 @@ LEGACY_RESEARCH_DECISION_ALLOWED_TERMS = (
 LEGACY_RESEARCH_DECISION_AUDIT_CONTEXTS = {"legacy_term_audit", "banned_term_check", "test_assertion"}
 DIRECT_LEGACY_RESEARCH_DECISION_FULL = "DIRECT_LEGACY_RESEARCH_DECISION_FULL"
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
+TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
+TASK_ENGINE_RUNNER_MODULE = "tools.task_engine_runner"
+TASK_ENGINE_RUNNER_SOURCE = "tools/task_engine_runner.py"
+FULL_RUN_ENTRYPOINT_CHECK = "PASS_TASK_ENGINE_RUNNER_FULL_ENTRYPOINT"
+NO_OLD_ENGINE_ROUTE_CHECK = "PASS_NO_OLD_ENGINE_ROUTE"
+NO_CONFIRMATION_CARD_CHECK = "PASS_NO_CONFIRMATION_CARD"
+PROMPT_PATH_POLICY_CHECK = "PASS_REPO_ARTIFACT_PROMPT_PATH_POLICY"
+SIDECAR_DEFAULT_OFF_CHECK = "PASS_EVIDENCE_BACKED_SIDECAR_DEFAULT_OFF"
 
 
 TASK_ENGINE_RUNNER_SCHEMA = {
@@ -239,6 +247,8 @@ def task_engine_runner(
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
+    requested_action = action
+    full_run_requested = requested_action == "full"
     emit_topic_refinement_advisory = _coerce_advisory_bool(emit_topic_refinement_advisory, default=False)
     topic_refinement_advisory_strict = _coerce_advisory_bool(topic_refinement_advisory_strict, default=True)
     emit_evidence_backed_sidecar = _coerce_advisory_bool(emit_evidence_backed_sidecar, default=False)
@@ -257,8 +267,16 @@ def task_engine_runner(
 
     if action == "full" and normalize_mode(resolved_mode) == ENGINE_RESEARCH_DECISION:
         if not _research_decision_archive_allowed(allow_archived_research_decision):
+            target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "blocked_full_run")
             return json.dumps(
-                _archived_research_decision_response(action="full"),
+                _archived_research_decision_response(
+                    action="full",
+                    artifact_dir=target_dir,
+                    requested_action=requested_action,
+                    effective_action="archived-research-decision",
+                    emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                    evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+                ),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -268,6 +286,16 @@ def task_engine_runner(
 
     def _finalize_result(result: dict[str, Any], *, target_dir: Path) -> str:
         result["artifact_dir"] = str(target_dir)
+        if full_run_requested:
+            _attach_full_run_entrypoint_metadata(
+                result,
+                target_dir=target_dir,
+                mode=resolved_mode,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            )
         if emit_topic_refinement_advisory:
             _emit_topic_refinement_advisory_sidecar(
                 result=result,
@@ -291,6 +319,8 @@ def task_engine_runner(
             "mode": resolved_mode,
             "contract": build_engine_contract(resolved_mode, query),
             "schema": canonical_schema(resolved_mode),
+            "not_executed": True,
+            "execution_state": "contract_not_executed",
         }
         _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
         return json.dumps(
@@ -310,6 +340,8 @@ def task_engine_runner(
             "status": "ok",
             "mode": resolved_mode,
             "plan": build_dry_run_plan(resolved_mode, base_dir=base_dir),
+            "not_executed": True,
+            "execution_state": "dry_run_not_executed",
         }
         _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
         return json.dumps(
@@ -330,15 +362,31 @@ def task_engine_runner(
         return _finalize_result(result, target_dir=target_dir)
 
     if action == "archived-research-decision":
+        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, "blocked_archived_research_decision")
         return json.dumps(
-            _archived_research_decision_response(action="full"),
+            _archived_research_decision_response(
+                action="full",
+                artifact_dir=target_dir,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            ),
             ensure_ascii=False,
             indent=2,
         )
 
     if _is_archived_research_decision_real_action(resolved_mode, action) and not _research_decision_archive_allowed(allow_archived_research_decision):
+        target_dir = _resolve_artifact_dir(base_dir, ENGINE_RESEARCH_DECISION, f"blocked_{action}")
         return json.dumps(
-            _archived_research_decision_response(action=action),
+            _archived_research_decision_response(
+                action=action,
+                artifact_dir=target_dir,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            ),
             ensure_ascii=False,
             indent=2,
         )
@@ -423,15 +471,27 @@ def task_engine_runner(
                 research_packet_path=research_packet_path,
             )
         except _ResearchPacketDiscoveryBlocked as exc:
+            payload = {
+                "status": "blocked",
+                "BLOCKED_STATUS": PIPELINE_BLOCKED,
+                "pipeline_status": PIPELINE_BLOCKED,
+                "blocked_stage": "research_packet_discovery",
+                "blocked_reason": str(exc),
+                "artifact_dir": str(target_dir),
+                "message": "DECISION requested latest research packet, but no valid new RESEARCH packet was found.",
+            }
+            if full_run_requested:
+                _attach_full_run_entrypoint_metadata(
+                    payload,
+                    target_dir=target_dir,
+                    mode=resolved_mode,
+                    requested_action=requested_action,
+                    effective_action=action,
+                    emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                    evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+                )
             return json.dumps(
-                {
-                    "status": "blocked",
-                    "pipeline_status": PIPELINE_BLOCKED,
-                    "blocked_stage": "research_packet_discovery",
-                    "blocked_reason": str(exc),
-                    "artifact_dir": str(target_dir),
-                    "message": "DECISION requested latest research packet, but no valid new RESEARCH packet was found.",
-                },
+                payload,
                 ensure_ascii=False,
                 indent=2,
             )
@@ -1093,13 +1153,24 @@ def _is_archived_research_decision_real_action(mode: str | None, action: str) ->
     return normalize_mode(mode or "") == ENGINE_RESEARCH_DECISION and action.startswith("smoke-research-decision")
 
 
-def _archived_research_decision_response(*, action: str) -> dict[str, Any]:
+def _archived_research_decision_response(
+    *,
+    action: str,
+    artifact_dir: str | Path | None = None,
+    requested_action: str = "full",
+    effective_action: str | None = None,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
+) -> dict[str, Any]:
     reason = DIRECT_LEGACY_RESEARCH_DECISION_FULL if action == "full" else "RESEARCH_DECISION_ARCHIVED"
-    return {
+    target_dir = Path(artifact_dir).resolve() if artifact_dir is not None else _resolve_artifact_dir(None, ENGINE_RESEARCH_DECISION, "blocked_full_run")
+    payload = {
         "status": "blocked",
+        "BLOCKED_STATUS": PIPELINE_BLOCKED,
         "pipeline_status": "PIPELINE_BLOCKED",
         "blocked_stage": "research_decision_archived",
         "blocked_reason": reason,
+        "artifact_dir": str(target_dir),
         "mode": ENGINE_RESEARCH_DECISION,
         "action": action,
         "message": (
@@ -1116,6 +1187,83 @@ def _archived_research_decision_response(*, action: str) -> dict[str, Any]:
             "environment": "HERMES_ENABLE_RESEARCH_DECISION=1",
         },
     }
+    _attach_full_run_entrypoint_metadata(
+        payload,
+        target_dir=target_dir,
+        mode=ENGINE_RESEARCH_DECISION,
+        requested_action=requested_action,
+        effective_action=effective_action or action,
+        emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+        evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+    )
+    return payload
+
+
+def _attach_full_run_entrypoint_metadata(
+    payload: dict[str, Any],
+    *,
+    target_dir: str | Path,
+    mode: str,
+    requested_action: str,
+    effective_action: str,
+    emit_evidence_backed_sidecar: bool,
+    evidence_backed_sidecar_stage: str,
+) -> None:
+    normalized_mode = normalize_mode(mode) or str(mode)
+    artifact_dir = str(Path(target_dir).resolve())
+    pipeline_status = str(payload.get("pipeline_status") or "")
+    blocked = payload.get("status") == "blocked" or pipeline_status == PIPELINE_BLOCKED
+    if blocked:
+        payload.setdefault("BLOCKED_STATUS", pipeline_status or PIPELINE_BLOCKED)
+    payload.setdefault("selected_entrypoint", TASK_ENGINE_RUNNER_ENTRYPOINT)
+    payload.setdefault("entrypoint_module", TASK_ENGINE_RUNNER_MODULE)
+    payload.setdefault("entrypoint_source", TASK_ENGINE_RUNNER_SOURCE)
+    payload.setdefault("generated_command_kind", "python_callable")
+    payload.setdefault(
+        "generated_command",
+        (
+            f"{TASK_ENGINE_RUNNER_MODULE}.{TASK_ENGINE_RUNNER_ENTRYPOINT}"
+            f"(query=<original_user_request>, mode={normalized_mode!r}, action='full', base_dir={artifact_dir!r})"
+        ),
+    )
+    payload.setdefault("execution_state", "blocked" if blocked else "runner_selected")
+    payload.setdefault("full_run_entrypoint_check", FULL_RUN_ENTRYPOINT_CHECK)
+    payload.setdefault("legacy_engine_route_check", NO_OLD_ENGINE_ROUTE_CHECK)
+    payload.setdefault("confirmation_card_check", NO_CONFIRMATION_CARD_CHECK)
+    payload.setdefault("prompt_path_policy_check", PROMPT_PATH_POLICY_CHECK)
+    payload.setdefault("sidecar_default_off_check", SIDECAR_DEFAULT_OFF_CHECK)
+    payload.setdefault("confirmation_required", False)
+    payload.setdefault("second_confirmation_required", False)
+    payload.setdefault("confirmation_card_generated", False)
+    payload.setdefault("not_executed", blocked)
+    payload.setdefault(
+        "full_run_request",
+        {
+            "requested_action": requested_action,
+            "effective_action": effective_action,
+            "mode": normalized_mode,
+            "runner_selected": True,
+        },
+    )
+    payload.setdefault(
+        "prompt_path_policy",
+        {
+            "prompt_file_path": None,
+            "artifact_dir": artifact_dir,
+            "repo_artifact_dir_required": True,
+            "legacy_decision_engine_prompt_path_allowed": False,
+        },
+    )
+    payload.setdefault(
+        "sidecar_policy",
+        {
+            "evidence_backed_sidecar_default": False,
+            "evidence_backed_sidecar_requested": bool(emit_evidence_backed_sidecar),
+            "evidence_backed_sidecar_stage": evidence_backed_sidecar_stage,
+            "explicit_opt_in_only": True,
+            "main_result_contract_changed_by_sidecar": False,
+        },
+    )
 
 
 def audit_legacy_research_decision_terms(value: Any, *, context: str = "normal") -> list[dict[str, str]]:
