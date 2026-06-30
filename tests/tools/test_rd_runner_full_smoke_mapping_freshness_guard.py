@@ -186,7 +186,7 @@ def test_allow_archived_requires_explicit_smoke_intent(tmp_path: Path, monkeypat
         )
     )
     assert blocked["status"] == "blocked"
-    assert blocked["blocked_reason"] == runner.RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
+    assert blocked["blocked_reason"] == runner.UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION
     assert calls == []
 
     allowed_smoke = _load(
@@ -199,8 +199,12 @@ def test_allow_archived_requires_explicit_smoke_intent(tmp_path: Path, monkeypat
         )
     )
     assert allowed_smoke["status"] == "ok"
+    assert allowed_smoke["pipeline_status"] == runner.PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE
+    assert allowed_smoke["structural_pipeline_status"] == PIPELINE_COMPLETE
     assert allowed_smoke["non_production_smoke_run"] is True
     assert allowed_smoke["production_run"] is False
+    assert allowed_smoke["production_valid"] is False
+    assert allowed_smoke["evidence_freshness_valid"] is False
     assert allowed_smoke["smoke_run_policy"]["allow_as_production_full_run"] is False
     assert calls == [("integration smoke fixture", tmp_path / "smoke")]
 

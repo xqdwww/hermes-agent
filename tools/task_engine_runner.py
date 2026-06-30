@@ -70,6 +70,11 @@ DIRECT_LEGACY_RESEARCH_DECISION_FULL = "DIRECT_LEGACY_RESEARCH_DECISION_FULL"
 RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE = (
     "research_decision_combined_full_requires_fresh_two_stage_production_path"
 )
+UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION = (
+    "unsafe_archived_research_decision_override_not_allowed_for_production_request"
+)
+RESEARCH_DECISION_SMOKE_INTENT_REQUIRED = "explicit_smoke_or_integration_intent_required_for_archived_research_decision"
+PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE = "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE"
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
 TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
 TASK_ENGINE_RUNNER_MODULE = "tools.task_engine_runner"
@@ -180,7 +185,26 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                 },
                 "allow_archived_research_decision": {
                     "type": "boolean",
-                    "description": "Explicitly allow archived RESEARCH_DECISION real execution. Defaults to false.",
+                    "description": "Necessary but not sufficient permission for archived RESEARCH_DECISION smoke/integration actions. Never authorizes production/default full.",
+                    "default": False,
+                },
+                "execution_intent": {
+                    "type": "string",
+                    "enum": [
+                        "production",
+                        "production_full",
+                        "fresh_two_stage",
+                        "integration_smoke",
+                        "explicit_smoke",
+                        "archived_test",
+                        "mechanism_test",
+                        "dry_run",
+                    ],
+                    "description": "Optional dispatch intent. Production/fresh values block archived smoke; smoke/integration values can authorize archived smoke only when no production conflict exists.",
+                },
+                "explicit_smoke_intent": {
+                    "type": "boolean",
+                    "description": "True only when the user explicitly requested a non-production smoke/integration/archived test. Does not override production/fresh/no-smoke prompts.",
                     "default": False,
                 },
                 "passive_guard_debug": {
@@ -246,6 +270,8 @@ def task_engine_runner(
     artifact_dir: str | None = None,
     research_packet_path: str | None = None,
     allow_archived_research_decision: bool = False,
+    execution_intent: str | None = None,
+    explicit_smoke_intent: bool = False,
     passive_guard_debug: bool = False,
     emit_topic_refinement_advisory: bool = False,
     topic_refinement_advisory_output_dir: str | None = None,
@@ -261,6 +287,8 @@ def task_engine_runner(
     topic_refinement_advisory_strict = _coerce_advisory_bool(topic_refinement_advisory_strict, default=True)
     emit_evidence_backed_sidecar = _coerce_advisory_bool(emit_evidence_backed_sidecar, default=False)
     evidence_backed_sidecar_stage = (evidence_backed_sidecar_stage or "status_only").strip()
+    execution_intent = (execution_intent or "").strip().lower().replace("-", "_") or None
+    explicit_smoke_intent = _coerce_advisory_bool(explicit_smoke_intent, default=False)
 
     if resolved_mode is None:
         return json.dumps(
@@ -294,12 +322,18 @@ def task_engine_runner(
 
     if action == "full" and normalize_mode(resolved_mode) == ENGINE_RESEARCH_DECISION:
         target_dir = _resolve_artifact_dir(run_base_dir, resolved_mode, "blocked_full_run")
+        blocked_reason = (
+            UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION
+            if allow_archived_research_decision or _research_decision_archive_env_enabled()
+            else RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
+        )
         return json.dumps(
             _archived_research_decision_response(
                 action="full",
                 artifact_dir=target_dir,
                 requested_action=requested_action,
                 effective_action="archived-research-decision",
+                blocked_reason=blocked_reason,
                 emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
                 evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
             ),
@@ -402,6 +436,29 @@ def task_engine_runner(
             ensure_ascii=False,
             indent=2,
         )
+
+    if _is_archived_research_decision_real_action(resolved_mode, action):
+        archived_block_reason = _archived_research_decision_override_block_reason(
+            query=query,
+            action=action,
+            execution_intent=execution_intent,
+            explicit_smoke_intent=explicit_smoke_intent,
+        )
+        if archived_block_reason is not None:
+            target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, f"blocked_{action}")
+            return json.dumps(
+                _archived_research_decision_response(
+                    action=action,
+                    artifact_dir=target_dir,
+                    requested_action=requested_action,
+                    effective_action=action,
+                    blocked_reason=archived_block_reason,
+                    emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                    evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
 
     if _is_archived_research_decision_real_action(resolved_mode, action) and not _research_decision_archive_allowed(allow_archived_research_decision):
         target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH_DECISION, f"blocked_{action}")
@@ -1173,11 +1230,91 @@ def _full_action_for_mode(mode: str) -> str:
 
 
 def _research_decision_archive_allowed(explicit: bool = False) -> bool:
-    return bool(explicit) or os.getenv("HERMES_ENABLE_RESEARCH_DECISION") == "1"
+    return bool(explicit) or _research_decision_archive_env_enabled()
+
+
+def _research_decision_archive_env_enabled() -> bool:
+    return os.getenv("HERMES_ENABLE_RESEARCH_DECISION") == "1"
 
 
 def _is_archived_research_decision_real_action(mode: str | None, action: str) -> bool:
     return normalize_mode(mode or "") == ENGINE_RESEARCH_DECISION and action.startswith("smoke-research-decision")
+
+
+def _archived_research_decision_override_block_reason(
+    *,
+    query: str,
+    action: str,
+    execution_intent: str | None,
+    explicit_smoke_intent: bool,
+) -> str | None:
+    if _research_decision_production_intent(query=query, action=action, execution_intent=execution_intent):
+        return UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION
+    if not _research_decision_explicit_smoke_intent(
+        query=query,
+        action=action,
+        execution_intent=execution_intent,
+        explicit_smoke_intent=explicit_smoke_intent,
+    ):
+        return RESEARCH_DECISION_SMOKE_INTENT_REQUIRED
+    return None
+
+
+def _research_decision_production_intent(*, query: str, action: str, execution_intent: str | None) -> bool:
+    if action == "full":
+        return True
+    intent = (execution_intent or "").strip().lower().replace("-", "_")
+    if intent in {"production", "production_full", "fresh_two_stage"}:
+        return True
+    text = query or ""
+    patterns = (
+        r"\bproduction\b",
+        r"\bprod(?:uction)?[-_\s]?run\b",
+        r"\bfull[-_\s]?run\b",
+        r"\btask_engine_runner\s+full\b",
+        r"\bfresh\b",
+        r"\bcurrent[-_\s]?run\b",
+        r"\bcurrent[-_\s]?task\b",
+        r"\bno[-_\s]?smoke\b",
+        r"\bdo\s+not\s+smoke\b",
+        r"\bnot\s+a\s+smoke\b",
+        r"\bno[-_\s]?fixture\b",
+        r"\bno[-_\s]?cache(?:d)?\b",
+        r"\bdo\s+not\s+reuse\b",
+        r"\bwithout\s+reusing\b",
+        r"\bADHD\s*[×x]\s*AI\b.*\bproduction\b",
+        r"生产",
+        r"正式",
+        r"当前任务专属",
+        r"当前[ -_]?run",
+        r"本次[ -_]?run",
+        r"不要\s*smoke",
+        r"不要\s*fixture",
+        r"不要\s*cached",
+        r"不要\s*cache",
+        r"不要复用",
+        r"不得复用",
+        r"新鲜",
+        r"专属\s*packet",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _research_decision_explicit_smoke_intent(
+    *,
+    query: str,
+    action: str,
+    execution_intent: str | None,
+    explicit_smoke_intent: bool,
+) -> bool:
+    if explicit_smoke_intent:
+        return True
+    intent = (execution_intent or "").strip().lower().replace("-", "_")
+    if intent in {"integration_smoke", "explicit_smoke", "archived_test", "mechanism_test"}:
+        return True
+    if action.startswith("smoke-research-decision"):
+        return True
+    return bool(re.search(r"\b(smoke|integration|fixture|archived test|mechanism test)\b|烟雾测试|集成测试|归档测试", query or "", re.I))
 
 
 def _archived_research_decision_response(
@@ -1186,15 +1323,17 @@ def _archived_research_decision_response(
     artifact_dir: str | Path | None = None,
     requested_action: str = "full",
     effective_action: str | None = None,
+    blocked_reason: str | None = None,
     emit_evidence_backed_sidecar: bool = False,
     evidence_backed_sidecar_stage: str = "status_only",
 ) -> dict[str, Any]:
-    reason = (
+    reason = blocked_reason or (
         RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE
         if action == "full"
         else "RESEARCH_DECISION_ARCHIVED"
     )
     target_dir = Path(artifact_dir).resolve() if artifact_dir is not None else _resolve_artifact_dir(None, ENGINE_RESEARCH_DECISION, "blocked_full_run")
+    unsafe_override = reason == UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION
     payload = {
         "status": "blocked",
         "BLOCKED_STATUS": PIPELINE_BLOCKED,
@@ -1205,8 +1344,14 @@ def _archived_research_decision_response(
         "mode": ENGINE_RESEARCH_DECISION,
         "action": action,
         "message": (
-            "Combined-mode production validation is disabled. Run RESEARCH full first to produce "
-            "a current-run research_evidence_packet.md, then run DECISION full with research_packet_path."
+            "Archived/smoke Research Decision override is not allowed for production, fresh, current-run, "
+            "or no-smoke requests. Run RESEARCH full first to produce a current-run research_evidence_packet.md, "
+            "then run DECISION full with research_packet_path."
+            if unsafe_override
+            else (
+                "Combined-mode production validation is disabled. Run RESEARCH full first to produce "
+                "a current-run research_evidence_packet.md, then run DECISION full with research_packet_path."
+            )
         ),
         "entrypoint_guard": reason,
         "recommended_next_step": (
@@ -1223,6 +1368,7 @@ def _archived_research_decision_response(
             "allowed_action_prefix": "smoke-research-decision",
             "override_function_arg": "allow_archived_research_decision=True",
             "override_environment": "HERMES_ENABLE_RESEARCH_DECISION=1",
+            "production_or_fresh_prompt_always_blocks_archived_override": True,
             "smoke_output_marks_non_production": True,
         },
     }
@@ -1241,7 +1387,12 @@ def _archived_research_decision_response(
 def _mark_non_production_smoke_result(payload: dict[str, Any], *, action: str) -> None:
     payload.setdefault("non_production_smoke_run", True)
     payload.setdefault("production_run", False)
+    payload.setdefault("production_valid", False)
+    payload.setdefault("evidence_freshness_valid", False)
     payload.setdefault("pipeline_completion_scope", "non_production_smoke_run")
+    if payload.get("pipeline_status") == PIPELINE_COMPLETE:
+        payload["pipeline_status"] = PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE
+        payload.setdefault("structural_pipeline_status", PIPELINE_COMPLETE)
     payload.setdefault(
         "production_freshness_guard",
         {
@@ -1535,6 +1686,8 @@ def _task_engine_handler(args: dict[str, Any], **kw) -> str:
         artifact_dir=args.get("artifact_dir"),
         research_packet_path=args.get("research_packet_path"),
         allow_archived_research_decision=bool(args.get("allow_archived_research_decision", False)),
+        execution_intent=args.get("execution_intent"),
+        explicit_smoke_intent=_coerce_advisory_bool(args.get("explicit_smoke_intent"), default=False),
         emit_topic_refinement_advisory=_coerce_advisory_bool(args.get("emit_topic_refinement_advisory"), default=False),
         topic_refinement_advisory_output_dir=args.get("topic_refinement_advisory_output_dir"),
         topic_refinement_advisory_strict=_coerce_advisory_bool(args.get("topic_refinement_advisory_strict"), default=True),
@@ -1564,6 +1717,9 @@ __all__ = [
     "LEGACY_RESEARCH_DECISION_ALLOWED_TERMS",
     "DIRECT_LEGACY_RESEARCH_DECISION_FULL",
     "RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE",
+    "UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION",
+    "RESEARCH_DECISION_SMOKE_INTENT_REQUIRED",
+    "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE",
     "TERMINOLOGY_LEAKAGE",
     "apply_legacy_research_decision_term_guard",
     "audit_legacy_research_decision_terms",
