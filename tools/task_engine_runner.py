@@ -66,21 +66,33 @@ LEGACY_RESEARCH_DECISION_ALLOWED_TERMS = (
 LEGACY_RESEARCH_DECISION_AUDIT_CONTEXTS = {"legacy_term_audit", "banned_term_check", "test_assertion"}
 DIRECT_LEGACY_RESEARCH_DECISION_FULL = "DIRECT_LEGACY_RESEARCH_DECISION_FULL"
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
+TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
+TASK_ENGINE_RUNNER_MODULE = "tools.task_engine_runner"
+TASK_ENGINE_RUNNER_SOURCE = "tools/task_engine_runner.py"
+
+
+TASK_ENGINE_RUNNER_SIDECAR_STAGES = [
+    "status_only",
+    "source_registry_gate",
+    "fulltext_handoff_gate",
+    "evidence_packet_gate",
+    "final_traceability_gate",
+    "advisory_report_gate",
+]
 
 
 TASK_ENGINE_RUNNER_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "task_engine_runner",
-        "description": (
-            "Strict fail-closed entrypoint for Hermes RESEARCH, DECISION, and "
-            "RESEARCH_DECISION engines. Generates the canonical 72B-first "
-            "contract, validates completed stage artifacts, and renders only "
-            "the final controller report when validation passes."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
+    "name": "task_engine_runner",
+    "description": (
+        "Strict fail-closed entrypoint for Hermes RESEARCH, DECISION, and "
+        "RESEARCH_DECISION engines. Generates the canonical 72B-first "
+        "contract, validates completed stage artifacts, and renders only "
+        "the final controller report when validation passes."
+    ),
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
                 "mode": {
                     "type": "string",
                     "enum": [ENGINE_RESEARCH, ENGINE_DECISION, ENGINE_RESEARCH_DECISION, "AUTO"],
@@ -95,6 +107,8 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "type": "string",
                     "enum": [
                         "contract",
+                        "status",
+                        "mechanism-check",
                         "agy-preflight",
                         "omlx-preflight",
                         "full",
@@ -157,6 +171,10 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "type": "string",
                     "description": "Optional base directory used to resolve relative artifact paths.",
                 },
+                "artifact_dir": {
+                    "type": "string",
+                    "description": "Alias for base_dir; accepted for runtime gate dispatch payloads.",
+                },
                 "research_packet_path": {
                     "type": "string",
                     "description": "Optional research_evidence_packet.md path for two-step RESEARCH -> DECISION runs.",
@@ -166,10 +184,25 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     "description": "Explicitly allow archived RESEARCH_DECISION real execution. Defaults to false.",
                     "default": False,
                 },
+                "emit_evidence_backed_sidecar": {
+                    "type": "boolean",
+                    "description": "Explicit opt-in only; default false and does not change the main runner result.",
+                    "default": False,
+                },
+                "evidence_backed_sidecar_stage": {
+                    "type": "string",
+                    "enum": TASK_ENGINE_RUNNER_SIDECAR_STAGES,
+                    "description": "Optional evidence-backed sidecar stage when sidecar emission is explicitly enabled.",
+                    "default": "status_only",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Compatibility alias: when true and action is omitted/default, run action='dry-run'.",
+                    "default": False,
+                },
             },
             "required": ["query"],
         },
-    },
 }
 
 
@@ -182,9 +215,13 @@ def task_engine_runner(
     base_dir: str | None = None,
     research_packet_path: str | None = None,
     allow_archived_research_decision: bool = False,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
 ) -> str:
     resolved_mode = _resolve_mode(mode, query)
     action = (action or "contract").strip().lower().replace("_", "-")
+    emit_evidence_backed_sidecar = _coerce_task_engine_bool(emit_evidence_backed_sidecar, default=False)
+    evidence_backed_sidecar_stage = (evidence_backed_sidecar_stage or "status_only").strip()
 
     if resolved_mode is None:
         return json.dumps(
@@ -197,10 +234,58 @@ def task_engine_runner(
             indent=2,
         )
 
+    if action == "status":
+        return json.dumps(
+            {
+                "status": "ok",
+                "selected_entrypoint": TASK_ENGINE_RUNNER_ENTRYPOINT,
+                "entrypoint_module": TASK_ENGINE_RUNNER_MODULE,
+                "entrypoint_source": TASK_ENGINE_RUNNER_SOURCE,
+                "mode": resolved_mode,
+                "schema_non_empty": True,
+                "sidecar_default_off": True,
+                "evidence_backed_sidecar_requested": emit_evidence_backed_sidecar,
+                "evidence_backed_sidecar_stage": evidence_backed_sidecar_stage,
+                "main_result_contract_changed_by_sidecar": False,
+                "no_real_executor_called": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    if action == "mechanism-check":
+        target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "mechanism_check")
+        return json.dumps(
+            {
+                "status": "ok",
+                "selected_entrypoint": TASK_ENGINE_RUNNER_ENTRYPOINT,
+                "entrypoint_module": TASK_ENGINE_RUNNER_MODULE,
+                "entrypoint_source": TASK_ENGINE_RUNNER_SOURCE,
+                "mode": resolved_mode,
+                "action": "mechanism-check",
+                "artifact_dir": str(target_dir),
+                "schema_non_empty": True,
+                "dispatch_payload_valid": True,
+                "sidecar_default_off": True,
+                "evidence_backed_sidecar_requested": emit_evidence_backed_sidecar,
+                "evidence_backed_sidecar_stage": evidence_backed_sidecar_stage,
+                "main_result_contract_changed_by_sidecar": False,
+                "no_real_executor_called": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
     if action == "full" and normalize_mode(resolved_mode) == ENGINE_RESEARCH_DECISION:
         if not _research_decision_archive_allowed(allow_archived_research_decision):
+            target_dir = _resolve_artifact_dir(base_dir, resolved_mode, "blocked_full_run")
             return json.dumps(
-                _archived_research_decision_response(action="full"),
+                _archived_research_decision_response(
+                    action="full",
+                    artifact_dir=target_dir,
+                    emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                    evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+                ),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -584,15 +669,40 @@ def _is_archived_research_decision_real_action(mode: str | None, action: str) ->
     return normalize_mode(mode or "") == ENGINE_RESEARCH_DECISION and action.startswith("smoke-research-decision")
 
 
-def _archived_research_decision_response(*, action: str) -> dict[str, Any]:
+def _archived_research_decision_response(
+    *,
+    action: str,
+    artifact_dir: str | Path | None = None,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
+) -> dict[str, Any]:
     reason = DIRECT_LEGACY_RESEARCH_DECISION_FULL if action == "full" else "RESEARCH_DECISION_ARCHIVED"
+    target_dir = (
+        Path(artifact_dir).resolve()
+        if artifact_dir is not None
+        else _resolve_artifact_dir(None, ENGINE_RESEARCH_DECISION, "blocked_full_run")
+    )
     return {
         "status": "blocked",
+        "BLOCKED_STATUS": PIPELINE_BLOCKED,
         "pipeline_status": "PIPELINE_BLOCKED",
         "blocked_stage": "research_decision_archived",
         "blocked_reason": reason,
+        "artifact_dir": str(target_dir),
         "mode": ENGINE_RESEARCH_DECISION,
         "action": action,
+        "selected_entrypoint": TASK_ENGINE_RUNNER_ENTRYPOINT,
+        "entrypoint_module": TASK_ENGINE_RUNNER_MODULE,
+        "entrypoint_source": TASK_ENGINE_RUNNER_SOURCE,
+        "schema_empty_blocker": False,
+        "confirmation_required": False,
+        "second_confirmation_required": False,
+        "sidecar_policy": {
+            "evidence_backed_sidecar_default": False,
+            "evidence_backed_sidecar_requested": bool(emit_evidence_backed_sidecar),
+            "evidence_backed_sidecar_stage": evidence_backed_sidecar_stage,
+            "main_result_contract_changed_by_sidecar": False,
+        },
         "message": (
             "Combined-mode production validation is disabled. Run RESEARCH full first to produce "
             "a current-run research_evidence_packet.md, then run DECISION full with research_packet_path."
@@ -789,15 +899,88 @@ def _is_valid_new_research_packet(path: Path) -> bool:
     return validation.get("stage_count") == 6 and validation.get("valid") is True
 
 
+TASK_ENGINE_RUNNER_ALLOWED_ARGS = {
+    "query",
+    "mode",
+    "action",
+    "run",
+    "base_dir",
+    "artifact_dir",
+    "research_packet_path",
+    "allow_archived_research_decision",
+    "emit_evidence_backed_sidecar",
+    "evidence_backed_sidecar_stage",
+    "dry_run",
+}
+
+
+def _coerce_task_engine_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _task_engine_validation_error(*, unknown_args: list[str] | None = None, message: str = "invalid task_engine_runner arguments") -> str:
+    return json.dumps(
+        {
+            "status": "validation_error",
+            "blocked_stage": "tool_schema_validation",
+            "blocked_reason": "unknown_or_invalid_task_engine_runner_args",
+            "message": message,
+            "unknown_args": unknown_args or [],
+            "allowed_args": sorted(TASK_ENGINE_RUNNER_ALLOWED_ARGS),
+            "selected_entrypoint": TASK_ENGINE_RUNNER_ENTRYPOINT,
+            "schema_empty_blocker": False,
+            "no_real_executor_called": True,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _normalize_task_engine_handler_args(args: dict[str, Any]) -> dict[str, Any] | str:
+    if not isinstance(args, dict):
+        return _task_engine_validation_error(message="task_engine_runner arguments must be an object")
+    unknown = sorted(set(args) - TASK_ENGINE_RUNNER_ALLOWED_ARGS)
+    if unknown:
+        return _task_engine_validation_error(unknown_args=unknown)
+
+    normalized = dict(args)
+    if not normalized.get("base_dir") and normalized.get("artifact_dir"):
+        normalized["base_dir"] = normalized.get("artifact_dir")
+
+    if _coerce_task_engine_bool(normalized.get("dry_run"), default=False):
+        action_supplied = "action" in normalized and str(normalized.get("action") or "").strip()
+        if not action_supplied or str(normalized.get("action")).strip().lower().replace("_", "-") == "contract":
+            normalized["action"] = "dry-run"
+
+    return normalized
+
+
 def _task_engine_handler(args: dict[str, Any], **kw) -> str:
+    normalized = _normalize_task_engine_handler_args(args)
+    if isinstance(normalized, str):
+        return normalized
     return task_engine_runner(
-        query=str(args.get("query", "")),
-        mode=str(args.get("mode", "AUTO")),
-        action=str(args.get("action", "contract")),
-        run=args.get("run"),
-        base_dir=args.get("base_dir"),
-        research_packet_path=args.get("research_packet_path"),
-        allow_archived_research_decision=bool(args.get("allow_archived_research_decision", False)),
+        query=str(normalized.get("query", "")),
+        mode=str(normalized.get("mode", "AUTO")),
+        action=str(normalized.get("action", "contract")),
+        run=normalized.get("run"),
+        base_dir=normalized.get("base_dir"),
+        research_packet_path=normalized.get("research_packet_path"),
+        allow_archived_research_decision=_coerce_task_engine_bool(normalized.get("allow_archived_research_decision"), default=False),
+        emit_evidence_backed_sidecar=_coerce_task_engine_bool(normalized.get("emit_evidence_backed_sidecar"), default=False),
+        evidence_backed_sidecar_stage=str(normalized.get("evidence_backed_sidecar_stage", "status_only")),
     )
 
 
