@@ -113,6 +113,73 @@ def test_adhd_ai_contract_contains_required_five_sections(tmp_path):
     assert validate_required_fields(contract) == []
 
 
+def test_adhd_structural_reversal_brief_query_gets_required_five_sections(tmp_path):
+    paths = _write_stage_a_fixture(tmp_path)
+    contract = generate_decision_context_contract(
+        original_query="AI 信息环境下，ADHD 儿童特征的未来结构性反转与长期发展决策",
+        research_packet_path=paths["packet"],
+    )
+
+    assert contract["user_output_contract"]["required_sections"] == [
+        "未来优势变陷阱 Top5",
+        "未来缺陷变优势 Top5",
+        "最危险的错误培养路径",
+        "最反直觉但值得追踪的假设",
+        "danger_flag",
+    ]
+    assert validate_required_fields(contract) == []
+
+
+def test_adhd_structural_reversal_brief_query_gets_six_ability_dimensions(tmp_path):
+    paths = _write_stage_a_fixture(tmp_path)
+    contract = generate_decision_context_contract(
+        original_query="AI 信息环境下，ADHD 儿童特征的未来结构性反转与长期发展决策",
+        research_packet_path=paths["packet"],
+    )
+
+    labels = {dimension["label"] for dimension in contract["required_dimensions"]}
+    assert {
+        "知识获取能力",
+        "问题选择能力",
+        "验证能力",
+        "收束能力",
+        "延迟反馈耐受",
+        "身体反馈系统",
+    } <= labels
+    assert validate_required_fields(contract) == []
+
+
+def test_generic_alternatives_stakeholders_are_not_required_for_adhd_structural_reversal(tmp_path):
+    paths = _write_stage_a_fixture(tmp_path)
+    contract = generate_decision_context_contract(
+        original_query="AI 信息环境下，ADHD 儿童特征的未来结构性反转与长期发展决策",
+        research_packet_path=paths["packet"],
+    )
+
+    sections = set(contract["user_output_contract"]["required_sections"])
+    assert not (sections & {"Alternatives", "Evaluation Criteria", "Stakeholders"})
+
+
+def test_generic_decision_without_output_contract_uses_generic_fallback_schema(tmp_path):
+    missing_packet = tmp_path / "missing" / "research_evidence_packet.md"
+    contract = generate_decision_context_contract(
+        original_query="This is a decision task: should we choose option A or option B?",
+        research_packet_path=missing_packet,
+    )
+
+    assert contract["user_output_contract"]["required_sections"] == [
+        "Alternatives",
+        "Evaluation Criteria",
+        "Stakeholders",
+        "Recommendation",
+        "Risks and Uncertainties",
+    ]
+    dimension_labels = {dimension["label"] for dimension in contract["required_dimensions"]}
+    assert {"Alternatives", "Evaluation Criteria", "Stakeholders"} <= dimension_labels
+    assert "missing_required_sections" not in validate_required_fields(contract)
+    assert "missing_required_dimensions" not in validate_required_fields(contract)
+
+
 def test_top5_item_fields_enter_contract(tmp_path):
     contract = _generate(tmp_path)
 

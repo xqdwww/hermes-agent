@@ -176,6 +176,14 @@ ADHD_AI_REQUIRED_SECTIONS = [
     "danger_flag",
 ]
 
+GENERIC_DECISION_REQUIRED_SECTIONS = [
+    "Alternatives",
+    "Evaluation Criteria",
+    "Stakeholders",
+    "Recommendation",
+    "Risks and Uncertainties",
+]
+
 ADHD_AI_KEY_VARIABLES = [
     {
         "id": "adhd_attention_variability",
@@ -259,6 +267,24 @@ ADHD_AI_REQUIRED_DIMENSIONS = [
         "id": "body_feedback_system",
         "label": "身体反馈系统",
         "aliases": ["身体反馈系统", "身体反馈"],
+    },
+]
+
+GENERIC_DECISION_REQUIRED_DIMENSIONS = [
+    {
+        "id": "decision_alternatives",
+        "label": "Alternatives",
+        "aliases": ["Alternatives", "选项", "方案"],
+    },
+    {
+        "id": "evaluation_criteria",
+        "label": "Evaluation Criteria",
+        "aliases": ["Evaluation Criteria", "评估标准", "判断标准"],
+    },
+    {
+        "id": "stakeholder_fit",
+        "label": "Stakeholders",
+        "aliases": ["Stakeholders", "相关方", "利益相关方"],
     },
 ]
 
@@ -456,17 +482,49 @@ def _extract_requirement_terms(text: str) -> list[str]:
     return cleaned
 
 
+def _is_adhd_ai_structural_reversal_task(original_query: str, combined_text: str) -> bool:
+    text = f"{original_query}\n{combined_text}"
+    return (
+        _contains_any(text, ["ADHD", "注意力", "执行功能"])
+        and _contains_any(text, ["AI", "人工智能"])
+        and _contains_any(
+            text,
+            [
+                "结构性反转",
+                "未来结构性反转",
+                "优势变陷阱",
+                "缺陷变优势",
+                "未来会变成陷阱",
+                "未来会变成优势",
+                "变成陷阱",
+                "变成优势",
+            ],
+        )
+    )
+
+
+def _is_generic_decision_task(original_query: str) -> bool:
+    return _contains_any(
+        original_query,
+        ["decision", "decide", "should", "决策", "是否", "要不要", "选择", "推荐"],
+    )
+
+
 def _extract_required_sections(original_query: str, combined_text: str) -> list[str]:
     text = original_query + "\n" + combined_text
     if all(section in text for section in ADHD_AI_REQUIRED_SECTIONS[:2]) or _contains_any(
         text, ["优势变陷阱", "缺陷变优势", "danger_flag"]
     ):
         return list(ADHD_AI_REQUIRED_SECTIONS)
+    if _is_adhd_ai_structural_reversal_task(original_query, combined_text):
+        return list(ADHD_AI_REQUIRED_SECTIONS)
     sections: list[str] = []
     for line in original_query.splitlines():
         stripped = line.strip(" -*\t")
         if stripped and _contains_any(stripped, ["Top", "必须包含", "danger_flag"]):
             sections.append(stripped)
+    if not sections and _is_generic_decision_task(original_query):
+        return list(GENERIC_DECISION_REQUIRED_SECTIONS)
     return sections
 
 
@@ -513,6 +571,26 @@ def _extract_required_dimensions(original_query: str, combined_text: str) -> lis
                     {"coverage_requirement": "applied_per_core_item"},
                 )
             )
+    if not records and _is_adhd_ai_structural_reversal_task(original_query, combined_text):
+        records = [
+            _record_with_source(
+                item,
+                "structural_reversal_task_type",
+                "per_core_item",
+                {"coverage_requirement": "applied_per_core_item"},
+            )
+            for item in ADHD_AI_REQUIRED_DIMENSIONS
+        ]
+    if not records and _is_generic_decision_task(original_query):
+        records = [
+            _record_with_source(
+                item,
+                "generic_decision_schema_fallback",
+                "global",
+                {"coverage_requirement": "decision_context"},
+            )
+            for item in GENERIC_DECISION_REQUIRED_DIMENSIONS
+        ]
     return _dedupe_records(records)
 
 
