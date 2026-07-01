@@ -27,11 +27,11 @@ RD_REPO = Path(
 RD_RUNNER_RELATIVE_PATH = Path("tools/task_engine_runner.py")
 EXPECTED_RD_HEAD = os.getenv(
     "HERMES_RESEARCH_DECISION_EXPECTED_HEAD",
-    "e4f5eac62e542dd26ff7b6c626d24d51ed564a77",
+    "66cdc1653e8f24c3f07cfb67d48a23add0dfacbb",
 )
 EXPECTED_RD_RUNNER_SHA256 = os.getenv(
     "HERMES_RESEARCH_DECISION_EXPECTED_RUNNER_SHA256",
-    "7a3ab325667d4d336db3ddcd63d40bf21f36e88c892372fe007c26c456c49197",
+    "8782ad04c3abedca21e631db4263d7fb0787f8f7ab4c14da5e7d4a7af5430217",
 )
 WRAPPER_STRATEGY = "bounded_delegation_wrapper_to_rd_repo_runner"
 
