@@ -336,6 +336,16 @@ def test_convergence_with_adhd_ai_contract_content_passes(tmp_path):
     assert validate_convergence_contract_alignment(_aligned_convergence_text(contract), contract) == []
 
 
+def test_convergence_missing_task_topic_blocks(tmp_path):
+    contract = _generate(tmp_path)
+    text = _aligned_convergence_text(contract).replace(
+        f"task_topic: {contract['task_topic']['title']}",
+        "task_topic: generic ADHD and AI essay",
+    )
+
+    assert "missing_task_topic" in validate_convergence_contract_alignment(text, contract)
+
+
 def test_convergence_with_execution_readiness_meta_content_blocks(tmp_path):
     contract = _generate(tmp_path)
     text = (

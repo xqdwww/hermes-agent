@@ -3085,19 +3085,20 @@ def run_decision_final_smoke(
             "alternative_generator",
             "insight_harvester",
         ], base_dir=base_dir, consumer_stage=stage.stage_name)
+        convergence_prompt = _decision_stage_prompt(
+            stage,
+            stages,
+            query=query,
+            base_dir=base_dir,
+            research_packet_path=research_packet_path,
+            decision_context_contract=decision_context["contract"] if decision_context else None,
+        )
         content = run_stage(
             stage,
             lambda: executor.run_omlx_model(
                 stage,
                 stage.model,
-                _decision_stage_prompt(
-                    stage,
-                    stages,
-                    query=query,
-                    base_dir=base_dir,
-                    research_packet_path=research_packet_path,
-                    decision_context_contract=decision_context["contract"] if decision_context else None,
-                ),
+                convergence_prompt,
             ),
         )
         leaked = _convergence_report_forbidden_tokens(content)
@@ -3109,10 +3110,33 @@ def run_decision_final_smoke(
         if decision_context:
             contract_errors = validate_convergence_contract_alignment(content, decision_context["contract"])
             if contract_errors:
-                raise RuntimeError(
-                    "CONVERGENCE_TOPIC_DRIFT_FROM_DECISION_CONTEXT_CONTRACT:"
-                    + ",".join(contract_errors)
+                _write_invalid_stage_debug(
+                    stage,
+                    content,
+                    base_dir=base_dir,
+                    filename=f"{stage.stage_name}.contract_retry_source.invalid.md",
                 )
+                retry_prompt = _decision_convergence_contract_retry_prompt(
+                    convergence_prompt,
+                    contract_errors=contract_errors,
+                    contract=decision_context["contract"],
+                )
+                content = run_stage(
+                    stage,
+                    lambda: executor.run_omlx_model(stage, stage.model, retry_prompt),
+                )
+                leaked = _convergence_report_forbidden_tokens(content)
+                if leaked:
+                    raise RuntimeError(f"convergence_report: contract_retry_forbidden final/tool-chain tokens: {', '.join(leaked)}")
+                profile_errors = _quality_profile_errors(content, _task_engine_profiles_from_query(query), stage_name="convergence_report")
+                if profile_errors:
+                    raise RuntimeError(f"convergence_report: contract_retry_output_quality_profile_error:{','.join(profile_errors)}")
+                contract_errors = validate_convergence_contract_alignment(content, decision_context["contract"])
+                if contract_errors:
+                    raise RuntimeError(
+                        "CONVERGENCE_TOPIC_DRIFT_FROM_DECISION_CONTEXT_CONTRACT:"
+                        + ",".join(contract_errors)
+                    )
         _append_real_stage(
             stages,
             stage,
@@ -3426,6 +3450,53 @@ def _decision_context_contract_prompt_block(contract: dict[str, Any] | None) -> 
         "- Do not switch the object of analysis to pipeline execution, production readiness, schema rollout, pilot rollout, task-engine implementation, or tool availability.",
         "- If the contract cannot be satisfied, say so inside this stage output; do not fabricate missing variables or evidence tiers.",
     ]
+
+
+def _contract_evidence_tier_mapping_line(contract: dict[str, Any]) -> str:
+    label_map = {
+        "evidence_supported": "证据支持",
+        "plausible_inference": "合理推断",
+        "forward_looking_hypothesis": "前瞻假设",
+        "unsupported_or_speculative": "不支持或推测",
+    }
+    allowed = contract.get("evidence_tiers", {}).get("allowed") or []
+    parts = [f"{tier} / {label_map.get(str(tier), str(tier))}" for tier in allowed]
+    return "evidence_tiers: " + "; ".join(parts)
+
+
+def _decision_context_contract_convergence_output_schema_lines(contract: dict[str, Any] | None) -> list[str]:
+    if not contract:
+        return []
+    title = str(contract.get("task_topic", {}).get("title") or "")
+    return [
+        "",
+        "## convergence contract output schema",
+        "The active convergence_report output must begin with these machine-readable contract lines before prose:",
+        f"decision_context_contract_id: {contract.get('contract_id')}",
+        f"task_topic: {title}",
+        _contract_evidence_tier_mapping_line(contract),
+        "Then write the convergence body around the user decision problem, preserving key variables, moderators, required dimensions, and evidence tier boundaries.",
+        "Do not omit task_topic or evidence_tiers; omission blocks this stage.",
+    ]
+
+
+def _decision_convergence_contract_retry_prompt(
+    prompt: str,
+    *,
+    contract_errors: list[str],
+    contract: dict[str, Any],
+) -> str:
+    return "\n".join(
+        [
+            prompt,
+            "",
+            "## Contract retry instructions",
+            "The previous convergence_report attempt failed the decision_context_contract gate.",
+            "Regenerate the convergence_report from the same current-run inputs; do not reuse or summarize the failed text.",
+            "Failed checks: " + ", ".join(contract_errors),
+            *_decision_context_contract_convergence_output_schema_lines(contract),
+        ]
+    )
 
 
 def resolve_agy_model_alias(canonical_model: str) -> str:
@@ -8611,6 +8682,7 @@ def _decision_stage_prompt(
         lines.extend(["", "## optional_research_evidence_packet_context", context])
     if stage.stage_name == "convergence_report":
         lines.extend(_decision_context_contract_prompt_block(decision_context_contract))
+        lines.extend(_decision_context_contract_convergence_output_schema_lines(decision_context_contract))
     return "\n".join(lines)
 
 
