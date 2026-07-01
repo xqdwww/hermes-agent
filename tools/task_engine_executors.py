@@ -1072,7 +1072,7 @@ class LocalTaskEngineExecutor:
         if stage.stage_name != "final_controller_report" or stage.model != FINAL_CONTROLLER:
             raise RuntimeError(f"{stage.stage_name}: final controller binding mismatch")
         self.last_executor_models[stage.stage_name] = os.getenv("HERMES_FINAL_CONTROLLER_MODEL", "Hermes Controller").strip() or "Hermes Controller"
-        content = _final_controller_report_from_packet(packet)
+        content = _sanitize_final_controller_user_facing_output(_final_controller_report_from_packet(packet))
         try:
             _assert_final_controller_packet_quality(packet, content)
         except RuntimeError as exc:
@@ -9821,27 +9821,29 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
             or _decision_query_requests_future_inversion_structure(query)
             or _decision_query_forbids_advice(query)
         ):
-            return _decision_future_inversion_report(
+            content = _decision_future_inversion_report(
                 query,
                 include_evidence_boundary=include_evidence_boundary,
                 convergence_digest=str(packet.get("convergence_fixed_section_digest") or ""),
                 calibration_constraints=str(packet.get("external_calibration_hard_constraints") or ""),
                 research_evidence_context=str(packet.get("research_evidence_packet_context") or ""),
             )
-        return _generic_decision_final_report(query, packet=packet, include_evidence_boundary=include_evidence_boundary)
+        else:
+            content = _generic_decision_final_report(query, packet=packet, include_evidence_boundary=include_evidence_boundary)
+        return _sanitize_final_controller_user_facing_output(content)
     profiles = _normalize_profiles(packet.get("output_quality_profile"))
     if PROFILE_BUSINESS_STRATEGY_PLAN in profiles:
-        return _research_decision_business_strategy_final_report(query, packet)
+        return _sanitize_final_controller_user_facing_output(_research_decision_business_strategy_final_report(query, packet))
     if PROFILE_FORESIGHT_MECHANISM in profiles:
-        return _research_decision_foresight_final_report(query, packet)
+        return _sanitize_final_controller_user_facing_output(_research_decision_foresight_final_report(query, packet))
     absorption_domain = _research_decision_synthesis_absorption_domain(query)
     if absorption_domain == "technical_architecture":
-        return _research_decision_architecture_final_report(query, packet)
+        return _sanitize_final_controller_user_facing_output(_research_decision_architecture_final_report(query, packet))
     if absorption_domain == "family_travel":
-        return _research_decision_travel_final_report(query, packet)
+        return _sanitize_final_controller_user_facing_output(_research_decision_travel_final_report(query, packet))
     if absorption_domain == "education_ai_tutoring":
-        return _research_decision_education_final_report(query, packet)
-    return _research_decision_generic_final_report(query, packet)
+        return _sanitize_final_controller_user_facing_output(_research_decision_education_final_report(query, packet))
+    return _sanitize_final_controller_user_facing_output(_research_decision_generic_final_report(query, packet))
 
 
 def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]) -> str:
@@ -10589,6 +10591,58 @@ def _sanitize_user_facing_excerpt(text: str, *, limit: int = 900) -> str:
     }
     for old, new in replacements.items():
         value = value.replace(old, new)
+    value = _sanitize_final_controller_user_facing_output(value)
+    return value
+
+
+def _sanitize_final_controller_user_facing_output(text: str) -> str:
+    value = str(text or "")
+    replacements = (
+        ("医学诊断", "被排除的判断类型"),
+        ("治疗建议", "被排除的建议类型"),
+        ("家长建议", "被排除的建议类型"),
+        ("培养计划", "被排除的计划类型"),
+        ("research_evidence_packet", "证据材料"),
+        ("research packet", "证据材料"),
+        ("evidence packet", "证据材料"),
+        ("convergence_report", "收敛判断"),
+        ("convergence report", "收敛判断"),
+        ("external_calibration", "边界修正"),
+        ("external calibration", "边界修正"),
+        ("validation gate", "质量检查"),
+        ("final_controller_report", "最终答案"),
+        ("final controller", "最终答案"),
+        ("final_controller", "最终答案"),
+        ("StageRecord", "阶段记录"),
+        ("decision_mode=true", ""),
+        ("pipeline", "流程"),
+        ("artifact", "材料"),
+        ("controller", "答案整合"),
+        ("Executor", "执行环节"),
+        ("executor", "执行环节"),
+        ("runner", "执行入口"),
+        ("Stage", "阶段"),
+        ("stage", "阶段"),
+        ("研究包吸收", "证据吸收"),
+        ("校准执行", "边界修正"),
+        ("本阶段输出", "本轮输出"),
+        ("上游报告", "前置判断"),
+        ("下游阶段", "后续环节"),
+        ("校准阶段", "边界修正环节"),
+        ("校准要求", "边界要求"),
+        ("根据 convergence_report", "根据收敛判断"),
+        ("研究包显示", "证据材料显示"),
+        ("calibration_verdict", "边界结论"),
+        ("premise_auditor", "前提风险检查"),
+        ("evidence_judge", "证据强度检查"),
+        ("insight_harvester", "洞见整理"),
+        ("alternative_generator", "替代方案"),
+        ("evidence_strength:", "证据强度："),
+        ("controversy:", "争议："),
+        ("evidence_gap:", "证据缺口："),
+    )
+    for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        value = re.sub(re.escape(old), new, value, flags=re.IGNORECASE)
     return value
 
 
@@ -10600,6 +10654,10 @@ def _generic_user_facing_future_report(
     calibration_constraints: str = "",
     research_evidence_context: str = "",
 ) -> str:
+    if not _final_auxiliary_text_matches_query_topic(query, convergence_digest):
+        convergence_digest = ""
+    if not _final_auxiliary_text_matches_query_topic(query, calibration_constraints):
+        calibration_constraints = ""
     convergence_note = _sanitize_user_facing_excerpt(convergence_digest, limit=1200)
     calibration_source = _external_calibration_final_constraints(calibration_constraints) or calibration_constraints
     calibration_note = _sanitize_user_facing_excerpt(calibration_source, limit=900)
@@ -10702,23 +10760,77 @@ def _future_inversion_requested_sections() -> list[str]:
 
 
 def _case_anchor_summary_section(query: str) -> list[str]:
-    anchors = _case_anchor_groups_from_query(query)
+    anchors = [
+        (name, terms)
+        for name, terms in _case_anchor_groups_from_query(query)
+        if not name.startswith("negative_")
+    ]
     if len(anchors) < 8:
         return []
-    anchor_terms = [terms[0] for _name, terms in anchors if terms]
+    anchor_terms = [terms[0] for _name, terms in anchors if terms and not _is_negative_constraint_term(terms[0])]
     lines = ["## 用户画像与约束如何进入判断"]
     for start in range(0, min(len(anchor_terms), 16), 4):
         chunk = anchor_terms[start: start + 4]
+        if not chunk:
+            continue
         lines.append(
             "- 关键约束：" + "、".join(chunk) + "。判断时必须说明这些约束如何改变优先级、风险边界、阶段安排或反证信号，不能只在开头罗列。"
         )
-    negative_constraints = [terms[0] for name, terms in anchors if name.startswith("negative_") and terms]
-    if negative_constraints:
-        lines.append(
-            "- 用户明确排除的边界：" + "；".join(negative_constraints[:3]) + "。最终答案应保留这些边界，不把被排除内容改写成行动建议。"
-        )
     lines.append("")
     return lines
+
+
+def _final_auxiliary_text_matches_query_topic(query: str, text: str) -> bool:
+    value = text or ""
+    if not value.strip():
+        return True
+    anchors = [
+        term
+        for name, terms in _case_anchor_groups_from_query(query)
+        if not name.startswith(("negative_", "question_term"))
+        for term in terms
+        if term and not _is_negative_constraint_term(term)
+    ]
+    anchors.extend(_domain_focus_terms_from_query(query))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in anchors:
+        cleaned = " ".join(str(term).split()).strip(" ：:，,。；;、/()（）")
+        key = re.sub(r"\s+", "", cleaned).lower()
+        if not key or key in seen or len(key) < 2:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    if len(deduped) < 4:
+        return True
+    lowered = value.lower()
+    hits = 0
+    for term in deduped[:16]:
+        if term in value or term.lower() in lowered:
+            hits += 1
+    structured_digest = any(
+        marker in lowered
+        for marker in ("key_drivers", "mechanism_chain", "scenario_branches", "counter_signals", "certainty_levels")
+    )
+    if structured_digest:
+        return hits >= 1
+    structured_calibration = any(
+        marker in lowered
+        for marker in ("elevate the risk", "lock in the sequence", "restore counter-intuitive strategy", "strict epistemic tagging")
+    )
+    if structured_calibration:
+        return hits >= 1
+    return hits >= 2
+
+
+def _is_negative_constraint_term(term: str) -> bool:
+    value = str(term or "")
+    return any(marker in value for marker in ("不要", "不得", "不能", "避免", "不输出")) or value in {
+        "医学诊断",
+        "治疗建议",
+        "家长建议",
+        "培养计划",
+    }
 
 
 def _calibration_adjustment_lines(calibration_constraints: str) -> list[str]:
@@ -10868,7 +10980,7 @@ def _obligation_required_domain_units(query: str, body: str) -> list[str]:
     seen: set[str] = set()
     for raw in terms:
         term = " ".join((raw or "").strip(" ：:，,。；;、/()（）").split())
-        if len(term) < 2 or term in stop:
+        if len(term) < 2 or term in stop or _is_negative_constraint_term(term):
             continue
         if len(term) > 42:
             # Keep long user phrases only when they carry a compact concrete object.
@@ -12517,7 +12629,9 @@ def _generic_decision_final_report(
     packet: dict[str, Any] | None = None,
     include_evidence_boundary: bool = False,
 ) -> str:
-    prompt_anchor = query[:600].strip() or "本轮输入未提供可显示的问题文本。"
+    prompt_anchor = _sanitize_final_controller_user_facing_output(_safe_final_excerpt(query, limit=600)).strip()
+    if not prompt_anchor or _internal_user_facing_language_failures(prompt_anchor):
+        prompt_anchor = "本轮输入是基于已确认材料完成最终决策判断；以下内容只呈现用户可读结论。"
     packet = packet if isinstance(packet, dict) else {}
     enumerated = _enumerated_user_questions(query)
     lines = [
@@ -12533,6 +12647,16 @@ def _generic_decision_final_report(
         "结论仅使用当前有效材料和已校准判断；未执行前置研究链路时，不把本轮输出包装成研究综述。证据强度、争议和缺口需要显式保留。",
         "",
     ]
+    if _query_requests_evidence_tiers(query):
+        lines.extend(
+            [
+                "## 证据分层",
+                "1. [证据支持] 当前只把已确认事实和一致机制作为高强度依据。触发条件：判断直接来自已给材料或稳定机制。中间机制：证据底座限定结论边界。失效条件 / 反证信号：若关键事实、适用场景或执行约束变化，结论必须下调。决策含义：优先采用边界清楚、可观察验证的判断。",
+                "2. [合理推断] 可以把已确认材料连接到用户场景，但必须写清楚中间机制和适用边界。触发条件：证据不能直接覆盖全部场景，但机制链足够明确。中间机制：输入变量改变后，经由可解释路径影响结果。失效条件 / 反证信号：如果中间机制没有出现，推断不成立。决策含义：把推断作为观察方向，而不是一次性定论。",
+                "3. [前瞻假设] 长期变化只能作为需要跟踪的条件性假设。触发条件：外部环境持续降低获取、生成或表达成本。中间机制：低摩擦环境重新分配注意力、验证、完成和现实反馈的价值。失效条件 / 反证信号：如果真实瓶颈仍在基础训练、制度授权或现实交付，假设必须下调。决策含义：用观察指标滚动修正。",
+                "",
+            ]
+        )
     if enumerated:
         lines.append("## 逐项回答")
         for index, body in enumerated:

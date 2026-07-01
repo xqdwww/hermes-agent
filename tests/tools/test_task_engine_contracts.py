@@ -6598,6 +6598,124 @@ def test_decision_final_packet_preserves_current_run_metadata_for_stale_gate(tmp
     executors._assert_final_controller_packet_quality(packet, text)
 
 
+def test_decision_final_sanitizes_operational_internal_language(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    query = (
+        "用户批准 Stage B DECISION production full-run。使用 research packet 进行决策，"
+        "不要把 pipeline artifact convergence report external calibration evidence packet "
+        "runner controller validation gate 写进用户答案。"
+    )
+    packet = executors._decision_final_controller_packet(
+        _decision_final_prior_stage_records(tmp_path),
+        query=query,
+        base_dir=tmp_path,
+    )
+    packet["output_quality_profile"] = []
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    forbidden = (
+        "research packet",
+        "Stage",
+        "pipeline",
+        "artifact",
+        "convergence report",
+        "external calibration",
+        "evidence packet",
+        "runner",
+        "controller",
+        "validation gate",
+    )
+    lowered = text.lower()
+    for term in forbidden:
+        assert term.lower() not in lowered
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_final_controller_regeneration_does_not_revalidate_stale_blocked_final(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    stale_dir = tmp_path / "final_controller_report"
+    stale_dir.mkdir(parents=True)
+    stale_invalid = stale_dir / "final_decision_report.invalid.md"
+    stale_text = "# 决策任务最终报告\n\nStage B 使用 research packet，仍然是旧 blocked 输出。"
+    stale_invalid.write_text(stale_text, encoding="utf-8")
+    packet = executors._decision_final_controller_packet(
+        _decision_final_prior_stage_records(tmp_path),
+        query="用户批准 Stage B DECISION production full-run。使用 research packet 进行决策。",
+        base_dir=tmp_path,
+    )
+    final_stage = CANONICAL_STAGES[ENGINE_DECISION][-1]
+
+    executor = LocalTaskEngineExecutor()
+    content = executor.run_final_controller_report(final_stage, packet)
+    final_path, _ = executor.write_artifact(final_stage, content, base_dir=tmp_path)
+
+    assert stale_invalid.read_text(encoding="utf-8") == stale_text
+    assert final_path == stale_dir / "final_decision_report.md"
+    assert final_path.read_text(encoding="utf-8") == content
+    assert content != stale_text
+    assert "research packet" not in content.lower()
+    assert "stage" not in content.lower()
+
+
+def test_decision_final_foresight_does_not_echo_negative_constraint_terms(tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    query = (
+        "AI 信息环境下，ADHD 儿童特征的未来结构性反转与长期发展决策。\n"
+        "背景：男孩，7岁半，IQ 124，明显 ADHD 倾向，注意力波动、兴趣驱动、内在走神明显，长期柔术训练。\n"
+        "未来10年 AI 持续降低知识获取成本。\n"
+        "1. 哪些今天被认为是 ADHD 的优势，未来会变成陷阱？\n"
+        "2. 哪些今天被认为是 ADHD 的缺陷，未来会变成优势？\n"
+        "禁止内容：不输出医学诊断，不输出治疗建议，不输出家长建议，不输出培养计划。"
+    )
+    packet = executors._decision_final_controller_packet(
+        _decision_final_prior_stage_records(tmp_path),
+        query=query,
+        base_dir=tmp_path,
+    )
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 未来优势变陷阱 Top5" in text
+    assert "## 未来缺陷变优势 Top5" in text
+    for term in ("医学诊断", "治疗建议", "家长建议", "培养计划"):
+        assert term not in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
+def test_decision_final_foresight_ignores_cross_topic_calibration_constraints():
+    import tools.task_engine_executors as executors
+
+    query = (
+        "AI 信息环境下，ADHD 儿童特征的未来结构性反转与长期发展决策。"
+        "男孩，7岁半，IQ 124，明显 ADHD 倾向，注意力波动、兴趣驱动、内在走神明显，长期柔术训练。"
+        "未来10年 AI 持续降低知识获取、解释、反馈、规划和个性化学习成本。"
+        "请区分知识获取、问题选择、验证、收束、延迟反馈耐受、身体反馈系统。"
+    )
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": query,
+        "output_quality_profile": [executors.PROFILE_FORESIGHT_MECHANISM],
+        "external_calibration_hard_constraints": (
+            "The final controller should approve Option B: Validation-First Pilot. "
+            "Define downstream schema and validation gate for research packet parsing."
+        ),
+    }
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "Validation-First" not in text
+    assert "Pilot" not in text
+    assert "downstream schema" not in text
+    assert "validation gate" not in text.lower()
+    assert "ADHD" in text
+    assert "IQ 124" in text
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
 def test_decision_final_legal_evidence_boundary_uses_current_domain_not_adhd(tmp_path: Path):
     import tools.task_engine_executors as executors
 
