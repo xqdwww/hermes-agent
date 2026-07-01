@@ -1022,10 +1022,17 @@ class LocalTaskEngineExecutor:
             ready = "conditional"
         else:
             ready = "true"
+        provenance = packet.get("provenance") if isinstance(packet.get("provenance"), dict) else {}
+        current_run_id = str(provenance.get("current_run_id") or "")
+        current_query_hash = str(provenance.get("current_query_hash") or provenance.get("query_hash") or "")
+        current_artifact_dir = str(provenance.get("current_artifact_dir") or "")
         lines = [
             "research_evidence_packet",
             f"verdict: {verdict}",
             f"accepted: {accepted}",
+            f"current_run_id: {current_run_id}",
+            f"current_query_hash: {current_query_hash}",
+            f"current_artifact_dir: {current_artifact_dir}",
             "checked_stages: [" + ", ".join(checked) + "]",
             "research_packet_profile: [" + ", ".join(profiles) + "]",
             "profile_acceptance_requirements: [" + "; ".join(profile_requirements) + "]",
@@ -1051,6 +1058,7 @@ class LocalTaskEngineExecutor:
                 "evidence_gaps": evidence_gaps,
                 "handoff_caveats": handoff_caveats,
                 "claim_contract_validation": claim_contract_validation,
+                "provenance": provenance,
             }
         )
         lines.extend(_compact_research_evidence_sections(packet_for_sections, accepted=not rejected))
@@ -6178,6 +6186,62 @@ def _assert_current_run_path(path_value: Any, base: Path, stage_name: str, *, co
         raise RuntimeError(f"{consumer_stage}: {stage_name} artifact missing: {path}")
 
 
+def _l5_current_run_provenance(base_dir: str | Path, *, query: str = "") -> dict[str, str]:
+    base = Path(base_dir).resolve()
+    query_hash = _l2_5_query_hash_from_current_run(base)
+    if not query_hash and str(query or "").strip():
+        query_hash = "sha256:" + hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
+    return {
+        "current_run_id": base.name,
+        "current_query_hash": query_hash,
+        "current_artifact_dir": str(base),
+    }
+
+
+def _l2_5_query_hash_from_current_run(base_dir: str | Path) -> str:
+    stage_dir = Path(base_dir).resolve() / "L2_5_codex_evidence_organizer"
+    for request_path in sorted(stage_dir.glob("evidence_runner_*.request.json")):
+        try:
+            payload = json.loads(request_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            for container in (payload, payload.get("provenance")):
+                if not isinstance(container, dict):
+                    continue
+                value = str(container.get("current_query_hash") or container.get("query_hash") or "").strip()
+                if value:
+                    return value
+    for filename in ("claims.md", "gaps.md"):
+        path = stage_dir / filename
+        try:
+            value = _markdown_scalar_value(path.read_text(encoding="utf-8", errors="replace"), "current_query_hash")
+            value = value or _markdown_scalar_value(path.read_text(encoding="utf-8", errors="replace"), "query_hash")
+        except OSError:
+            value = ""
+        if value:
+            return value
+    for filename in ("sources.csv", "evidence.csv"):
+        try:
+            rows = _read_csv_dicts(stage_dir / filename)
+        except OSError:
+            rows = []
+        for row in rows:
+            value = str(row.get("current_query_hash") or row.get("query_hash") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _markdown_scalar_value(text: str, field: str) -> str:
+    prefix = f"{field}:"
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith(prefix.lower()):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 def _research_acceptance_packet_from_artifacts(stages: list[dict[str, Any]], *, base_dir: str | Path, query: str = "") -> dict[str, Any]:
     base = Path(base_dir).resolve()
     missing: list[str] = []
@@ -6235,8 +6299,10 @@ def _research_acceptance_packet_from_artifacts(stages: list[dict[str, Any]], *, 
             "\n".join(str(value or "") for value in artifact_summaries.values())
         )
     missing = sorted(set(missing))
+    provenance = _l5_current_run_provenance(base, query=query)
     return {
         "query": query,
+        "provenance": provenance,
         "research_packet_profile": profiles,
         "profile_acceptance_requirements": _research_profile_acceptance_requirements(profiles),
         "checked_stages": [stage.get("stage_name") for stage in stages],

@@ -1362,6 +1362,13 @@ def _research_full_real_dry_intercept_response(
         "l2_5_handler_name": "run_research_l2_5_evidence_organizer_real",
         "l2_5_handler_source": "tools.task_engine_executors.run_research_l2_5_evidence_organizer_real",
         "production_validation_enabled": True,
+        "packet_provenance_required": True,
+        "planned_l5_provenance_fields": [
+            "current_run_id",
+            "current_query_hash",
+            "current_artifact_dir",
+        ],
+        "planned_l5_packet_generation": "research_evidence_packet.md",
         "planned_l2_5_status": "real",
         "planned_l2_5_generator": "real_l2_5_evidence_organizer",
         "forbidden_handler_checks": {

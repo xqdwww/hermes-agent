@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import http.client
 import os
@@ -69,10 +70,12 @@ from tools.task_engine_executors import (
     run_research_decision_supplementary_search_smoke,
     run_research_l2_5_codex_handoff_smoke,
     run_research_l1_l3_smoke,
+    run_research_l1_l4_real,
     run_research_l1_l4_smoke,
     run_research_l1_l5_smoke,
     run_research_l3_synthesis_smoke,
     run_research_l4_gemini_audit_smoke,
+    run_research_l5_acceptance_real,
     run_research_l5_acceptance_smoke,
     run_research_l1_l2_smoke,
 )
@@ -3795,6 +3798,61 @@ def test_l5_packet_preserves_l4_critical_l2_5_extraction_missing(tmp_path: Path)
     assert "missing_or_invalid_artifacts: []" not in rendered
     assert "L2_5_codex_evidence_organizer/sources.csv" in rendered
     assert "evidence_packet_ready_for_decision: false" in rendered
+
+
+def test_l5_real_acceptance_packet_includes_current_run_provenance(tmp_path: Path):
+    query = "current evidence mechanism practice intervention counterevidence decision constraints"
+    base_dir = tmp_path / "stage_a_run"
+    expected_query_hash = "sha256:" + hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+    class FakeExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model):
+            if stage.stage_name == "L1_gemini_search":
+                self.last_executor_models[stage.stage_name] = GEMINI_HIGH
+                return _rich_l1_source_candidates()
+            assert stage.stage_name == "L4_gemini_audit"
+            self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
+            return (
+                "Status: Supported. Evidence Support, Reasonable Inference, and Foresight Hypothesis "
+                "are separated; mechanism_chain, uncertainty_boundary, and counterexample_or_failure "
+                "conditions are explicit. Full-text verification gap remains bounded."
+            )
+
+        def run_ddgs(self, stage, queries):
+            return _rich_ddgs_hits(queries[0])
+
+        def run_omlx_model(self, stage, model, prompt):
+            assert stage.stage_name == "L3_r1_synthesis"
+            self.last_executor_models[stage.stage_name] = R1_ACTUAL_MODEL_DEFAULT
+            return (
+                "### Evidence Support\nCurrent evidence supports bounded mechanism analysis.\n"
+                "### Reasonable Inference\nThe mechanism_chain connects input variables to mediating mechanisms and output variables.\n"
+                "### Foresight Hypothesis\nFuture claims remain conditional with uncertainty_boundary and counterexample_or_failure conditions."
+            )
+
+    executor = FakeExecutor()
+    l1_l4 = run_research_l1_l4_real(query, base_dir=base_dir, executor=executor)
+    assert l1_l4["status"] == "ok"
+
+    result = run_research_l5_acceptance_real(l1_l4["run"], base_dir=base_dir, executor=executor, query=query)
+
+    assert result["status"] == "ok"
+    assert result["pipeline_status"] == PIPELINE_COMPLETE
+    assert result["full_pipeline_validation"]["production_valid_fresh_packet"] is True
+    assert [stage["stage_name"] for stage in result["run"]["stages"]] == [
+        "L1_gemini_search",
+        "L2_ddgs_supplement",
+        "L2_5_codex_evidence_organizer",
+        "L3_r1_synthesis",
+        "L4_gemini_audit",
+        "L5_deepseek_acceptance",
+    ]
+    packet_path = Path(result["run"]["stages"][-1]["artifact_path"])
+    text = packet_path.read_text(encoding="utf-8")
+    assert "accepted: true" in text
+    assert "current_run_id: stage_a_run" in text
+    assert f"current_query_hash: {expected_query_hash}" in text
+    assert f"current_artifact_dir: {base_dir.resolve()}" in text
 
 
 def test_l5_acceptance_does_not_treat_domain_rejecting_as_audit_rejection():

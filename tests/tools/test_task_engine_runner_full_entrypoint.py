@@ -81,6 +81,13 @@ def test_research_full_request_selects_task_engine_runner_without_real_pipeline(
     assert result["execution_state"] == "full_dry_intercept_not_executed"
     assert result["pipeline_status"] == "PIPELINE_INCOMPLETE"
     assert result["planned_l2_5_status"] == "real"
+    assert result["packet_provenance_required"] is True
+    assert result["planned_l5_provenance_fields"] == [
+        "current_run_id",
+        "current_query_hash",
+        "current_artifact_dir",
+    ]
+    assert result["planned_l5_packet_generation"] == "research_evidence_packet.md"
     assert "real-smoke-l1-l5" not in dumped
     assert result["full_run_request"]["requested_action"] == "full"
     assert result["full_run_request"]["effective_action"] == runner.RESEARCH_FULL_REAL_ACTION

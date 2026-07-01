@@ -461,6 +461,25 @@ def test_production_disallows_l5_old_accepted_packet(tmp_path: Path) -> None:
     assert "production_freshness:L5_deepseek_acceptance:missing_provenance:current_artifact_dir" in validation["errors"]
 
 
+@pytest.mark.parametrize("field", ["current_run_id", "current_query_hash", "current_artifact_dir"])
+def test_production_disallows_l5_packet_missing_each_provenance_field(tmp_path: Path, field: str) -> None:
+    root = tmp_path / field
+    run = _research_run(root, packet_provenance=True)
+    l5_record = next(stage for stage in run["stages"] if stage["stage_name"] == "L5_deepseek_acceptance")
+    packet_path = Path(l5_record["artifact_path"])
+    packet_text = packet_path.read_text(encoding="utf-8")
+    packet_path.write_text(
+        "\n".join(line for line in packet_text.splitlines() if not line.startswith(f"{field}:")) + "\n",
+        encoding="utf-8",
+    )
+
+    validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=root, production=True)
+
+    assert validation["pipeline_status"] == PIPELINE_BLOCKED
+    assert validation["production_freshness_valid"] is False
+    assert f"production_freshness:L5_deepseek_acceptance:missing_provenance:{field}" in validation["errors"]
+
+
 def test_production_pipeline_complete_requires_freshness(tmp_path: Path) -> None:
     production_run = _production_run(tmp_path / "production")
 
