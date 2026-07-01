@@ -10,7 +10,6 @@ from tools.task_engine_contracts import (
     ENGINE_DECISION,
     ENGINE_RESEARCH,
     PIPELINE_BLOCKED,
-    PIPELINE_COMPLETE,
 )
 
 
@@ -55,19 +54,11 @@ def test_research_full_request_selects_task_engine_runner_without_real_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, Path]] = []
-
-    def fake_research_full(query: str, *, base_dir: str | Path) -> dict:
-        calls.append((query, Path(base_dir)))
-        return {
-            "status": "ok",
-            "pipeline_status": PIPELINE_COMPLETE,
-            "run": {"mode": ENGINE_RESEARCH, "execution_mode": "fake-full", "stages": []},
-            "validation": {"valid": True},
-            "markdown": "fake research full output",
-        }
-
-    monkeypatch.setattr(runner, "run_research_l1_l5_smoke", fake_research_full)
+    monkeypatch.setattr(
+        runner,
+        "run_research_l1_l5_smoke",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("RESEARCH full must not enter smoke")),
+    )
 
     result = _load(
         runner.task_engine_runner(
@@ -78,12 +69,15 @@ def test_research_full_request_selects_task_engine_runner_without_real_pipeline(
         )
     )
 
-    assert calls == [("这是一个研究任务。请用 task_engine_runner full 执行。", tmp_path / "research")]
-    assert result["pipeline_status"] == PIPELINE_COMPLETE
-    assert result["execution_state"] == "runner_selected"
-    assert result["not_executed"] is False
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert result["status"] == "blocked"
+    assert result["BLOCKED_STATUS"] == PIPELINE_BLOCKED
+    assert result["pipeline_status"] == PIPELINE_BLOCKED
+    assert result["blocked_stage"] == "L2_5_codex_evidence_organizer"
+    assert runner.RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED in result["blocked_reason"]
+    assert "real-smoke-l1-l5" not in dumped
     assert result["full_run_request"]["requested_action"] == "full"
-    assert result["full_run_request"]["effective_action"] == "smoke-research-l1-l5"
+    assert result["full_run_request"]["effective_action"] != "smoke-research-l1-l5"
     assert result["prompt_path_policy"]["artifact_dir"] == str(tmp_path / "research")
     assert not (tmp_path / "research" / "evidence_backed_sidecar").exists()
     _assert_current_runner_full_contract(result)

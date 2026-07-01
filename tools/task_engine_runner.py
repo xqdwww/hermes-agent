@@ -74,6 +74,8 @@ UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION = (
     "unsafe_archived_research_decision_override_not_allowed_for_production_request"
 )
 RESEARCH_DECISION_SMOKE_INTENT_REQUIRED = "explicit_smoke_or_integration_intent_required_for_archived_research_decision"
+RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED = "L2_5_REAL_EVIDENCE_ORGANIZER_NOT_IMPLEMENTED"
+BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION = "blocked-research-full-real-l2-5-missing"
 PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE = "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE"
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
 TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
@@ -343,9 +345,23 @@ def task_engine_runner(
     elif action == "full":
         action = _full_action_for_mode(resolved_mode)
 
+    if action == BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION:
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "blocked_full_run")
+        return json.dumps(
+            _research_full_real_l2_5_missing_response(
+                artifact_dir=target_dir,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+
     def _finalize_result(result: dict[str, Any], *, target_dir: Path) -> str:
         result["artifact_dir"] = str(target_dir)
-        if _is_archived_research_decision_real_action(resolved_mode, action):
+        if action.startswith("smoke-"):
             _mark_non_production_smoke_result(result, action=action)
         if full_run_requested:
             _attach_full_run_entrypoint_metadata(
@@ -1221,7 +1237,7 @@ def _resolve_mode(mode: str, query: str) -> str | None:
 def _full_action_for_mode(mode: str) -> str:
     normalized = normalize_mode(mode)
     if normalized == ENGINE_RESEARCH:
-        return "smoke-research-l1-l5"
+        return BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION
     if normalized == ENGINE_DECISION:
         return "smoke-decision-final"
     if normalized == ENGINE_RESEARCH_DECISION:
@@ -1235,6 +1251,50 @@ def _research_decision_archive_allowed(explicit: bool = False) -> bool:
 
 def _research_decision_archive_env_enabled() -> bool:
     return os.getenv("HERMES_ENABLE_RESEARCH_DECISION") == "1"
+
+
+def _research_full_real_l2_5_missing_response(
+    *,
+    artifact_dir: str | Path,
+    requested_action: str = "full",
+    effective_action: str = BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
+) -> dict[str, Any]:
+    payload = {
+        "status": "blocked",
+        "BLOCKED_STATUS": PIPELINE_BLOCKED,
+        "pipeline_status": PIPELINE_BLOCKED,
+        "blocked_stage": "L2_5_codex_evidence_organizer",
+        "blocked_reason": RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED,
+        "artifact_dir": str(Path(artifact_dir).resolve()),
+        "mode": ENGINE_RESEARCH,
+        "action": "full",
+        "production_run": True,
+        "production_valid": False,
+        "evidence_freshness_valid": False,
+        "current_run_artifact": False,
+        "query_matched": False,
+        "non_smoke_evidence_organizer": False,
+        "production_valid_fresh_packet": False,
+        "message": (
+            "RESEARCH full is blocked because the production L2.5 evidence organizer "
+            "is not implemented. The runner will not substitute the smoke handoff path."
+        ),
+        "recommended_next_step": (
+            "implement real L2.5 evidence organizer or explicitly run non-production smoke test"
+        ),
+    }
+    _attach_full_run_entrypoint_metadata(
+        payload,
+        target_dir=artifact_dir,
+        mode=ENGINE_RESEARCH,
+        requested_action=requested_action,
+        effective_action=effective_action,
+        emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+        evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+    )
+    return payload
 
 
 def _is_archived_research_decision_real_action(mode: str | None, action: str) -> bool:

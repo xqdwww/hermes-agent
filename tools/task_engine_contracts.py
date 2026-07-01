@@ -351,11 +351,19 @@ def validate_pipeline(
         _validate_divergence_models(errors, by_name)
 
     production_freshness_errors: list[str] = []
+    current_run_artifact: bool | None = None
+    non_smoke_evidence_organizer: bool | None = None
     if production:
+        current_run_artifact = all(record.get("created_in_current_run") is True for record in stage_records)
+        l2_5_record = by_name.get("L2_5_codex_evidence_organizer")
+        if l2_5_record is not None:
+            non_smoke_evidence_organizer = str(l2_5_record.get("status") or "").lower() == "real"
         production_freshness_errors = _validate_production_freshness(normalized, run, by_name, base)
         errors.extend(production_freshness_errors)
 
     status = PIPELINE_COMPLETE if not errors else PIPELINE_BLOCKED
+    production_freshness_valid = (not production_freshness_errors) if production else None
+    production_valid_fresh_packet = (not errors) if production else None
     return {
         "valid": not errors,
         "pipeline_status": status,
@@ -365,8 +373,12 @@ def validate_pipeline(
         "expected_stage_count": len(specs),
         "divergence_unique_model_count": _divergence_unique_model_count(by_name),
         "production_freshness_required": production,
-        "production_freshness_valid": (not production_freshness_errors) if production else None,
+        "production_freshness_valid": production_freshness_valid,
         "production_freshness_errors": production_freshness_errors,
+        "current_run_artifact": current_run_artifact,
+        "query_matched": None,
+        "non_smoke_evidence_organizer": non_smoke_evidence_organizer,
+        "production_valid_fresh_packet": production_valid_fresh_packet,
     }
 
 
@@ -380,6 +392,12 @@ def _validate_production_freshness(
     execution_mode = str(run.get("execution_mode") or "")
     if "smoke" in execution_mode.lower():
         errors.append(f"production_freshness:execution_mode_smoke_not_allowed:{execution_mode}")
+
+    for name, record in by_name.items():
+        status = str(record.get("status") or "").lower()
+        expected_status = "accepted" if name == "L5_deepseek_acceptance" else "real"
+        if status != expected_status:
+            errors.append(f"production_freshness:{name}:non_real_stage_status_not_allowed:{status}")
 
     if mode not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
         return errors

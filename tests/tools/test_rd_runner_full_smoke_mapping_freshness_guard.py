@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import tools.task_engine_runner as runner
+import tools.task_engine_executors as executors
 from tools.task_engine_contracts import (
     CANONICAL_STAGES,
+    ENGINE_RESEARCH,
     ENGINE_RESEARCH_DECISION,
     PIPELINE_BLOCKED,
     PIPELINE_COMPLETE,
@@ -132,6 +136,35 @@ def _production_run(
     return {"mode": ENGINE_RESEARCH_DECISION, "execution_mode": execution_mode, "stages": stages}
 
 
+def _research_run(
+    root: Path,
+    *,
+    execution_mode: str = "production-research-full",
+    l2_5_status: str = "real",
+    packet_provenance: bool = True,
+) -> dict:
+    stages = []
+    for spec in CANONICAL_STAGES[ENGINE_RESEARCH]:
+        if spec.stage_name == "L5_deepseek_acceptance":
+            body = _accepted_packet_text(root, provenance=packet_provenance)
+            status = "accepted"
+        else:
+            body = f"{spec.stage_name} production fixture output"
+            status = l2_5_status if spec.stage_name == "L2_5_codex_evidence_organizer" else "real"
+        outputs = _write_outputs(spec, root, body)
+        stages.append(
+            make_stage_record(
+                spec,
+                base_dir=root,
+                created=True,
+                valid=True,
+                status=status,
+                outputs=outputs,
+            ).__dict__
+        )
+    return {"mode": ENGINE_RESEARCH, "execution_mode": execution_mode, "stages": stages}
+
+
 def test_research_decision_full_default_does_not_map_to_smoke(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         runner,
@@ -156,6 +189,50 @@ def test_research_decision_full_default_does_not_map_to_smoke(tmp_path: Path, mo
     assert result["artifact_dir"] == str(tmp_path / "daily")
     assert "real-smoke-research-decision-final" not in dumped
     assert "smoke-research-decision-final" not in result["full_run_request"]["effective_action"]
+
+
+def test_research_full_does_not_map_to_smoke_l1_l5(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner,
+        "run_research_l1_l5_smoke",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("RESEARCH full must not enter smoke")),
+    )
+
+    result = _load(
+        runner.task_engine_runner(
+            query="RESEARCH production full-run. Do not run smoke, fixtures, cached evidence, or old packets.",
+            mode=ENGINE_RESEARCH,
+            action="full",
+            base_dir=str(tmp_path / "research"),
+        )
+    )
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert result["status"] == "blocked"
+    assert result["pipeline_status"] == PIPELINE_BLOCKED
+    assert result["full_run_request"]["effective_action"] != "smoke-research-l1-l5"
+    assert "real-smoke-l1-l5" not in dumped
+    assert "smoke-research-l1-l5" not in result["full_run_request"]["effective_action"]
+
+
+def test_research_full_blocks_when_l2_5_real_not_implemented(tmp_path: Path) -> None:
+    result = _load(
+        runner.task_engine_runner(
+            query="RESEARCH production full-run with no smoke intent.",
+            mode=ENGINE_RESEARCH,
+            action="full",
+            base_dir=str(tmp_path / "research"),
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["BLOCKED_STATUS"] == PIPELINE_BLOCKED
+    assert result["blocked_stage"] == "L2_5_codex_evidence_organizer"
+    assert runner.RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED in result["blocked_reason"]
+    assert result["production_valid_fresh_packet"] is False
+    assert result["recommended_next_step"] == (
+        "implement real L2.5 evidence organizer or explicitly run non-production smoke test"
+    )
 
 
 def test_allow_archived_requires_explicit_smoke_intent(tmp_path: Path, monkeypatch) -> None:
@@ -207,6 +284,82 @@ def test_allow_archived_requires_explicit_smoke_intent(tmp_path: Path, monkeypat
     assert allowed_smoke["evidence_freshness_valid"] is False
     assert allowed_smoke["smoke_run_policy"]["allow_as_production_full_run"] is False
     assert calls == [("integration smoke fixture", tmp_path / "smoke")]
+
+
+def test_l5_acceptance_rejects_handoff_smoke_in_production(tmp_path: Path) -> None:
+    run = _research_run(tmp_path, l2_5_status="handoff-smoke")
+
+    with pytest.raises(RuntimeError, match="L2_5_codex_evidence_organizer.*non-real production input"):
+        executors._require_fresh_prior_for_l5(
+            run["stages"][:5],
+            base_dir=tmp_path,
+            production=True,
+        )
+
+
+def test_validate_pipeline_rejects_non_real_stage_for_production(tmp_path: Path) -> None:
+    run = _research_run(tmp_path, l2_5_status="handoff-smoke")
+
+    validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=tmp_path, production=True)
+
+    assert validation["pipeline_status"] == PIPELINE_BLOCKED
+    assert validation["production_valid_fresh_packet"] is False
+    assert validation["non_smoke_evidence_organizer"] is False
+    assert "production_freshness:L2_5_codex_evidence_organizer:handoff_smoke_not_allowed" in validation["errors"]
+    assert any(
+        error.startswith(
+            "production_freshness:L2_5_codex_evidence_organizer:non_real_stage_status_not_allowed:handoff-smoke"
+        )
+        for error in validation["errors"]
+    )
+
+
+def test_current_run_fresh_not_equal_production_valid(tmp_path: Path) -> None:
+    run = _research_run(tmp_path, l2_5_status="handoff-smoke")
+
+    validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=tmp_path, production=True)
+
+    assert validation["current_run_artifact"] is True
+    assert validation["non_smoke_evidence_organizer"] is False
+    assert validation["production_valid_fresh_packet"] is False
+    assert validation["pipeline_status"] == PIPELINE_BLOCKED
+
+
+def test_explicit_smoke_research_l1_l5_still_non_production(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[str, Path]] = []
+
+    def fake_smoke(query: str, *, base_dir: str | Path) -> dict:
+        calls.append((query, Path(base_dir)))
+        return {
+            "status": "ok",
+            "pipeline_status": PIPELINE_COMPLETE,
+            "run": {
+                "mode": ENGINE_RESEARCH,
+                "execution_mode": "real-smoke-l1-l5",
+                "stages": [],
+            },
+            "full_pipeline_validation": {"valid": True},
+        }
+
+    monkeypatch.setattr(runner, "run_research_l1_l5_smoke", fake_smoke)
+
+    result = _load(
+        runner.task_engine_runner(
+            query="explicit integration smoke for RESEARCH L1-L5",
+            mode=ENGINE_RESEARCH,
+            action="smoke-research-l1-l5",
+            base_dir=str(tmp_path / "smoke"),
+            execution_intent="integration_smoke",
+            explicit_smoke_intent=True,
+        )
+    )
+
+    assert result["pipeline_status"] == runner.PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE
+    assert result["structural_pipeline_status"] == PIPELINE_COMPLETE
+    assert result["non_production_smoke_run"] is True
+    assert result["production_valid"] is False
+    assert result["evidence_freshness_valid"] is False
+    assert calls == [("explicit integration smoke for RESEARCH L1-L5", tmp_path / "smoke")]
 
 
 def test_production_disallows_l2_5_handoff_smoke(tmp_path: Path) -> None:

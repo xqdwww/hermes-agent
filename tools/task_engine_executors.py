@@ -5524,7 +5524,12 @@ def _require_fresh_prior_for_l4(stages: list[dict[str, Any]], *, base_dir: str |
             _assert_current_run_path(output, base, name, consumer_stage="L4_gemini_audit")
 
 
-def _require_fresh_prior_for_l5(stages: list[dict[str, Any]], *, base_dir: str | Path) -> None:
+def _require_fresh_prior_for_l5(
+    stages: list[dict[str, Any]],
+    *,
+    base_dir: str | Path,
+    production: bool = False,
+) -> None:
     expected = [
         "L1_gemini_search",
         "L2_ddgs_supplement",
@@ -5544,6 +5549,10 @@ def _require_fresh_prior_for_l5(stages: list[dict[str, Any]], *, base_dir: str |
             raise RuntimeError(f"L5_deepseek_acceptance: {name} is legacy contaminated")
         if record.get("valid_for_pipeline") is not True:
             raise RuntimeError(f"L5_deepseek_acceptance: {name} is not valid_for_pipeline")
+        if production and str(record.get("status") or "").lower() != "real":
+            raise RuntimeError(
+                f"L5_deepseek_acceptance: {name} has non-real production input status={record.get('status')}"
+            )
         _assert_current_run_path(record.get("artifact_path"), base, name, consumer_stage="L5_deepseek_acceptance")
         for output in (record.get("outputs") or {}).values():
             _assert_current_run_path(output, base, name, consumer_stage="L5_deepseek_acceptance")
