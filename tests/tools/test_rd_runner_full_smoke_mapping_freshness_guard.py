@@ -218,6 +218,12 @@ def test_research_full_does_not_map_to_smoke_l1_l5(tmp_path: Path, monkeypatch) 
     assert result["pipeline_status"] == "PIPELINE_INCOMPLETE"
     assert result["not_executed"] is True
     assert result["planned_l2_5_status"] == "real"
+    assert result["selected_execution_mode"] == "production-research-full"
+    assert result["selected_handler"] == "run_research_l1_l5_real"
+    assert result["l2_5_handler_name"] == "run_research_l2_5_evidence_organizer_real"
+    assert result["production_validation_enabled"] is True
+    assert result["forbidden_handler_checks"]["run_research_l1_l5_smoke"] is False
+    assert result["forbidden_handler_checks"]["run_research_l2_5_codex_handoff_smoke"] is False
     assert result["full_run_request"]["effective_action"] == runner.RESEARCH_FULL_REAL_ACTION
     assert "real-smoke-l1-l5" not in dumped
     assert "smoke-research-l1-l5" not in result["full_run_request"]["effective_action"]
