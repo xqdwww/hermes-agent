@@ -1,11 +1,14 @@
 # Decision Context Contract
 
-This document describes Phase 1 of the decision context contract work.
+This document describes the decision context contract work.
 
-Phase 1 adds a deterministic, offline schema and generator in
-`tools/decision_context_contract.py`. It does not change convergence,
-external calibration, final controller rendering, final validation gates,
-Stage A execution, Stage B execution, hard-gate routing, or the live wrapper.
+Phase 1 added a deterministic, offline schema and generator in
+`tools/decision_context_contract.py`.
+
+Phase 2 wires that contract into production DECISION convergence and external
+calibration. It still does not change final controller rendering, final
+validation gates, Stage A execution, hard-gate routing, Travel skills, or
+Academic skills.
 
 ## Purpose
 
@@ -30,9 +33,29 @@ wire them into Decision stages. It captures:
 The generator is deterministic and offline. It reads only the supplied original
 query, the supplied research packet path, and optional or inferred L2.5
 `sources.csv`, `evidence.csv`, `claims.md`, and `gaps.md` files. It does not
-call external services, does not write production artifacts, and is not imported
-by the runner.
+call external services and does not write production artifacts by itself.
 
-Later phases can decide how to pass the contract into convergence, calibration,
-final rendering, and final validation. Until then, Phase 1 is schema and test
-coverage only.
+## Phase 2 Boundary
+
+Production DECISION full generates:
+
+- `decision_context_contract/decision_context_contract.json`
+- `decision_context_contract/decision_context_contract.md`
+
+Convergence receives the contract as hard input context and is validated with
+deterministic checks for:
+
+- contract ID and task topic presence
+- key variable retention
+- moderator retention
+- required dimension coverage
+- evidence tier presence
+- meta execution/readiness drift
+
+External calibration receives the same contract plus convergence and is
+validated against the same user decision object. Calibration that instead
+calibrates pipeline execution, schema readiness, production rollout, pilot
+readiness, task-engine implementation, or tool availability must fail closed.
+
+Phase 2 intentionally does not render a new final answer and does not modify the
+final controller or final validation gates.

@@ -28,6 +28,13 @@ from tools.task_engine_contracts import (
     validate_pipeline,
 )
 from tools.passive_intelligence_guard import classify_skill_triggers
+from tools.decision_context_contract import (
+    generate_decision_context_contract,
+    validate_contract_schema,
+    validate_provenance,
+    validate_required_fields,
+    write_decision_context_contract_artifacts,
+)
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
     run_decision_full_real,
@@ -625,6 +632,7 @@ def task_engine_runner(
         if execution_intent == "dry_run":
             payload = _decision_full_real_dry_intercept_response(
                 artifact_dir=target_dir,
+                query=query,
                 research_packet_path=resolved_research_packet_path,
                 requested_action=requested_action,
                 effective_action=action,
@@ -1460,12 +1468,18 @@ def _research_full_real_dry_intercept_response(
 def _decision_full_real_dry_intercept_response(
     *,
     artifact_dir: str | Path,
+    query: str,
     research_packet_path: str | None,
     requested_action: str = "full",
     effective_action: str = DECISION_FULL_REAL_ACTION,
     emit_evidence_backed_sidecar: bool = False,
     evidence_backed_sidecar_stage: str = "status_only",
 ) -> dict[str, Any]:
+    contract_dry = _decision_full_dry_contract_summary(
+        artifact_dir=artifact_dir,
+        query=query,
+        research_packet_path=research_packet_path,
+    )
     payload = {
         "status": "ok",
         "pipeline_status": "PIPELINE_INCOMPLETE",
@@ -1487,10 +1501,24 @@ def _decision_full_real_dry_intercept_response(
         "research_rerun_planned": False,
         "production_validation_enabled": True,
         "expected_outputs": [
+            "decision_context_contract/decision_context_contract.json",
+            "decision_context_contract/decision_context_contract.md",
             "convergence_report/convergence_report.md",
             "external_calibration/external_calibration.md",
             "final_controller_report/final_decision_report.md",
         ],
+        "decision_context_contract_generated": contract_dry["generated"],
+        "decision_context_contract_path": contract_dry.get("decision_context_contract_json_path", ""),
+        "decision_context_contract_validation_errors": contract_dry.get("validation_errors", []),
+        "convergence_receives_decision_context_contract": contract_dry["generated"],
+        "external_calibration_receives_decision_context_contract": contract_dry["generated"],
+        "convergence_contract_checks_enabled": True,
+        "external_calibration_contract_checks_enabled": True,
+        "meta_drift_checks_enabled": True,
+        "planned_block_reasons": {
+            "convergence": "CONVERGENCE_TOPIC_DRIFT_FROM_DECISION_CONTEXT_CONTRACT",
+            "external_calibration": "EXTERNAL_CALIBRATION_WRONG_OBJECT_NOT_USER_DECISION",
+        },
         "forbidden_handler_checks": {
             "run_research_l1_l5_real": False,
             "run_research_decision_l1_l16_smoke": False,
@@ -1514,6 +1542,46 @@ def _decision_full_real_dry_intercept_response(
         evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
     )
     return payload
+
+
+def _decision_full_dry_contract_summary(
+    *,
+    artifact_dir: str | Path,
+    query: str,
+    research_packet_path: str | None,
+) -> dict[str, Any]:
+    if not research_packet_path:
+        return {
+            "generated": False,
+            "validation_errors": ["missing_research_packet_path"],
+        }
+    try:
+        contract = generate_decision_context_contract(
+            original_query=query,
+            research_packet_path=research_packet_path,
+        )
+        validation_errors: list[str] = []
+        validation_errors.extend(validate_contract_schema(contract))
+        validation_errors.extend(validate_required_fields(contract))
+        validation_errors.extend(validate_provenance(contract))
+        if validation_errors:
+            return {
+                "generated": False,
+                "contract_id": contract.get("contract_id"),
+                "validation_errors": list(dict.fromkeys(validation_errors)),
+            }
+        paths = write_decision_context_contract_artifacts(contract, base_dir=artifact_dir)
+        return {
+            "generated": True,
+            "contract_id": contract.get("contract_id"),
+            "validation_errors": [],
+            **paths,
+        }
+    except Exception as exc:
+        return {
+            "generated": False,
+            "validation_errors": [str(exc)],
+        }
 
 
 def _mark_decision_full_production_result(result: dict[str, Any], *, research_packet_path: str | None) -> dict[str, Any]:

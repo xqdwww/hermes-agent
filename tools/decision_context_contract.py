@@ -1,8 +1,8 @@
-"""Deterministic decision context contract generation.
+"""Deterministic decision context contract generation and validation.
 
-Phase 1 only: this module is intentionally standalone and is not imported by
-the task runner or decision stages. It converts an original query plus a
-production research packet path into a stable, auditable contract object.
+The generator converts an original query plus a production research packet path
+into a stable, auditable contract object. The validation helpers are deliberately
+rule-based and offline so runner stages can fail closed without model calls.
 """
 
 from __future__ import annotations
@@ -38,6 +38,38 @@ DEFAULT_FORBIDDEN_INTERNAL_TERMS = [
     "controller",
     "validation gate",
 ]
+
+META_EXECUTION_DRIFT_TERMS = [
+    "pipeline execution",
+    "production readiness",
+    "schema readiness",
+    "schema rollout",
+    "pilot rollout",
+    "production rollout",
+    "task-engine implementation",
+    "tool availability",
+    "toolset",
+    "runner availability",
+    "gate artifact",
+    "执行准备",
+    "生产就绪",
+    "模式接入",
+    "工具可用性",
+    "试点部署",
+]
+
+EVIDENCE_TIER_ALIASES = {
+    "evidence_supported": ["evidence_supported", "supported", "证据支持", "证据支持项"],
+    "plausible_inference": ["plausible_inference", "plausible", "合理推断", "条件性推断"],
+    "forward_looking_hypothesis": ["forward_looking_hypothesis", "hypothesis", "假设", "前瞻性假设"],
+    "unsupported_or_speculative": [
+        "unsupported_or_speculative",
+        "unsupported",
+        "speculative",
+        "证据不足",
+        "推测",
+    ],
+}
 
 DEFAULT_FINAL_ACCEPTANCE_CHECKS = {
     "required_sections_present": True,
@@ -251,6 +283,10 @@ def _stable_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _normalize_for_match(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
 def _extract_metadata_value(text: str, names: list[str]) -> str | None:
     for name in names:
         pattern = re.compile(rf"(?im)^\s*(?:[-*]\s*)?{re.escape(name)}\s*[:：]\s*(.+?)\s*$")
@@ -306,6 +342,17 @@ def _infer_l2_5_paths(
 def _contains_any(text: str, needles: list[str]) -> bool:
     lower = text.lower()
     return any(needle.lower() in lower for needle in needles)
+
+
+def _match_any_alias(text: str, labels: list[str]) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(_normalize_for_match(label) in normalized for label in labels if label)
+
+
+def _record_aliases(record: dict[str, Any]) -> list[str]:
+    aliases = [str(record.get("label") or ""), str(record.get("id") or "")]
+    aliases.extend(str(alias) for alias in record.get("aliases") or [])
+    return [alias for alias in aliases if alias]
 
 
 def _dedupe_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -716,6 +763,135 @@ def validate_provenance(contract: dict[str, Any]) -> list[str]:
         if value and not Path(value).is_file():
             errors.append(f"missing_provenance_file:{key}")
     return errors
+
+
+def validate_convergence_uses_contract(convergence_text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_contract_schema(contract)
+    text = convergence_text or ""
+    contract_id = str(contract.get("contract_id") or "")
+    title = str(contract.get("task_topic", {}).get("title") or "")
+    if contract_id and contract_id not in text:
+        errors.append("missing_contract_id")
+    if title and title not in text:
+        errors.append("missing_task_topic")
+    return errors
+
+
+def validate_no_meta_execution_drift(text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_contract_schema(contract)
+    value = text or ""
+    drift_hits = [term for term in META_EXECUTION_DRIFT_TERMS if term.lower() in value.lower()]
+    task_terms = list(contract.get("task_topic", {}).get("must_match_terms") or [])
+    task_anchor_hits = [term for term in task_terms if term and term.lower() in value.lower()]
+    if drift_hits and len(task_anchor_hits) < 2:
+        errors.append("meta_execution_drift:" + ",".join(drift_hits[:5]))
+    if len(drift_hits) >= 3:
+        errors.append("meta_execution_drift_dominant:" + ",".join(drift_hits[:5]))
+    return errors
+
+
+def validate_required_variables_present(text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_contract_schema(contract)
+    value = text or ""
+    for variable in contract.get("key_variables") or []:
+        if variable.get("required_in_final") and not _match_any_alias(value, _record_aliases(variable)):
+            errors.append(f"missing_key_variable:{variable.get('id') or variable.get('label')}")
+    for moderator in contract.get("moderator_variables") or []:
+        if moderator.get("required_in_final") and not _match_any_alias(value, _record_aliases(moderator)):
+            errors.append(f"missing_moderator_variable:{moderator.get('id') or moderator.get('label')}")
+    return errors
+
+
+def validate_required_dimensions_present(text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_contract_schema(contract)
+    value = text or ""
+    for dimension in contract.get("required_dimensions") or []:
+        if not _match_any_alias(value, _record_aliases(dimension)):
+            errors.append(f"missing_required_dimension:{dimension.get('id') or dimension.get('label')}")
+    return errors
+
+
+def validate_evidence_tiers_present(text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_contract_schema(contract)
+    value = text or ""
+    allowed = contract.get("evidence_tiers", {}).get("allowed") or []
+    found = []
+    for tier in allowed:
+        aliases = EVIDENCE_TIER_ALIASES.get(str(tier), [str(tier)])
+        if _match_any_alias(value, aliases):
+            found.append(str(tier))
+    if not found:
+        errors.append("missing_evidence_tiers")
+    return errors
+
+
+def validate_calibration_object(calibration_text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_convergence_uses_contract(calibration_text, contract)
+    errors.extend(validate_no_meta_execution_drift(calibration_text, contract))
+    errors.extend(validate_required_variables_present(calibration_text, contract))
+    errors.extend(validate_required_dimensions_present(calibration_text, contract))
+    errors.extend(validate_evidence_tiers_present(calibration_text, contract))
+    value = calibration_text or ""
+    if not _match_any_alias(value, ["calibration_verdict", "校准", "calibrate", "evidence strength"]):
+        errors.append("missing_calibration_object_marker")
+    return _dedupe_error_list(errors)
+
+
+def validate_convergence_contract_alignment(convergence_text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_convergence_uses_contract(convergence_text, contract)
+    errors.extend(validate_no_meta_execution_drift(convergence_text, contract))
+    errors.extend(validate_required_variables_present(convergence_text, contract))
+    errors.extend(validate_required_dimensions_present(convergence_text, contract))
+    errors.extend(validate_evidence_tiers_present(convergence_text, contract))
+    return _dedupe_error_list(errors)
+
+
+def _dedupe_error_list(errors: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for error in errors:
+        if error in seen:
+            continue
+        seen.add(error)
+        deduped.append(error)
+    return deduped
+
+
+def contract_prompt_payload(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "contract_id": contract.get("contract_id"),
+        "contract_version": contract.get("contract_version"),
+        "task_topic": contract.get("task_topic"),
+        "user_output_contract": contract.get("user_output_contract"),
+        "key_variables": contract.get("key_variables"),
+        "moderator_variables": contract.get("moderator_variables"),
+        "required_dimensions": contract.get("required_dimensions"),
+        "evidence_tiers": contract.get("evidence_tiers"),
+        "forbidden_content": contract.get("forbidden_content"),
+        "claim_strength_policy": contract.get("claim_strength_policy"),
+        "final_acceptance_checks": contract.get("final_acceptance_checks"),
+        "contract_warnings": contract.get("contract_warnings"),
+    }
+
+
+def write_decision_context_contract_artifacts(
+    contract: dict[str, Any],
+    *,
+    base_dir: str | Path,
+) -> dict[str, str]:
+    contract_dir = Path(base_dir) / "decision_context_contract"
+    contract_dir.mkdir(parents=True, exist_ok=True)
+    json_path = contract_dir / "decision_context_contract.json"
+    md_path = contract_dir / "decision_context_contract.md"
+    json_path.write_text(
+        json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(render_contract_markdown(contract), encoding="utf-8")
+    return {
+        "decision_context_contract_json_path": str(json_path),
+        "decision_context_contract_md_path": str(md_path),
+    }
 
 
 def render_contract_markdown(contract: dict[str, Any]) -> str:

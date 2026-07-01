@@ -31,6 +31,16 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, TypeVar
 
 from tools import task_engine_scoring_calibration as scoring_calibration
+from tools.decision_context_contract import (
+    contract_prompt_payload,
+    generate_decision_context_contract,
+    validate_calibration_object,
+    validate_contract_schema,
+    validate_convergence_contract_alignment,
+    validate_provenance,
+    validate_required_fields,
+    write_decision_context_contract_artifacts,
+)
 from tools.task_engine_contracts import (
     CANONICAL_STAGES,
     CONTROLLER_ACCEPTANCE,
@@ -2876,10 +2886,33 @@ def run_decision_final_smoke(
             "message": blocked_message,
         }
 
+    def contract_blocked(reason: str) -> dict[str, Any]:
+        return {
+            "status": "blocked",
+            "pipeline_status": PIPELINE_BLOCKED,
+            "blocked_stage": "decision_context_contract",
+            "blocked_reason": reason,
+            "run": {"mode": ENGINE_DECISION, "execution_mode": execution_mode, "stages": stages},
+            "message": blocked_message,
+        }
+
     def run_stage(stage: StageSpec, operation: Callable[[], _T]) -> _T:
         return _run_decision_stage_with_timeout(stage, base_dir=base_dir, executor=executor, operation=operation)
 
     try:
+        decision_context: dict[str, Any] | None = None
+        if production:
+            if not research_packet_path:
+                return contract_blocked("DECISION_CONTEXT_CONTRACT_MISSING_RESEARCH_PACKET_PATH")
+            try:
+                decision_context = _prepare_decision_context_contract(
+                    query=query,
+                    research_packet_path=research_packet_path,
+                    base_dir=base_dir,
+                )
+            except Exception as exc:
+                return contract_blocked(str(exc))
+
         stage = specs[0]
         content = run_stage(
             stage,
@@ -3051,14 +3084,43 @@ def run_decision_final_smoke(
             "alternative_generator",
             "insight_harvester",
         ], base_dir=base_dir, consumer_stage=stage.stage_name)
-        content = run_stage(stage, lambda: executor.run_omlx_model(stage, stage.model, _decision_stage_prompt(stage, stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)))
+        content = run_stage(
+            stage,
+            lambda: executor.run_omlx_model(
+                stage,
+                stage.model,
+                _decision_stage_prompt(
+                    stage,
+                    stages,
+                    query=query,
+                    base_dir=base_dir,
+                    research_packet_path=research_packet_path,
+                    decision_context_contract=decision_context["contract"] if decision_context else None,
+                ),
+            ),
+        )
         leaked = _convergence_report_forbidden_tokens(content)
         if leaked:
             raise RuntimeError(f"convergence_report: forbidden final/tool-chain tokens: {', '.join(leaked)}")
         profile_errors = _quality_profile_errors(content, _task_engine_profiles_from_query(query), stage_name="convergence_report")
         if profile_errors:
             raise RuntimeError(f"convergence_report: output_quality_profile_error:{', '.join(profile_errors)}")
-        _append_real_stage(stages, stage, content, base_dir=base_dir, executor=executor, status="real")
+        if decision_context:
+            contract_errors = validate_convergence_contract_alignment(content, decision_context["contract"])
+            if contract_errors:
+                raise RuntimeError(
+                    "CONVERGENCE_TOPIC_DRIFT_FROM_DECISION_CONTEXT_CONTRACT:"
+                    + ",".join(contract_errors)
+                )
+        _append_real_stage(
+            stages,
+            stage,
+            content,
+            base_dir=base_dir,
+            executor=executor,
+            status="real",
+            record_metadata=_decision_context_record_metadata(decision_context),
+        )
 
         stage = specs[8]
         _require_decision_prior(stages, [
@@ -3081,6 +3143,7 @@ def run_decision_final_smoke(
                         query=query,
                         base_dir=base_dir,
                         research_packet_path=research_packet_path,
+                        decision_context_contract=decision_context["contract"] if decision_context else None,
                     ),
                     "base_dir": str(base_dir),
                 },
@@ -3089,7 +3152,22 @@ def run_decision_final_smoke(
         leaked = _external_calibration_forbidden_tokens(content)
         if leaked:
             raise RuntimeError(f"external_calibration: forbidden final-output tokens: {', '.join(leaked)}")
-        _append_real_stage(stages, stage, content, base_dir=base_dir, executor=executor, status="real")
+        if decision_context:
+            calibration_errors = validate_calibration_object(content, decision_context["contract"])
+            if calibration_errors:
+                raise RuntimeError(
+                    "EXTERNAL_CALIBRATION_WRONG_OBJECT_NOT_USER_DECISION:"
+                    + ",".join(calibration_errors)
+                )
+        _append_real_stage(
+            stages,
+            stage,
+            content,
+            base_dir=base_dir,
+            executor=executor,
+            status="real",
+            record_metadata=_decision_context_record_metadata(decision_context),
+        )
 
         stage = specs[9]
         _require_decision_prior(stages, [
@@ -3119,6 +3197,7 @@ def run_decision_final_smoke(
             "full_pipeline_validation": validation,
             "run": run,
             "markdown": markdown,
+            "decision_context_contract": decision_context,
             "message": complete_message if validation.get("valid") else failed_message,
         }
     except Exception as exc:
@@ -3286,6 +3365,60 @@ def _append_real_stage(
     if record_metadata:
         record_dict.update(record_metadata)
     stages.append(record_dict)
+
+
+def _prepare_decision_context_contract(
+    *,
+    query: str,
+    research_packet_path: str | Path,
+    base_dir: str | Path,
+) -> dict[str, Any]:
+    contract = generate_decision_context_contract(
+        original_query=query,
+        research_packet_path=research_packet_path,
+    )
+    validation_errors: list[str] = []
+    validation_errors.extend(validate_contract_schema(contract))
+    validation_errors.extend(validate_required_fields(contract))
+    validation_errors.extend(validate_provenance(contract))
+    if validation_errors:
+        raise RuntimeError("DECISION_CONTEXT_CONTRACT_INVALID:" + ",".join(dict.fromkeys(validation_errors)))
+    paths = write_decision_context_contract_artifacts(contract, base_dir=base_dir)
+    return {
+        "contract": contract,
+        "contract_id": contract.get("contract_id"),
+        "decision_context_contract_json_path": paths["decision_context_contract_json_path"],
+        "decision_context_contract_md_path": paths["decision_context_contract_md_path"],
+        "validation_errors": [],
+    }
+
+
+def _decision_context_record_metadata(context: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not context:
+        return None
+    return {
+        "decision_context_contract_id": context.get("contract_id"),
+        "decision_context_contract_json_path": context.get("decision_context_contract_json_path"),
+        "decision_context_contract_md_path": context.get("decision_context_contract_md_path"),
+        "decision_context_contract_enforced": True,
+    }
+
+
+def _decision_context_contract_prompt_block(contract: dict[str, Any] | None) -> list[str]:
+    if not contract:
+        return []
+    payload = contract_prompt_payload(contract)
+    return [
+        "",
+        "## decision_context_contract",
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "Decision context contract enforcement:",
+        f"- Include decision_context_contract_id: {contract.get('contract_id')}",
+        "- Use task_topic, key_variables, moderator_variables, required_dimensions, evidence_tiers, and user_output_contract as hard input constraints.",
+        "- Do not switch the object of analysis to pipeline execution, production readiness, schema rollout, pilot rollout, task-engine implementation, or tool availability.",
+        "- If the contract cannot be satisfied, say so inside this stage output; do not fabricate missing variables or evidence tiers.",
+    ]
 
 
 def resolve_agy_model_alias(canonical_model: str) -> str:
@@ -8418,6 +8551,7 @@ def _decision_stage_prompt(
     query: str,
     base_dir: str | Path,
     research_packet_path: str | Path | None = None,
+    decision_context_contract: dict[str, Any] | None = None,
 ) -> str:
     base = Path(base_dir).resolve()
     excerpts = _decision_excerpts(stages, limit=3000)
@@ -8468,6 +8602,8 @@ def _decision_stage_prompt(
     ]
     if context:
         lines.extend(["", "## optional_research_evidence_packet_context", context])
+    if stage.stage_name == "convergence_report":
+        lines.extend(_decision_context_contract_prompt_block(decision_context_contract))
     return "\n".join(lines)
 
 
@@ -8504,6 +8640,7 @@ def _decision_external_calibration_prompt(
     query: str,
     base_dir: str | Path,
     research_packet_path: str | Path | None = None,
+    decision_context_contract: dict[str, Any] | None = None,
 ) -> str:
     base = Path(base_dir).resolve()
     excerpts = _decision_excerpts(stages, limit=5000)
@@ -8534,6 +8671,7 @@ def _decision_external_calibration_prompt(
     ]
     if context:
         lines.extend(["", "## optional_research_evidence_packet_context", context])
+    lines.extend(_decision_context_contract_prompt_block(decision_context_contract))
     return "\n".join(lines)
 
 

@@ -6,9 +6,15 @@ from tools.decision_context_contract import (
     RUNTIME_INTEGRATION_ENABLED,
     compute_contract_hash,
     generate_decision_context_contract,
+    validate_calibration_object,
     validate_contract_schema,
+    validate_convergence_contract_alignment,
+    validate_evidence_tiers_present,
+    validate_no_meta_execution_drift,
     validate_provenance,
+    validate_required_dimensions_present,
     validate_required_fields,
+    validate_required_variables_present,
 )
 
 
@@ -240,3 +246,105 @@ def test_generator_does_not_modify_input_artifacts(tmp_path):
 
 def test_phase1_does_not_integrate_with_runner_runtime():
     assert RUNTIME_INTEGRATION_ENABLED is False
+
+
+def _aligned_convergence_text(contract):
+    return "\n".join(
+        [
+            f"decision_context_contract_id: {contract['contract_id']}",
+            f"task_topic: {contract['task_topic']['title']}",
+            "key_variables: ADHD 注意力波动, 兴趣驱动, 执行功能, 内在走神, AI 信息环境, 知识获取成本下降, 儿童长期发展",
+            "moderator_variables: IQ 124, 长期柔术训练, 身体反馈系统",
+            "required_dimensions: 知识获取能力, 问题选择能力, 验证能力, 收束能力, 延迟反馈耐受, 身体反馈系统",
+            "user_output_contract_intent: 未来优势变陷阱 Top5; 未来缺陷变优势 Top5; danger_flag",
+            "evidence_tiers: evidence_supported, plausible_inference, forward_looking_hypothesis, unsupported_or_speculative",
+            "convergence: 结构性反转必须围绕 ADHD x AI 的用户决策问题，而不是执行准备。",
+        ]
+    )
+
+
+def test_convergence_with_adhd_ai_contract_content_passes(tmp_path):
+    contract = _generate(tmp_path)
+
+    assert validate_convergence_contract_alignment(_aligned_convergence_text(contract), contract) == []
+
+
+def test_convergence_with_execution_readiness_meta_content_blocks(tmp_path):
+    contract = _generate(tmp_path)
+    text = (
+        f"decision_context_contract_id: {contract['contract_id']}\n"
+        "production readiness and schema rollout are ready. "
+        "pipeline execution, task-engine implementation, tool availability, and pilot rollout should proceed."
+    )
+
+    errors = validate_no_meta_execution_drift(text, contract)
+
+    assert any(error.startswith("meta_execution_drift") for error in errors)
+
+
+def test_missing_iq_124_moderator_blocks_for_adhd_contract(tmp_path):
+    contract = _generate(tmp_path)
+    text = _aligned_convergence_text(contract).replace("IQ 124, ", "")
+
+    errors = validate_required_variables_present(text, contract)
+
+    assert "missing_moderator_variable:iq_124" in errors
+
+
+def test_missing_bjj_body_feedback_moderator_blocks_for_adhd_contract(tmp_path):
+    contract = _generate(tmp_path)
+    text = _aligned_convergence_text(contract).replace("长期柔术训练, ", "")
+
+    errors = validate_required_variables_present(text, contract)
+
+    assert "missing_moderator_variable:long_term_bjj_training" in errors
+
+
+def test_missing_six_ability_dimensions_block(tmp_path):
+    contract = _generate(tmp_path)
+    text = (
+        _aligned_convergence_text(contract)
+        .replace("身体反馈系统", "身体调节变量")
+        .replace(
+            "知识获取能力, 问题选择能力, 验证能力, 收束能力, 延迟反馈耐受, 身体调节变量",
+            "只保留主题，不列维度",
+        )
+    )
+
+    errors = validate_required_dimensions_present(text, contract)
+
+    assert "missing_required_dimension:knowledge_acquisition_ability" in errors
+    assert "missing_required_dimension:problem_selection_ability" in errors
+    assert "missing_required_dimension:validation_ability" in errors
+    assert "missing_required_dimension:convergence_ability" in errors
+    assert "missing_required_dimension:delayed_feedback_tolerance" in errors
+    assert "missing_required_dimension:body_feedback_system" in errors
+
+
+def test_missing_evidence_tiers_blocks(tmp_path):
+    contract = _generate(tmp_path)
+    text = _aligned_convergence_text(contract).replace(
+        "evidence_tiers: evidence_supported, plausible_inference, forward_looking_hypothesis, unsupported_or_speculative",
+        "evidence_tiers: absent",
+    )
+
+    assert "missing_evidence_tiers" in validate_evidence_tiers_present(text, contract)
+
+
+def test_calibration_of_adhd_ai_convergence_passes(tmp_path):
+    contract = _generate(tmp_path)
+    text = _aligned_convergence_text(contract) + "\ncalibration_verdict: calibrated against user decision evidence strength."
+
+    assert validate_calibration_object(text, contract) == []
+
+
+def test_calibration_of_pipeline_readiness_blocks(tmp_path):
+    contract = _generate(tmp_path)
+    text = (
+        f"decision_context_contract_id: {contract['contract_id']}\n"
+        "calibration_verdict: production readiness, schema readiness, pipeline execution, and tool availability are calibrated."
+    )
+
+    errors = validate_calibration_object(text, contract)
+
+    assert any(error.startswith("meta_execution_drift") for error in errors)
