@@ -84,6 +84,9 @@ DEFAULT_FINAL_ACCEPTANCE_CHECKS = {
     "generic_template_residue_absent": True,
 }
 
+FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT = "FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT"
+FINAL_VALIDATION_MISSING_MODERATOR_RETENTION = "FINAL_VALIDATION_MISSING_MODERATOR_RETENTION"
+
 GENERIC_TEMPLATE_RESIDUE_SECTION_HEADINGS = [
     "用户画像与约束如何进入判断",
     "逐题回答",
@@ -898,6 +901,80 @@ def validate_final_report_contract_rendering(text: str, contract: dict[str, Any]
     return _dedupe_error_list(errors)
 
 
+def validate_final_report_against_decision_context_contract(
+    text: str,
+    contract: dict[str, Any],
+) -> list[str]:
+    """Independently validate a user-facing final report against its contract.
+
+    This is stricter than the renderer self-check: it is intended for the final
+    production validation gate and therefore verifies exact TopN counts, per-item
+    fields, moderator retention, per-item evidence tier signals, and generic
+    template residue.
+    """
+    errors = validate_final_report_contract_rendering(text, contract)
+    value = text or ""
+    if not value.strip():
+        return _dedupe_error_list([*errors, "final_report_empty"])
+
+    output_contract = contract.get("user_output_contract") or {}
+    required_sections = [str(section) for section in output_contract.get("required_sections") or []]
+    required_counts = output_contract.get("required_counts") or {}
+    required_item_fields = [
+        str(field.get("label") or "")
+        for field in output_contract.get("required_item_fields") or []
+        if isinstance(field, dict) and str(field.get("label") or "").strip()
+    ]
+
+    for section in required_sections:
+        expected_count = int(required_counts.get(section) or 0)
+        if not expected_count:
+            continue
+        body = _markdown_section_body(value, section)
+        if not body:
+            continue
+        items = _numbered_markdown_items(body)
+        if len(items) != expected_count:
+            errors.append(f"required_count_mismatch:{section}:{expected_count}:{len(items)}")
+        for index, item in enumerate(items[:expected_count], start=1):
+            for label in required_item_fields:
+                if label not in item:
+                    errors.append(f"missing_item_field:{section}:{index}:{label}")
+            if "确定性等级" not in item:
+                errors.append(f"missing_certainty_level:{section}:{index}")
+            if "证据层级" not in item:
+                errors.append(f"missing_evidence_tier_field:{section}:{index}")
+            if not _item_has_evidence_tier_signal(item, contract):
+                errors.append(f"missing_evidence_tier:{section}:{index}")
+            if _paragraph_only_item(item, required_item_fields):
+                errors.append(f"paragraph_only_item:{section}:{index}")
+
+    for moderator in contract.get("moderator_variables") or []:
+        if not isinstance(moderator, dict) or not moderator.get("required_in_final"):
+            continue
+        aliases = _record_aliases(moderator)
+        occurrence_count = _alias_occurrence_count(value, aliases)
+        moderator_id = str(moderator.get("id") or moderator.get("label") or "unknown")
+        if occurrence_count < 2:
+            errors.append(f"{FINAL_VALIDATION_MISSING_MODERATOR_RETENTION}:{moderator_id}")
+        if moderator_id == "long_term_bjj_training" and not _match_any_alias(
+            value,
+            ["身体反馈系统", "身体反馈", "body feedback", "embodied feedback"],
+        ):
+            errors.append(f"{FINAL_VALIDATION_MISSING_MODERATOR_RETENTION}:{moderator_id}:missing_body_feedback_logic")
+
+    for forbidden in contract.get("forbidden_content") or []:
+        if not isinstance(forbidden, dict):
+            continue
+        if _match_any_alias(value, _record_aliases(forbidden)):
+            errors.append(f"forbidden_content:{forbidden.get('id') or forbidden.get('label')}")
+
+    errors.extend(validate_no_meta_execution_drift(value, contract))
+    if _topic_anchor_count(value, contract) < _minimum_final_topic_anchor_count(contract):
+        errors.append("topic_drift_or_generic_final")
+    return _dedupe_error_list(errors)
+
+
 def _markdown_section_body(text: str, heading: str) -> str:
     pattern = re.compile(rf"(?m)^#{{2,6}}\s*{re.escape(heading)}\s*$")
     match = pattern.search(text or "")
@@ -906,6 +983,60 @@ def _markdown_section_body(text: str, heading: str) -> str:
     next_heading = re.search(r"(?m)^#{2,6}\s+", text[match.end():])
     end = match.end() + next_heading.start() if next_heading else len(text)
     return text[match.end():end].strip()
+
+
+def _numbered_markdown_items(section_body: str) -> list[str]:
+    matches = list(re.finditer(r"(?m)^\s*\d+\.\s+", section_body or ""))
+    items: list[str] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(section_body)
+        items.append(section_body[match.end():end].strip())
+    return items
+
+
+def _item_has_evidence_tier_signal(item_text: str, contract: dict[str, Any]) -> bool:
+    if "证据层级" in (item_text or ""):
+        return True
+    allowed = contract.get("evidence_tiers", {}).get("allowed") or []
+    for tier in allowed:
+        aliases = EVIDENCE_TIER_ALIASES.get(str(tier), [str(tier)])
+        if _match_any_alias(item_text, aliases):
+            return True
+    return False
+
+
+def _paragraph_only_item(item_text: str, required_item_fields: list[str]) -> bool:
+    if not (item_text or "").strip():
+        return True
+    return not any(label and label in item_text for label in required_item_fields)
+
+
+def _alias_occurrence_count(text: str, aliases: list[str]) -> int:
+    normalized = _normalize_for_match(text)
+    counts = [
+        normalized.count(_normalize_for_match(alias))
+        for alias in aliases
+        if _normalize_for_match(alias)
+    ]
+    return max(counts) if counts else 0
+
+
+def _topic_anchor_count(text: str, contract: dict[str, Any]) -> int:
+    anchors: list[str] = []
+    anchors.extend(str(term) for term in contract.get("task_topic", {}).get("must_match_terms") or [])
+    for group in ("key_variables", "moderator_variables", "required_dimensions"):
+        for record in contract.get(group) or []:
+            if isinstance(record, dict):
+                anchors.append(str(record.get("label") or ""))
+    return sum(1 for anchor in dict.fromkeys(anchors) if anchor and _match_any_alias(text, [anchor]))
+
+
+def _minimum_final_topic_anchor_count(contract: dict[str, Any]) -> int:
+    total = len(contract.get("task_topic", {}).get("must_match_terms") or [])
+    total += len(contract.get("key_variables") or [])
+    total += len(contract.get("moderator_variables") or [])
+    total += len(contract.get("required_dimensions") or [])
+    return max(4, min(8, total // 3))
 
 
 def _dedupe_error_list(errors: list[str]) -> list[str]:

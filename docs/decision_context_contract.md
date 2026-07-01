@@ -89,6 +89,20 @@ The renderer inherits the contract fields directly:
 - forbidden internal terms
 
 For Top5 outputs, each item must explicitly render the contract fields instead
-of relying on paragraph-only implicit coverage. This phase does not add a new
-global final validation gate; it enforces the contract inside final controller
-rendering before the existing quality checks run.
+of relying on paragraph-only implicit coverage.
+
+## Phase 4: Independent Final Validation Gate
+
+Production DECISION final validation now reloads both:
+
+- `decision_context_contract/decision_context_contract.json`
+- `final_controller_report/final_decision_report.md`
+
+The final gate validates the final user-facing output independently from the
+renderer. It blocks missing or invalid contracts, missing required sections,
+TopN count mismatches, paragraph-only item fields, lost moderators, missing
+required dimensions, missing per-item evidence tier signals, forbidden content,
+internal terms, template residue, and generic topic drift.
+
+For production DECISION runs, a final report can only be production-valid when
+it passes this independent contract-aware gate.

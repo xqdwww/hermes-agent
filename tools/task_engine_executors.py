@@ -3196,7 +3196,7 @@ def run_decision_final_smoke(
         _append_real_stage(stages, stage, content, base_dir=base_dir, executor=executor, status="real")
 
         run = {"mode": ENGINE_DECISION, "execution_mode": execution_mode, "stages": stages}
-        validation = validate_pipeline(ENGINE_DECISION, run, base_dir=base_dir)
+        validation = validate_pipeline(ENGINE_DECISION, run, base_dir=base_dir, production=production)
         markdown = render_final_markdown(ENGINE_DECISION, run, validation, base_dir=base_dir)
         return {
             "status": "ok" if validation.get("valid") else "blocked",

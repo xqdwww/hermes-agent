@@ -13,6 +13,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tools.decision_context_contract import (
+    FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT,
+    validate_contract_schema,
+    validate_final_report_against_decision_context_contract,
+    validate_provenance,
+    validate_required_fields,
+)
+
 
 ENGINE_RESEARCH = "RESEARCH"
 ENGINE_DECISION = "DECISION"
@@ -360,6 +368,8 @@ def validate_pipeline(
             non_smoke_evidence_organizer = str(l2_5_record.get("status") or "").lower() == "real"
         production_freshness_errors = _validate_production_freshness(normalized, run, by_name, base)
         errors.extend(production_freshness_errors)
+        if normalized == ENGINE_DECISION:
+            errors.extend(_validate_decision_final_contract_gate(by_name, base))
 
     status = PIPELINE_COMPLETE if not errors else PIPELINE_BLOCKED
     production_freshness_valid = (not production_freshness_errors) if production else None
@@ -380,6 +390,50 @@ def validate_pipeline(
         "non_smoke_evidence_organizer": non_smoke_evidence_organizer,
         "production_valid_fresh_packet": production_valid_fresh_packet,
     }
+
+
+def _validate_decision_final_contract_gate(
+    by_name: dict[str, dict[str, Any]],
+    base_dir: Path | None,
+) -> list[str]:
+    errors: list[str] = []
+    if base_dir is None:
+        return [f"{FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT}:missing_base_dir"]
+    contract_path = base_dir / "decision_context_contract" / "decision_context_contract.json"
+    if not contract_path.is_file():
+        return [FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT]
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"{FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT}:invalid_json:{exc}"]
+
+    contract_errors: list[str] = []
+    contract_errors.extend(validate_contract_schema(contract))
+    contract_errors.extend(validate_required_fields(contract))
+    contract_errors.extend(validate_provenance(contract))
+    if contract_errors:
+        errors.extend(
+            f"{FINAL_VALIDATION_MISSING_DECISION_CONTEXT_CONTRACT}:{error}"
+            for error in dict.fromkeys(contract_errors)
+        )
+
+    final_record = by_name.get("final_controller_report")
+    if final_record is None:
+        errors.append("final_validation:missing_final_controller_report")
+        return errors
+    final_artifact = _resolve_path(str(final_record.get("artifact_path") or ""), base_dir)
+    if not final_artifact.is_file():
+        outputs = final_record.get("outputs") if isinstance(final_record.get("outputs"), dict) else {}
+        candidate = outputs.get("final_decision_report.md")
+        final_artifact = _resolve_path(str(candidate or ""), base_dir)
+    if not final_artifact.is_file():
+        errors.append("final_validation:final_decision_report_not_found")
+        return errors
+
+    final_text = final_artifact.read_text(encoding="utf-8", errors="replace")
+    gate_errors = validate_final_report_against_decision_context_contract(final_text, contract)
+    errors.extend(f"final_validation:{error}" for error in gate_errors)
+    return errors
 
 
 def _validate_production_freshness(
