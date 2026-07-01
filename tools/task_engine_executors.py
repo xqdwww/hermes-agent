@@ -1155,13 +1155,15 @@ def run_simulated_pipeline(mode: str, *, base_dir: str | Path) -> dict[str, Any]
     }
 
 
-def run_research_l1_l2_smoke(
+def _run_research_l1_l2(
     query: str,
     *,
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
+    execution_mode: str,
+    success_message: str,
+    blocked_message: str,
 ) -> dict[str, Any]:
-    """Run only RESEARCH L1/L2 with real adapters, then stop fail-closed."""
     executor = executor or LocalTaskEngineExecutor()
     stages: list[dict[str, Any]] = []
     research_stages = CANONICAL_STAGES[ENGINE_RESEARCH]
@@ -1209,19 +1211,53 @@ def run_research_l1_l2_smoke(
                 "status": "blocked",
                 "pipeline_status": PIPELINE_BLOCKED,
                 "blocked_stage": stage.stage_name,
-                "run": {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l2", "stages": stages},
-                "message": "Smoke test stopped fail-closed before final report.",
+                "run": {"mode": ENGINE_RESEARCH, "execution_mode": execution_mode, "stages": stages},
+                "message": blocked_message,
             }
 
-    run = {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l2", "stages": stages}
+    run = {"mode": ENGINE_RESEARCH, "execution_mode": execution_mode, "stages": stages}
     validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir)
     return {
         "status": "ok",
         "pipeline_status": PIPELINE_INCOMPLETE,
         "full_pipeline_validation": validation,
         "run": run,
-        "message": "L1/L2 smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+        "message": success_message,
     }
+
+
+def run_research_l1_l2_smoke(
+    query: str,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+) -> dict[str, Any]:
+    """Run only RESEARCH L1/L2 with real adapters, then stop fail-closed."""
+    return _run_research_l1_l2(
+        query,
+        base_dir=base_dir,
+        executor=executor,
+        execution_mode="real-smoke-l1-l2",
+        success_message="L1/L2 smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+        blocked_message="Smoke test stopped fail-closed before final report.",
+    )
+
+
+def run_research_l1_l2_real(
+    query: str,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+) -> dict[str, Any]:
+    """Run production RESEARCH L1/L2 with real adapters, then stop fail-closed."""
+    return _run_research_l1_l2(
+        query,
+        base_dir=base_dir,
+        executor=executor,
+        execution_mode="production-research-l1-l2",
+        success_message="L1/L2 production research stages completed. Full RESEARCH pipeline remains incomplete.",
+        blocked_message="Production RESEARCH stopped fail-closed before L2.5.",
+    )
 
 
 def run_research_l2_5_codex_handoff_smoke(
@@ -1305,12 +1341,84 @@ def run_research_l2_5_codex_handoff_smoke(
         }
 
 
+def run_research_l2_5_evidence_organizer_real(
+    prior_run: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Build production L2.5 evidence artifacts from current-run L1/L2 only."""
+    executor = executor or LocalTaskEngineExecutor()
+    stages = list(prior_run.get("stages", []))
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH][2]
+    try:
+        source_path, ddgs_path = _require_real_l2_5_inputs(stages, base_dir=base_dir, query=query)
+        metadata = _l2_5_provenance_metadata(base_dir=base_dir, query=query, source_path=source_path, ddgs_path=ddgs_path)
+        inputs = {
+            "source_candidates.json": str(source_path),
+            "ddgs_gap_sources.json": str(ddgs_path),
+            "original_question": query,
+            **metadata,
+        }
+        content = executor.run_codex_handoff(stage, inputs)
+        artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
+        _validate_real_l2_5_outputs(base_dir=base_dir, expected_metadata=metadata)
+        record = executor.make_stage_record(
+            stage,
+            base_dir=base_dir,
+            artifact_path=artifact_path,
+            outputs=outputs,
+            created=True,
+            valid=True,
+            status="real",
+            executor_model=stage.model,
+        )
+        stages.append(record.__dict__)
+        run = {"mode": ENGINE_RESEARCH, "execution_mode": "production-research-l1-l2-plus-l2_5", "stages": stages}
+        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir, production=True)
+        return {
+            "status": "ok",
+            "pipeline_status": PIPELINE_INCOMPLETE,
+            "full_pipeline_validation": validation,
+            "run": run,
+            "message": "L2.5 production evidence organizer completed from current-run L1/L2 artifacts.",
+        }
+    except Exception as exc:
+        outputs = planned_outputs(stage, base_dir)
+        record = make_stage_record(
+            stage,
+            base_dir=base_dir,
+            outputs=outputs,
+            artifact_path=Path(base_dir) / stage.stage_name,
+            created=False,
+            valid=False,
+            status="blocked",
+            executor_model=stage.model,
+        )
+        item = record.__dict__
+        item["error"] = str(exc)
+        stages.append(item)
+        return {
+            "status": "blocked",
+            "pipeline_status": PIPELINE_BLOCKED,
+            "blocked_stage": stage.stage_name,
+            "blocked_reason": str(exc),
+            "run": {"mode": ENGINE_RESEARCH, "execution_mode": "production-research-l1-l2-plus-l2_5", "stages": stages},
+            "message": "L2.5 production evidence organizer stopped fail-closed.",
+        }
+
+
 def run_research_l3_synthesis_smoke(
     prior_run: dict[str, Any],
     *,
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
     query: str = "",
+    _execution_mode: str = "real-smoke-l1-l3",
+    _production: bool = False,
+    _success_message: str = "L3 R1 synthesis smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+    _blocked_message: str = "L3 R1 synthesis smoke stopped fail-closed before L4.",
 ) -> dict[str, Any]:
     """Smoke L3 R1 synthesis from fresh L1/L2/L2.5 artifacts, then stop."""
     executor = executor or LocalTaskEngineExecutor()
@@ -1318,6 +1426,8 @@ def run_research_l3_synthesis_smoke(
     stage = CANONICAL_STAGES[ENGINE_RESEARCH][3]
     try:
         _require_fresh_prior_for_l3(stages, base_dir=base_dir)
+        if _production:
+            _require_real_stage_statuses(stages, consumer_stage=stage.stage_name)
         prompt = _r1_synthesis_prompt_from_artifacts(stages, base_dir=base_dir, query=query)
         content = executor.run_omlx_model(stage, stage.model, prompt)
         artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
@@ -1332,14 +1442,14 @@ def run_research_l3_synthesis_smoke(
             executor_model=getattr(executor, "last_executor_models", {}).get(stage.stage_name, stage.model),
         )
         stages.append(record.__dict__)
-        run = {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l3", "stages": stages}
-        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir)
+        run = {"mode": ENGINE_RESEARCH, "execution_mode": _execution_mode, "stages": stages}
+        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir, production=_production)
         return {
             "status": "ok",
             "pipeline_status": PIPELINE_INCOMPLETE,
             "full_pipeline_validation": validation,
             "run": run,
-            "message": "L3 R1 synthesis smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+            "message": _success_message,
         }
     except Exception as exc:
         outputs = planned_outputs(stage, base_dir)
@@ -1361,9 +1471,29 @@ def run_research_l3_synthesis_smoke(
             "status": "blocked",
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": stage.stage_name,
-            "run": {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l3", "stages": stages},
-            "message": "L3 R1 synthesis smoke stopped fail-closed before L4.",
+            "run": {"mode": ENGINE_RESEARCH, "execution_mode": _execution_mode, "stages": stages},
+            "message": _blocked_message,
         }
+
+
+def run_research_l3_synthesis_real(
+    prior_run: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Run production L3 after real current-run L1/L2/L2.5 artifacts."""
+    return run_research_l3_synthesis_smoke(
+        prior_run,
+        base_dir=base_dir,
+        executor=executor,
+        query=query,
+        _execution_mode="production-research-l1-l3",
+        _production=True,
+        _success_message="L3 production R1 synthesis completed. Full RESEARCH pipeline remains incomplete.",
+        _blocked_message="L3 production R1 synthesis stopped fail-closed before L4.",
+    )
 
 
 def run_research_l1_l3_smoke(
@@ -1383,12 +1513,33 @@ def run_research_l1_l3_smoke(
     return run_research_l3_synthesis_smoke(l2_5["run"], base_dir=base_dir, executor=executor, query=query)
 
 
+def run_research_l1_l3_real(
+    query: str,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+) -> dict[str, Any]:
+    """Run production RESEARCH L1/L2/L2.5/L3 and stop before L4."""
+    executor = executor or LocalTaskEngineExecutor()
+    l1_l2 = run_research_l1_l2_real(query, base_dir=base_dir, executor=executor)
+    if l1_l2.get("status") != "ok":
+        return l1_l2
+    l2_5 = run_research_l2_5_evidence_organizer_real(l1_l2["run"], base_dir=base_dir, executor=executor, query=query)
+    if l2_5.get("status") != "ok":
+        return l2_5
+    return run_research_l3_synthesis_real(l2_5["run"], base_dir=base_dir, executor=executor, query=query)
+
+
 def run_research_l4_gemini_audit_smoke(
     prior_run: dict[str, Any],
     *,
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
     query: str = "",
+    _execution_mode: str = "real-smoke-l1-l4",
+    _production: bool = False,
+    _success_message: str = "L4 Gemini audit smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+    _blocked_message: str = "L4 Gemini audit smoke stopped fail-closed before L5.",
 ) -> dict[str, Any]:
     """Smoke L4 Gemini audit from fresh L1/L2/L2.5/L3 artifacts, then stop."""
     executor = executor or LocalTaskEngineExecutor()
@@ -1396,6 +1547,8 @@ def run_research_l4_gemini_audit_smoke(
     stage = CANONICAL_STAGES[ENGINE_RESEARCH][4]
     try:
         _require_fresh_prior_for_l4(stages, base_dir=base_dir)
+        if _production:
+            _require_real_stage_statuses(stages, consumer_stage=stage.stage_name)
         prompt = _gemini_audit_prompt_from_artifacts(stages, base_dir=base_dir, query=query)
         content = executor.run_agy_gemini(stage, prompt, stage.model)
         artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
@@ -1410,14 +1563,14 @@ def run_research_l4_gemini_audit_smoke(
             executor_model=getattr(executor, "last_executor_models", {}).get(stage.stage_name, stage.model),
         )
         stages.append(record.__dict__)
-        run = {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l4", "stages": stages}
-        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir)
+        run = {"mode": ENGINE_RESEARCH, "execution_mode": _execution_mode, "stages": stages}
+        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir, production=_production)
         return {
             "status": "ok",
             "pipeline_status": PIPELINE_INCOMPLETE,
             "full_pipeline_validation": validation,
             "run": run,
-            "message": "L4 Gemini audit smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+            "message": _success_message,
         }
     except Exception as exc:
         outputs = planned_outputs(stage, base_dir)
@@ -1439,9 +1592,29 @@ def run_research_l4_gemini_audit_smoke(
             "status": "blocked",
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": stage.stage_name,
-            "run": {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l4", "stages": stages},
-            "message": "L4 Gemini audit smoke stopped fail-closed before L5.",
+            "run": {"mode": ENGINE_RESEARCH, "execution_mode": _execution_mode, "stages": stages},
+            "message": _blocked_message,
         }
+
+
+def run_research_l4_gemini_audit_real(
+    prior_run: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Run production L4 after real current-run L1-L3 artifacts."""
+    return run_research_l4_gemini_audit_smoke(
+        prior_run,
+        base_dir=base_dir,
+        executor=executor,
+        query=query,
+        _execution_mode="production-research-l1-l4",
+        _production=True,
+        _success_message="L4 production Gemini audit completed. Full RESEARCH pipeline remains incomplete.",
+        _blocked_message="L4 production Gemini audit stopped fail-closed before L5.",
+    )
 
 
 def run_research_l5_acceptance_smoke(
@@ -1450,13 +1623,18 @@ def run_research_l5_acceptance_smoke(
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
     query: str = "",
+    _execution_mode: str = "real-smoke-l1-l5",
+    _production: bool = False,
+    _accepted_message: str = "L5 acceptance completed. RESEARCH pipeline is complete; Decision phase was not entered.",
+    _rejected_message: str = "L5 acceptance rejected the research evidence packet. Decision phase was not entered.",
+    _blocked_message: str = "L5 acceptance smoke stopped fail-closed before Decision.",
 ) -> dict[str, Any]:
     """Smoke L5 controller acceptance from fresh L1-L4 artifacts, then stop."""
     executor = executor or LocalTaskEngineExecutor()
     stages = list(prior_run.get("stages", []))
     stage = CANONICAL_STAGES[ENGINE_RESEARCH][5]
     try:
-        _require_fresh_prior_for_l5(stages, base_dir=base_dir)
+        _require_fresh_prior_for_l5(stages, base_dir=base_dir, production=_production)
         packet = _research_acceptance_packet_from_artifacts(stages, base_dir=base_dir, query=query)
         content = executor.run_controller_acceptance(stage, packet)
         accepted = _l5_acceptance_text_is_accepted(content)
@@ -1472,8 +1650,8 @@ def run_research_l5_acceptance_smoke(
             executor_model=getattr(executor, "last_executor_models", {}).get(stage.stage_name, stage.model),
         )
         stages.append(record.__dict__)
-        run = {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l5", "stages": stages}
-        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir)
+        run = {"mode": ENGINE_RESEARCH, "execution_mode": _execution_mode, "stages": stages}
+        validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=base_dir, production=_production)
         if not accepted:
             return {
                 "status": "blocked",
@@ -1481,14 +1659,14 @@ def run_research_l5_acceptance_smoke(
                 "blocked_stage": stage.stage_name,
                 "full_pipeline_validation": validation,
                 "run": run,
-                "message": "L5 acceptance rejected the research evidence packet. Decision phase was not entered.",
+                "message": _rejected_message,
             }
         return {
             "status": "ok" if validation["valid"] else "blocked",
             "pipeline_status": validation["pipeline_status"],
             "full_pipeline_validation": validation,
             "run": run,
-            "message": "L5 acceptance completed. RESEARCH pipeline is complete; Decision phase was not entered.",
+            "message": _accepted_message,
         }
     except Exception as exc:
         outputs = planned_outputs(stage, base_dir)
@@ -1510,9 +1688,30 @@ def run_research_l5_acceptance_smoke(
             "status": "blocked",
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": stage.stage_name,
-            "run": {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l5", "stages": stages},
-            "message": "L5 acceptance smoke stopped fail-closed before Decision.",
+            "run": {"mode": ENGINE_RESEARCH, "execution_mode": _execution_mode, "stages": stages},
+            "message": _blocked_message,
         }
+
+
+def run_research_l5_acceptance_real(
+    prior_run: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Run production L5 acceptance after real current-run L1-L4 artifacts."""
+    return run_research_l5_acceptance_smoke(
+        prior_run,
+        base_dir=base_dir,
+        executor=executor,
+        query=query,
+        _execution_mode="production-research-full",
+        _production=True,
+        _accepted_message="L5 production acceptance completed. RESEARCH production pipeline is complete; Decision phase was not entered.",
+        _rejected_message="L5 production acceptance rejected the research evidence packet. Decision phase was not entered.",
+        _blocked_message="L5 production acceptance stopped fail-closed before Decision.",
+    )
 
 
 def run_research_l1_l4_smoke(
@@ -1529,6 +1728,20 @@ def run_research_l1_l4_smoke(
     return run_research_l4_gemini_audit_smoke(l1_l3["run"], base_dir=base_dir, executor=executor, query=query)
 
 
+def run_research_l1_l4_real(
+    query: str,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+) -> dict[str, Any]:
+    """Run production RESEARCH L1-L4 and stop before L5."""
+    executor = executor or LocalTaskEngineExecutor()
+    l1_l3 = run_research_l1_l3_real(query, base_dir=base_dir, executor=executor)
+    if l1_l3.get("status") != "ok":
+        return l1_l3
+    return run_research_l4_gemini_audit_real(l1_l3["run"], base_dir=base_dir, executor=executor, query=query)
+
+
 def run_research_l1_l5_smoke(
     query: str,
     *,
@@ -1541,6 +1754,20 @@ def run_research_l1_l5_smoke(
     if l1_l4.get("status") != "ok":
         return l1_l4
     return run_research_l5_acceptance_smoke(l1_l4["run"], base_dir=base_dir, executor=executor, query=query)
+
+
+def run_research_l1_l5_real(
+    query: str,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+) -> dict[str, Any]:
+    """Run production RESEARCH L1-L5 with real L2.5 evidence organizer."""
+    executor = executor or LocalTaskEngineExecutor()
+    l1_l4 = run_research_l1_l4_real(query, base_dir=base_dir, executor=executor)
+    if l1_l4.get("status") != "ok":
+        return l1_l4
+    return run_research_l5_acceptance_real(l1_l4["run"], base_dir=base_dir, executor=executor, query=query)
 
 
 def run_research_decision_intelligence_smoke(
@@ -5505,6 +5732,14 @@ def _require_fresh_prior_for_l3(stages: list[dict[str, Any]], *, base_dir: str |
             _assert_current_run_path(output, base, name)
 
 
+def _require_real_stage_statuses(stages: list[dict[str, Any]], *, consumer_stage: str) -> None:
+    for record in stages:
+        status = str(record.get("status") or "").lower()
+        name = str(record.get("stage_name") or "")
+        if status != "real":
+            raise RuntimeError(f"{consumer_stage}: {name} has non-real production input status={record.get('status')}")
+
+
 def _require_fresh_prior_for_l4(stages: list[dict[str, Any]], *, base_dir: str | Path) -> None:
     expected = ["L1_gemini_search", "L2_ddgs_supplement", "L2_5_codex_evidence_organizer", "L3_r1_synthesis"]
     actual = [stage.get("stage_name") for stage in stages]
@@ -6136,6 +6371,160 @@ L2_5_STUB_MARKERS = (
 )
 
 
+def _require_real_l2_5_inputs(
+    stages: list[dict[str, Any]],
+    *,
+    base_dir: str | Path,
+    query: str = "",
+) -> tuple[Path, Path]:
+    actual = [stage.get("stage_name") for stage in stages]
+    expected = ["L1_gemini_search", "L2_ddgs_supplement"]
+    if actual != expected:
+        raise RuntimeError(f"L2_5_codex_evidence_organizer: requires fresh L1/L2 stages in order, got={actual}")
+    base = Path(base_dir).resolve()
+    by_name = {str(stage.get("stage_name") or ""): stage for stage in stages}
+    l1 = by_name["L1_gemini_search"]
+    l2 = by_name["L2_ddgs_supplement"]
+    for record in (l1, l2):
+        name = str(record.get("stage_name") or "")
+        if record.get("created_in_current_run") is not True:
+            raise RuntimeError(f"L2_5_codex_evidence_organizer: {name} is not created_in_current_run")
+        if record.get("legacy_contaminated") is not False:
+            raise RuntimeError(f"L2_5_codex_evidence_organizer: {name} is legacy contaminated")
+        if record.get("valid_for_pipeline") is not True:
+            raise RuntimeError(f"L2_5_codex_evidence_organizer: {name} is not valid_for_pipeline")
+        if str(record.get("status") or "").lower() != "real":
+            raise RuntimeError(f"L2_5_codex_evidence_organizer: {name} is not a real current-run input")
+    source_path = _required_stage_output_path(l1, "source_candidates.json")
+    ddgs_path = _required_stage_output_path(l2, "ddgs_gap_sources.json")
+    _assert_current_run_path(source_path, base, "L1_gemini_search", consumer_stage="L2_5_codex_evidence_organizer")
+    _assert_current_run_path(ddgs_path, base, "L2_ddgs_supplement", consumer_stage="L2_5_codex_evidence_organizer")
+    _validate_l2_5_input_payloads(source_path, ddgs_path, query=query)
+    return source_path.resolve(), ddgs_path.resolve()
+
+
+def _required_stage_output_path(record: dict[str, Any], output_name: str) -> Path:
+    outputs = record.get("outputs") or {}
+    value = outputs.get(output_name) or record.get("artifact_path")
+    if not value:
+        raise RuntimeError(f"{record.get('stage_name')}: missing required output path for {output_name}")
+    path = Path(str(value)).expanduser()
+    if not path.exists():
+        raise RuntimeError(f"{record.get('stage_name')}: required output not found:{path}")
+    return path
+
+
+def _validate_l2_5_input_payloads(source_path: Path, ddgs_path: Path, *, query: str = "") -> None:
+    source_text = source_path.read_text(encoding="utf-8", errors="replace")
+    ddgs_text = ddgs_path.read_text(encoding="utf-8", errors="replace")
+    l1_payload = _load_jsonish_text(source_text)
+    l2_payload = _load_jsonish_text(ddgs_text)
+    l1_items = _list_from_jsonish(l1_payload.get("source_candidates") if isinstance(l1_payload, dict) else l1_payload)
+    l2_items = _list_from_jsonish(l2_payload)
+    if not l1_items:
+        raise RuntimeError("L2_5_codex_evidence_organizer: empty L1 source_candidates")
+    if not l2_items:
+        raise RuntimeError("L2_5_codex_evidence_organizer: empty L2 ddgs_gap_sources")
+
+    traceable_l1 = [item for item in l1_items if _l1_candidate_locator(item) and _l2_5_item_text(item).strip()]
+    traceable_l2 = [
+        item
+        for item in l2_items
+        if str(item.get("url") or "").strip() and (str(item.get("title") or "").strip() or str(item.get("snippet") or "").strip())
+    ]
+    if not traceable_l1:
+        raise RuntimeError("L2_5_codex_evidence_organizer: L1 source metadata is untraceable")
+    if not traceable_l2:
+        raise RuntimeError("L2_5_codex_evidence_organizer: L2 source metadata is untraceable")
+
+    query_terms = _l2_5_anchor_tokens(query, max_terms=12)
+    if query_terms:
+        combined_text = " ".join(_l2_5_item_text(item) for item in (l1_items + l2_items))
+        combined_lowered = combined_text.lower()
+        overlap_hits = sum(
+            1
+            for term in query_terms
+            if len(str(term or "")) >= 2 and (str(term).lower() in combined_lowered or str(term) in combined_text)
+        )
+        minimum_overlap = 2 if len(query_terms) >= 4 else 1
+        if overlap_hits < minimum_overlap:
+            raise RuntimeError("L2_5_codex_evidence_organizer: query_mismatch between current query and L1/L2 artifacts")
+
+
+def _l2_5_provenance_metadata(
+    *,
+    base_dir: str | Path,
+    query: str,
+    source_path: Path,
+    ddgs_path: Path,
+) -> dict[str, str]:
+    artifact_dir = str(Path(base_dir).resolve())
+    query_hash = "sha256:" + hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
+    return {
+        "current_run_id": Path(base_dir).resolve().name,
+        "query_hash": query_hash,
+        "current_query_hash": query_hash,
+        "current_artifact_dir": artifact_dir,
+        "source_artifact_path": f"{source_path.resolve()};{ddgs_path.resolve()}",
+        "generator": "real_l2_5_evidence_organizer",
+        "status": "real",
+    }
+
+
+def _with_l2_5_provenance(row: dict[str, str], metadata: dict[str, str], *, source_artifact_path: str = "") -> dict[str, str]:
+    item = dict(row)
+    item.update(
+        {
+            "current_run_id": metadata.get("current_run_id", ""),
+            "query_hash": metadata.get("query_hash", ""),
+            "source_artifact_path": source_artifact_path or metadata.get("source_artifact_path", ""),
+            "generator": metadata.get("generator", ""),
+            "status": metadata.get("status", ""),
+        }
+    )
+    return item
+
+
+def _l2_5_markdown_metadata_lines(metadata: dict[str, str]) -> list[str]:
+    return [
+        f"current_run_id: {metadata.get('current_run_id', '')}",
+        f"query_hash: {metadata.get('query_hash', '')}",
+        f"source_artifact_path: {metadata.get('source_artifact_path', '')}",
+        f"generator: {metadata.get('generator', '')}",
+        f"status: {metadata.get('status', '')}",
+    ]
+
+
+def _validate_real_l2_5_outputs(*, base_dir: str | Path, expected_metadata: dict[str, str]) -> None:
+    analysis = analyze_l2_5_evidence_organizer(base_dir)
+    if not analysis.get("l2_5_valid"):
+        raise RuntimeError(
+            "L2_5_codex_evidence_organizer: real output validation failed:"
+            + ",".join(str(item) for item in analysis.get("missing_or_invalid_artifacts", []))
+        )
+    stage_dir = Path(base_dir) / "L2_5_codex_evidence_organizer"
+    sources = _read_csv_dicts(stage_dir / "sources.csv")
+    evidence = _read_csv_dicts(stage_dir / "evidence.csv")
+    if not sources or not evidence:
+        raise RuntimeError("L2_5_codex_evidence_organizer: sources/evidence output is empty")
+    for collection_name, rows in (("sources.csv", sources), ("evidence.csv", evidence)):
+        for row in rows:
+            for field in ("current_run_id", "query_hash", "source_artifact_path", "generator", "status"):
+                if not str(row.get(field) or "").strip():
+                    raise RuntimeError(f"L2_5_codex_evidence_organizer: {collection_name} missing provenance field {field}")
+            if row.get("current_run_id") != expected_metadata.get("current_run_id"):
+                raise RuntimeError(f"L2_5_codex_evidence_organizer: {collection_name} current_run_id mismatch")
+            if row.get("query_hash") != expected_metadata.get("query_hash"):
+                raise RuntimeError(f"L2_5_codex_evidence_organizer: {collection_name} query_hash mismatch")
+            if row.get("generator") != "real_l2_5_evidence_organizer" or row.get("status") != "real":
+                raise RuntimeError(f"L2_5_codex_evidence_organizer: {collection_name} non-real provenance")
+    for filename in ("claims.md", "gaps.md"):
+        text = (stage_dir / filename).read_text(encoding="utf-8", errors="replace")
+        for line in _l2_5_markdown_metadata_lines(expected_metadata):
+            if line not in text:
+                raise RuntimeError(f"L2_5_codex_evidence_organizer: {filename} missing provenance line {line.split(':', 1)[0]}")
+
+
 def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, str]:
     source_path = Path(str(inputs.get("source_candidates.json") or ""))
     ddgs_path = Path(str(inputs.get("ddgs_gap_sources.json") or ""))
@@ -6154,6 +6543,27 @@ def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, s
     evidence_rows = _l2_5_evidence_rows(source_rows)
     claims = _l2_5_claims(evidence_rows, question, sample_schema)
     gaps = _l2_5_gaps(source_rows, evidence_rows, question, sample_schema)
+    metadata = {
+        "current_run_id": str(inputs.get("current_run_id") or ""),
+        "query_hash": str(inputs.get("query_hash") or inputs.get("current_query_hash") or ""),
+        "source_artifact_path": str(inputs.get("source_artifact_path") or f"{source_path};{ddgs_path}"),
+        "generator": str(inputs.get("generator") or "l2_5_evidence_organizer_builder"),
+        "status": str(inputs.get("status") or "organized"),
+    }
+    source_artifact_by_id: dict[str, str] = {}
+    for row in source_rows:
+        source_id = row.get("source_id", "")
+        if not source_id:
+            continue
+        source_artifact_by_id[source_id] = str(source_path if row.get("origin_stage") == "L1_gemini_search" else ddgs_path)
+    source_rows_with_provenance = [
+        _with_l2_5_provenance(row, metadata, source_artifact_path=source_artifact_by_id.get(row.get("source_id", ""), ""))
+        for row in source_rows
+    ]
+    evidence_rows_with_provenance = [
+        _with_l2_5_provenance(row, metadata, source_artifact_path=source_artifact_by_id.get(row.get("source_id", ""), ""))
+        for row in evidence_rows
+    ]
     insufficient = len(source_rows) < 3 or len(evidence_rows) < 3 or len(claims) < 4 or len(gaps) < 3
     request = {
         "stage": "L2_5_codex_evidence_organizer",
@@ -6169,6 +6579,7 @@ def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, s
         "claim_rows": len(claims),
         "gap_rows": len(gaps),
         "insufficient_sources": insufficient,
+        "provenance": metadata,
     }
     request_md = "\n".join(
         [
@@ -6187,15 +6598,38 @@ def build_l2_5_evidence_organizer_outputs(inputs: dict[str, Any]) -> dict[str, s
         "evidence_runner_*.request.md": request_md + "\n",
         "evidence_runner_*.request.json": json.dumps(request, ensure_ascii=False, indent=2) + "\n",
         "sources.csv": _csv_text(
-            ["source_id", "title_or_source_name", "url_or_path_or_domain", "origin_stage", "relevance_to_question", "limitation_or_note"],
-            source_rows,
+            [
+                "source_id",
+                "title_or_source_name",
+                "url_or_path_or_domain",
+                "origin_stage",
+                "relevance_to_question",
+                "limitation_or_note",
+                "current_run_id",
+                "query_hash",
+                "source_artifact_path",
+                "generator",
+                "status",
+            ],
+            source_rows_with_provenance,
         ),
         "evidence.csv": _csv_text(
-            ["claim_id", "source_id", "evidence_text", "strength_or_limit", "support_type"],
-            evidence_rows,
+            [
+                "claim_id",
+                "source_id",
+                "evidence_text",
+                "strength_or_limit",
+                "support_type",
+                "current_run_id",
+                "query_hash",
+                "source_artifact_path",
+                "generator",
+                "status",
+            ],
+            evidence_rows_with_provenance,
         ),
-        "claims.md": _claims_markdown(claims, insufficient=insufficient),
-        "gaps.md": _gaps_markdown(gaps, insufficient=insufficient),
+        "claims.md": _claims_markdown(claims, insufficient=insufficient, metadata=metadata),
+        "gaps.md": _gaps_markdown(gaps, insufficient=insufficient, metadata=metadata),
     }
 
 
@@ -6591,15 +7025,31 @@ def _csv_text(fieldnames: list[str], rows: list[dict[str, str]]) -> str:
     return output.getvalue()
 
 
-def _claims_markdown(claims: list[dict[str, str]], *, insufficient: bool) -> str:
+def _claims_markdown(
+    claims: list[dict[str, str]],
+    *,
+    insufficient: bool,
+    metadata: dict[str, str] | None = None,
+) -> str:
     lines = ["# claims", "", f"insufficient_sources: {str(insufficient).lower()}", ""]
+    if metadata:
+        lines.extend(_l2_5_markdown_metadata_lines(metadata))
+        lines.append("")
     for item in claims:
         lines.append(f"- {item['claim_id']}: {item['claim']} [source_id: {item['source_id']}]")
     return "\n".join(lines) + "\n"
 
 
-def _gaps_markdown(gaps: list[str], *, insufficient: bool) -> str:
+def _gaps_markdown(
+    gaps: list[str],
+    *,
+    insufficient: bool,
+    metadata: dict[str, str] | None = None,
+) -> str:
     lines = ["# gaps", "", f"insufficient_sources: {str(insufficient).lower()}", ""]
+    if metadata:
+        lines.extend(_l2_5_markdown_metadata_lines(metadata))
+        lines.append("")
     lines.extend(f"- {gap}" for gap in gaps)
     return "\n".join(lines) + "\n"
 
@@ -13210,13 +13660,21 @@ __all__ = [
     "run_research_decision_premise_auditor_smoke",
     "run_research_decision_structure_mapper_smoke",
     "run_research_decision_supplementary_search_smoke",
+    "run_research_l2_5_evidence_organizer_real",
     "run_research_l2_5_codex_handoff_smoke",
+    "run_research_l1_l2_real",
     "run_research_l1_l2_smoke",
+    "run_research_l1_l3_real",
     "run_research_l1_l3_smoke",
+    "run_research_l1_l4_real",
     "run_research_l1_l4_smoke",
+    "run_research_l1_l5_real",
     "run_research_l1_l5_smoke",
+    "run_research_l3_synthesis_real",
     "run_research_l3_synthesis_smoke",
+    "run_research_l4_gemini_audit_real",
     "run_research_l4_gemini_audit_smoke",
+    "run_research_l5_acceptance_real",
     "run_research_l5_acceptance_smoke",
     "run_simulated_pipeline",
 ]

@@ -59,6 +59,11 @@ def test_research_full_request_selects_task_engine_runner_without_real_pipeline(
         "run_research_l1_l5_smoke",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("RESEARCH full must not enter smoke")),
     )
+    monkeypatch.setattr(
+        runner,
+        "run_research_l1_l5_real",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry intercept must not run real RESEARCH full")),
+    )
 
     result = _load(
         runner.task_engine_runner(
@@ -66,18 +71,19 @@ def test_research_full_request_selects_task_engine_runner_without_real_pipeline(
             mode=ENGINE_RESEARCH,
             action="full",
             base_dir=str(tmp_path / "research"),
+            execution_intent="dry_run",
         )
     )
 
     dumped = json.dumps(result, ensure_ascii=False)
-    assert result["status"] == "blocked"
-    assert result["BLOCKED_STATUS"] == PIPELINE_BLOCKED
-    assert result["pipeline_status"] == PIPELINE_BLOCKED
-    assert result["blocked_stage"] == "L2_5_codex_evidence_organizer"
-    assert runner.RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED in result["blocked_reason"]
+    assert result["status"] == "ok"
+    assert result["not_executed"] is True
+    assert result["execution_state"] == "full_dry_intercept_not_executed"
+    assert result["pipeline_status"] == "PIPELINE_INCOMPLETE"
+    assert result["planned_l2_5_status"] == "real"
     assert "real-smoke-l1-l5" not in dumped
     assert result["full_run_request"]["requested_action"] == "full"
-    assert result["full_run_request"]["effective_action"] != "smoke-research-l1-l5"
+    assert result["full_run_request"]["effective_action"] == runner.RESEARCH_FULL_REAL_ACTION
     assert result["prompt_path_policy"]["artifact_dir"] == str(tmp_path / "research")
     assert not (tmp_path / "research" / "evidence_backed_sidecar").exists()
     _assert_current_runner_full_contract(result)

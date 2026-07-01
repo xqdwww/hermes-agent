@@ -43,6 +43,7 @@ from tools.task_engine_executors import (
     run_research_decision_l1_l7_smoke,
     run_research_decision_l1_l8_smoke,
     run_research_decision_l1_l9_smoke,
+    run_research_l1_l5_real,
     run_research_l1_l2_smoke,
     run_research_l1_l3_smoke,
     run_research_l1_l4_smoke,
@@ -76,6 +77,7 @@ UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION = (
 RESEARCH_DECISION_SMOKE_INTENT_REQUIRED = "explicit_smoke_or_integration_intent_required_for_archived_research_decision"
 RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED = "L2_5_REAL_EVIDENCE_ORGANIZER_NOT_IMPLEMENTED"
 BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION = "blocked-research-full-real-l2-5-missing"
+RESEARCH_FULL_REAL_ACTION = "research-l1-l5"
 PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE = "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE"
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
 TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
@@ -490,6 +492,31 @@ def task_engine_runner(
             ensure_ascii=False,
             indent=2,
         )
+
+    if action == RESEARCH_FULL_REAL_ACTION:
+        if normalize_mode(resolved_mode) != ENGINE_RESEARCH:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "pipeline_status": PIPELINE_BLOCKED,
+                    "error": "Pure RESEARCH full is only valid for RESEARCH mode.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "research_l1_l5")
+        if execution_intent == "dry_run":
+            payload = _research_full_real_dry_intercept_response(
+                artifact_dir=target_dir,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            )
+            _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        result = run_research_l1_l5_real(query, base_dir=target_dir)
+        return _finalize_result(result, target_dir=target_dir)
 
     if action == "smoke-research-l1-l2":
         if normalize_mode(resolved_mode) not in {ENGINE_RESEARCH, ENGINE_RESEARCH_DECISION}:
@@ -1237,12 +1264,18 @@ def _resolve_mode(mode: str, query: str) -> str | None:
 def _full_action_for_mode(mode: str) -> str:
     normalized = normalize_mode(mode)
     if normalized == ENGINE_RESEARCH:
+        if _research_full_real_path_available():
+            return RESEARCH_FULL_REAL_ACTION
         return BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION
     if normalized == ENGINE_DECISION:
         return "smoke-decision-final"
     if normalized == ENGINE_RESEARCH_DECISION:
         return "archived-research-decision"
     return "dry-run"
+
+
+def _research_full_real_path_available() -> bool:
+    return callable(globals().get("run_research_l1_l5_real"))
 
 
 def _research_decision_archive_allowed(explicit: bool = False) -> bool:
@@ -1283,6 +1316,53 @@ def _research_full_real_l2_5_missing_response(
         ),
         "recommended_next_step": (
             "implement real L2.5 evidence organizer or explicitly run non-production smoke test"
+        ),
+    }
+    _attach_full_run_entrypoint_metadata(
+        payload,
+        target_dir=artifact_dir,
+        mode=ENGINE_RESEARCH,
+        requested_action=requested_action,
+        effective_action=effective_action,
+        emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+        evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+    )
+    return payload
+
+
+def _research_full_real_dry_intercept_response(
+    *,
+    artifact_dir: str | Path,
+    requested_action: str = "full",
+    effective_action: str = RESEARCH_FULL_REAL_ACTION,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
+) -> dict[str, Any]:
+    payload = {
+        "status": "ok",
+        "pipeline_status": "PIPELINE_INCOMPLETE",
+        "mode": ENGINE_RESEARCH,
+        "action": "full",
+        "effective_action": effective_action,
+        "artifact_dir": str(Path(artifact_dir).resolve()),
+        "not_executed": True,
+        "execution_state": "full_dry_intercept_not_executed",
+        "production_run": True,
+        "production_valid": False,
+        "evidence_freshness_valid": False,
+        "current_run_artifact": False,
+        "query_matched": None,
+        "non_smoke_evidence_organizer": None,
+        "production_valid_fresh_packet": False,
+        "planned_execution_mode": "production-research-full",
+        "planned_l2_5_status": "real",
+        "planned_l2_5_generator": "real_l2_5_evidence_organizer",
+        "real_executor_calls": [],
+        "model_or_network_calls": [],
+        "plan": build_dry_run_plan(ENGINE_RESEARCH, base_dir=artifact_dir),
+        "message": (
+            "Dry intercept only: RESEARCH full would use the pure production path with "
+            "real L2.5 evidence organizer. No executors, models, search, or network calls were made."
         ),
     }
     _attach_full_run_entrypoint_metadata(

@@ -197,6 +197,11 @@ def test_research_full_does_not_map_to_smoke_l1_l5(tmp_path: Path, monkeypatch) 
         "run_research_l1_l5_smoke",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("RESEARCH full must not enter smoke")),
     )
+    monkeypatch.setattr(
+        runner,
+        "run_research_l1_l5_real",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry intercept must not run real full")),
+    )
 
     result = _load(
         runner.task_engine_runner(
@@ -204,18 +209,23 @@ def test_research_full_does_not_map_to_smoke_l1_l5(tmp_path: Path, monkeypatch) 
             mode=ENGINE_RESEARCH,
             action="full",
             base_dir=str(tmp_path / "research"),
+            execution_intent="dry_run",
         )
     )
 
     dumped = json.dumps(result, ensure_ascii=False)
-    assert result["status"] == "blocked"
-    assert result["pipeline_status"] == PIPELINE_BLOCKED
-    assert result["full_run_request"]["effective_action"] != "smoke-research-l1-l5"
+    assert result["status"] == "ok"
+    assert result["pipeline_status"] == "PIPELINE_INCOMPLETE"
+    assert result["not_executed"] is True
+    assert result["planned_l2_5_status"] == "real"
+    assert result["full_run_request"]["effective_action"] == runner.RESEARCH_FULL_REAL_ACTION
     assert "real-smoke-l1-l5" not in dumped
     assert "smoke-research-l1-l5" not in result["full_run_request"]["effective_action"]
 
 
-def test_research_full_blocks_when_l2_5_real_not_implemented(tmp_path: Path) -> None:
+def test_research_full_blocks_when_l2_5_real_not_implemented(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(runner, "_research_full_real_path_available", lambda: False)
+
     result = _load(
         runner.task_engine_runner(
             query="RESEARCH production full-run with no smoke intent.",
@@ -233,6 +243,46 @@ def test_research_full_blocks_when_l2_5_real_not_implemented(tmp_path: Path) -> 
     assert result["recommended_next_step"] == (
         "implement real L2.5 evidence organizer or explicitly run non-production smoke test"
     )
+
+
+def test_research_full_available_path_uses_pure_research_runner(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[str, Path]] = []
+
+    def fake_real(query: str, *, base_dir: str | Path) -> dict:
+        calls.append((query, Path(base_dir)))
+        return {
+            "status": "blocked",
+            "pipeline_status": "PIPELINE_INCOMPLETE",
+            "run": {
+                "mode": ENGINE_RESEARCH,
+                "execution_mode": "production-research-full",
+                "stages": [],
+            },
+            "full_pipeline_validation": {"valid": False},
+        }
+
+    monkeypatch.setattr(
+        runner,
+        "run_research_l1_l5_smoke",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("production full must not enter smoke")),
+    )
+    monkeypatch.setattr(runner, "run_research_l1_l5_real", fake_real)
+
+    result = _load(
+        runner.task_engine_runner(
+            query="RESEARCH production full-run with real L2.5 available.",
+            mode=ENGINE_RESEARCH,
+            action="full",
+            base_dir=str(tmp_path / "research"),
+        )
+    )
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert calls == [("RESEARCH production full-run with real L2.5 available.", tmp_path / "research")]
+    assert result["full_run_request"]["effective_action"] == runner.RESEARCH_FULL_REAL_ACTION
+    assert result["run"]["execution_mode"] == "production-research-full"
+    assert "smoke-research-l1-l5" not in dumped
+    assert "real-smoke-l1-l5" not in dumped
 
 
 def test_allow_archived_requires_explicit_smoke_intent(tmp_path: Path, monkeypatch) -> None:
@@ -297,6 +347,16 @@ def test_l5_acceptance_rejects_handoff_smoke_in_production(tmp_path: Path) -> No
         )
 
 
+def test_l5_acceptance_allows_real_l2_5_in_production(tmp_path: Path) -> None:
+    run = _research_run(tmp_path, l2_5_status="real")
+
+    executors._require_fresh_prior_for_l5(
+        run["stages"][:5],
+        base_dir=tmp_path,
+        production=True,
+    )
+
+
 def test_validate_pipeline_rejects_non_real_stage_for_production(tmp_path: Path) -> None:
     run = _research_run(tmp_path, l2_5_status="handoff-smoke")
 
@@ -323,6 +383,17 @@ def test_current_run_fresh_not_equal_production_valid(tmp_path: Path) -> None:
     assert validation["non_smoke_evidence_organizer"] is False
     assert validation["production_valid_fresh_packet"] is False
     assert validation["pipeline_status"] == PIPELINE_BLOCKED
+
+
+def test_validate_pipeline_accepts_all_real_research_path_for_production(tmp_path: Path) -> None:
+    run = _research_run(tmp_path, l2_5_status="real")
+
+    validation = validate_pipeline(ENGINE_RESEARCH, run, base_dir=tmp_path, production=True)
+
+    assert validation["pipeline_status"] == PIPELINE_COMPLETE
+    assert validation["production_freshness_valid"] is True
+    assert validation["non_smoke_evidence_organizer"] is True
+    assert validation["production_valid_fresh_packet"] is True
 
 
 def test_explicit_smoke_research_l1_l5_still_non_production(tmp_path: Path, monkeypatch) -> None:
