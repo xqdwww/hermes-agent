@@ -30,6 +30,7 @@ from tools.task_engine_contracts import (
 from tools.passive_intelligence_guard import classify_skill_triggers
 from tools.task_engine_executors import (
     _research_evidence_packet_quality_error,
+    run_decision_full_real,
     run_decision_final_smoke,
     run_agy_preflight,
     run_omlx_preflight,
@@ -78,6 +79,7 @@ RESEARCH_DECISION_SMOKE_INTENT_REQUIRED = "explicit_smoke_or_integration_intent_
 RESEARCH_FULL_REAL_L2_5_NOT_IMPLEMENTED = "L2_5_REAL_EVIDENCE_ORGANIZER_NOT_IMPLEMENTED"
 BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION = "blocked-research-full-real-l2-5-missing"
 RESEARCH_FULL_REAL_ACTION = "research-l1-l5"
+DECISION_FULL_REAL_ACTION = "decision-full"
 PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE = "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE"
 TERMINOLOGY_LEAKAGE = "TERMINOLOGY_LEAKAGE"
 TASK_ENGINE_RUNNER_ENTRYPOINT = "task_engine_runner"
@@ -124,6 +126,7 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                         "simulated-run",
                         "validate",
                         "render",
+                        "decision-full",
                         "smoke-decision-final",
                         "smoke-research-l1-l2",
                         "smoke-research-l1-l3",
@@ -152,7 +155,7 @@ TASK_ENGINE_RUNNER_SCHEMA = {
                     ],
                     "description": (
                         "contract: return canonical contract. agy-preflight: check AGY auth/model list only. omlx-preflight: check OMLX auth/admin/model visibility only. dry-run: return StageRecord plan without model calls. "
-                        "simulated-run: write fake artifacts and validate/render. smoke-decision-final: complete real DECISION 10-stage smoke without RESEARCH L1-L5. validate: validate run. "
+                        "simulated-run: write fake artifacts and validate/render. decision-full: complete production DECISION D1-D10 against a supplied current research packet without rerunning RESEARCH. smoke-decision-final: explicit non-production DECISION 10-stage smoke without RESEARCH L1-L5. validate: validate run. "
                         "render: validate and render final output. smoke-research-l1-l2: real AGY/DDGS smoke for RESEARCH L1/L2 only. "
                         "smoke-research-l1-l3: real RESEARCH L1/L2/L2.5/L3 smoke only. "
                         "smoke-research-l1-l4: real RESEARCH L1/L2/L2.5/L3/L4 smoke only. "
@@ -576,6 +579,65 @@ def task_engine_runner(
             )
         target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_RESEARCH, "real_smoke_l1_l5")
         result = run_research_l1_l5_smoke(query, base_dir=target_dir)
+        return _finalize_result(result, target_dir=target_dir)
+
+    if action == DECISION_FULL_REAL_ACTION:
+        if normalize_mode(resolved_mode) != ENGINE_DECISION:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "pipeline_status": PIPELINE_BLOCKED,
+                    "error": "DECISION full is only valid for DECISION mode.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        target_dir = _resolve_artifact_dir(run_base_dir, ENGINE_DECISION, "decision_full")
+        try:
+            resolved_research_packet_path = _resolve_decision_research_packet_path(
+                query=query,
+                mode=resolved_mode,
+                base_dir=run_base_dir,
+                research_packet_path=research_packet_path,
+            )
+        except _ResearchPacketDiscoveryBlocked as exc:
+            payload = {
+                "status": "blocked",
+                "BLOCKED_STATUS": PIPELINE_BLOCKED,
+                "pipeline_status": PIPELINE_BLOCKED,
+                "blocked_stage": "research_packet_discovery",
+                "blocked_reason": str(exc),
+                "artifact_dir": str(target_dir),
+                "execution_state": "blocked",
+                "not_executed": True,
+                "message": "DECISION requested latest research packet, but no valid new RESEARCH packet was found.",
+            }
+            _attach_full_run_entrypoint_metadata(
+                payload,
+                target_dir=target_dir,
+                mode=resolved_mode,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            )
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        if execution_intent == "dry_run":
+            payload = _decision_full_real_dry_intercept_response(
+                artifact_dir=target_dir,
+                research_packet_path=resolved_research_packet_path,
+                requested_action=requested_action,
+                effective_action=action,
+                emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+                evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+            )
+            _attach_passive_guard_debug(payload, query=query, enabled=passive_guard_debug)
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        kwargs: dict[str, Any] = {"base_dir": target_dir}
+        if resolved_research_packet_path:
+            kwargs["research_packet_path"] = resolved_research_packet_path
+        result = run_decision_full_real(query, **kwargs)
+        result = _mark_decision_full_production_result(result, research_packet_path=resolved_research_packet_path)
         return _finalize_result(result, target_dir=target_dir)
 
     if action == "smoke-decision-final":
@@ -1268,7 +1330,7 @@ def _full_action_for_mode(mode: str) -> str:
             return RESEARCH_FULL_REAL_ACTION
         return BLOCKED_RESEARCH_FULL_REAL_L2_5_MISSING_ACTION
     if normalized == ENGINE_DECISION:
-        return "smoke-decision-final"
+        return DECISION_FULL_REAL_ACTION
     if normalized == ENGINE_RESEARCH_DECISION:
         return "archived-research-decision"
     return "dry-run"
@@ -1393,6 +1455,79 @@ def _research_full_real_dry_intercept_response(
         evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
     )
     return payload
+
+
+def _decision_full_real_dry_intercept_response(
+    *,
+    artifact_dir: str | Path,
+    research_packet_path: str | None,
+    requested_action: str = "full",
+    effective_action: str = DECISION_FULL_REAL_ACTION,
+    emit_evidence_backed_sidecar: bool = False,
+    evidence_backed_sidecar_stage: str = "status_only",
+) -> dict[str, Any]:
+    payload = {
+        "status": "ok",
+        "pipeline_status": "PIPELINE_INCOMPLETE",
+        "mode": ENGINE_DECISION,
+        "action": "full",
+        "effective_action": effective_action,
+        "artifact_dir": str(Path(artifact_dir).resolve()),
+        "research_packet_path": str(research_packet_path or ""),
+        "not_executed": True,
+        "execution_state": "full_dry_intercept_not_executed",
+        "production_run": True,
+        "production_valid": False,
+        "planned_execution_mode": "production-decision-full",
+        "selected_execution_mode": "production-decision-full",
+        "selected_action_after_normalization": effective_action,
+        "selected_handler": "run_decision_full_real",
+        "selected_handler_source": "tools.task_engine_executors.run_decision_full_real",
+        "stage_b_only": True,
+        "research_rerun_planned": False,
+        "production_validation_enabled": True,
+        "expected_outputs": [
+            "convergence_report/convergence_report.md",
+            "external_calibration/external_calibration.md",
+            "final_controller_report/final_decision_report.md",
+        ],
+        "forbidden_handler_checks": {
+            "run_research_l1_l5_real": False,
+            "run_research_decision_l1_l16_smoke": False,
+            "legacy_engine_route": False,
+        },
+        "real_executor_calls": [],
+        "model_or_network_calls": [],
+        "plan": build_dry_run_plan(ENGINE_DECISION, base_dir=artifact_dir),
+        "message": (
+            "Dry intercept only: DECISION full would run Stage B against the supplied "
+            "current research_evidence_packet.md. No executors, models, search, or network calls were made."
+        ),
+    }
+    _attach_full_run_entrypoint_metadata(
+        payload,
+        target_dir=artifact_dir,
+        mode=ENGINE_DECISION,
+        requested_action=requested_action,
+        effective_action=effective_action,
+        emit_evidence_backed_sidecar=emit_evidence_backed_sidecar,
+        evidence_backed_sidecar_stage=evidence_backed_sidecar_stage,
+    )
+    return payload
+
+
+def _mark_decision_full_production_result(result: dict[str, Any], *, research_packet_path: str | None) -> dict[str, Any]:
+    run = result.get("run") if isinstance(result.get("run"), dict) else {}
+    if run.get("mode") == ENGINE_DECISION:
+        run["execution_mode"] = "production-decision-full"
+    result["production_run"] = True
+    result["research_rerun_used"] = False
+    result["research_packet_path_used"] = str(research_packet_path or "")
+    result["production_valid"] = bool((result.get("full_pipeline_validation") or {}).get("valid"))
+    message = str(result.get("message") or "")
+    if "smoke" in message.lower():
+        result["message"] = message.replace(" smoke", "").replace("Smoke", "Production")
+    return result
 
 
 def _is_archived_research_decision_real_action(mode: str | None, action: str) -> bool:
@@ -1877,6 +2012,7 @@ __all__ = [
     "RESEARCH_DECISION_COMBINED_FULL_REQUIRES_FRESH_TWO_STAGE",
     "UNSAFE_ARCHIVED_RESEARCH_DECISION_OVERRIDE_FOR_PRODUCTION",
     "RESEARCH_DECISION_SMOKE_INTENT_REQUIRED",
+    "DECISION_FULL_REAL_ACTION",
     "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE",
     "TERMINOLOGY_LEAKAGE",
     "apply_legacy_research_decision_term_guard",

@@ -124,7 +124,82 @@ def test_decision_full_blocked_latest_packet_returns_blocked_status_not_confirma
     assert result["artifact_dir"] == str(tmp_path / "decision")
     assert result["execution_state"] == "blocked"
     assert result["not_executed"] is True
-    assert result["full_run_request"]["effective_action"] == "smoke-decision-final"
+    assert result["full_run_request"]["effective_action"] == runner.DECISION_FULL_REAL_ACTION
+    _assert_current_runner_full_contract(result)
+
+
+def test_decision_full_dry_intercept_does_not_execute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text("research_evidence_packet\naccepted: true\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner,
+        "run_decision_full_real",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry intercept must not run DECISION full")),
+    )
+
+    result = _load(
+        runner.task_engine_runner(
+            query="这是一个决策任务。请用 task_engine_runner full 执行。",
+            mode=ENGINE_DECISION,
+            action="full",
+            research_packet_path=str(packet),
+            base_dir=str(tmp_path / "decision"),
+            execution_intent="dry_run",
+        )
+    )
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert result["status"] == "ok"
+    assert result["not_executed"] is True
+    assert result["execution_state"] == "full_dry_intercept_not_executed"
+    assert result["selected_handler"] == "run_decision_full_real"
+    assert result["selected_execution_mode"] == "production-decision-full"
+    assert result["research_packet_path"] == str(packet)
+    assert result["real_executor_calls"] == []
+    assert result["model_or_network_calls"] == []
+    assert "real-smoke-decision-final" not in dumped
+    assert result["full_run_request"]["effective_action"] == runner.DECISION_FULL_REAL_ACTION
+    _assert_current_runner_full_contract(result)
+
+
+def test_decision_full_result_is_labeled_production_not_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    packet = tmp_path / "research_evidence_packet.md"
+    packet.write_text("research_evidence_packet\naccepted: true\n", encoding="utf-8")
+
+    def fake_decision_full(query: str, *, base_dir: str, research_packet_path: str | None = None) -> dict:
+        return {
+            "status": "ok",
+            "pipeline_status": "PIPELINE_COMPLETE",
+            "full_pipeline_validation": {"valid": True, "stage_count": 10},
+            "run": {
+                "mode": ENGINE_DECISION,
+                "execution_mode": "real-smoke-decision-final",
+                "stages": [],
+            },
+            "message": "DECISION final_controller_report smoke completed.",
+        }
+
+    monkeypatch.setattr(runner, "run_decision_full_real", fake_decision_full)
+
+    result = _load(
+        runner.task_engine_runner(
+            query="这是一个决策任务。请用 task_engine_runner full 执行。",
+            mode=ENGINE_DECISION,
+            action="full",
+            research_packet_path=str(packet),
+            base_dir=str(tmp_path / "decision"),
+        )
+    )
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert result["status"] == "ok"
+    assert result["run"]["execution_mode"] == "production-decision-full"
+    assert result["production_run"] is True
+    assert result["research_rerun_used"] is False
+    assert result["research_packet_path_used"] == str(packet)
+    assert result["full_run_request"]["effective_action"] == runner.DECISION_FULL_REAL_ACTION
+    assert "real-smoke-decision-final" not in dumped
+    assert "non_production_smoke_run" not in result
     _assert_current_runner_full_contract(result)
 
 

@@ -10956,7 +10956,10 @@ def test_task_engine_runner_decision_final_action_does_not_use_research(tmp_path
     )
 
     assert result["status"] == "ok"
-    assert result["pipeline_status"] == PIPELINE_COMPLETE
+    assert result["pipeline_status"] == "PIPELINE_COMPLETE_NON_PRODUCTION_SMOKE"
+    assert result["structural_pipeline_status"] == PIPELINE_COMPLETE
+    assert result["non_production_smoke_run"] is True
+    assert result["production_valid"] is False
     assert result["artifact_dir"] == str(tmp_path)
     assert len(calls) == 1
 

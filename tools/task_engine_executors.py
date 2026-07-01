@@ -2832,11 +2832,24 @@ def run_decision_final_smoke(
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
     research_packet_path: str | Path | None = None,
+    production: bool = False,
 ) -> dict[str, Any]:
     """Run complete DECISION D1-D10 without entering RESEARCH L1-L5."""
     executor = executor or LocalTaskEngineExecutor()
     stages: list[dict[str, Any]] = []
     specs = CANONICAL_STAGES[ENGINE_DECISION]
+    execution_mode = "production-decision-full" if production else "real-smoke-decision-final"
+    blocked_message = "DECISION full stopped fail-closed." if production else "DECISION smoke stopped fail-closed."
+    complete_message = (
+        "DECISION full completed."
+        if production
+        else "DECISION final_controller_report smoke completed."
+    )
+    failed_message = (
+        "DECISION full failed validation."
+        if production
+        else "DECISION final_controller_report smoke failed validation."
+    )
 
     def blocked(stage: StageSpec, exc: Exception) -> dict[str, Any]:
         outputs = planned_outputs(stage, base_dir)
@@ -2859,8 +2872,8 @@ def run_decision_final_smoke(
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": stage.stage_name,
             "blocked_reason": str(exc),
-            "run": {"mode": ENGINE_DECISION, "execution_mode": "real-smoke-decision-final", "stages": stages},
-            "message": "DECISION smoke stopped fail-closed.",
+            "run": {"mode": ENGINE_DECISION, "execution_mode": execution_mode, "stages": stages},
+            "message": blocked_message,
         }
 
     def run_stage(stage: StageSpec, operation: Callable[[], _T]) -> _T:
@@ -3097,7 +3110,7 @@ def run_decision_final_smoke(
             raise RuntimeError(f"final_controller_report: forbidden raw/tool-chain tokens: {', '.join(leaked)}")
         _append_real_stage(stages, stage, content, base_dir=base_dir, executor=executor, status="real")
 
-        run = {"mode": ENGINE_DECISION, "execution_mode": "real-smoke-decision-final", "stages": stages}
+        run = {"mode": ENGINE_DECISION, "execution_mode": execution_mode, "stages": stages}
         validation = validate_pipeline(ENGINE_DECISION, run, base_dir=base_dir)
         markdown = render_final_markdown(ENGINE_DECISION, run, validation, base_dir=base_dir)
         return {
@@ -3106,10 +3119,27 @@ def run_decision_final_smoke(
             "full_pipeline_validation": validation,
             "run": run,
             "markdown": markdown,
-            "message": "DECISION final_controller_report smoke completed." if validation.get("valid") else "DECISION final_controller_report smoke failed validation.",
+            "message": complete_message if validation.get("valid") else failed_message,
         }
     except Exception as exc:
         return blocked(stage, exc)
+
+
+def run_decision_full_real(
+    query: str,
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+    research_packet_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run production DECISION D1-D10 against a supplied research packet."""
+    return run_decision_final_smoke(
+        query,
+        base_dir=base_dir,
+        executor=executor,
+        research_packet_path=research_packet_path,
+        production=True,
+    )
 
 
 def _run_decision_stage_with_timeout(
@@ -13705,6 +13735,7 @@ __all__ = [
     "resolve_qwen72b_omlx_model_alias",
     "resolve_r1_omlx_model_alias",
     "run_agy_preflight",
+    "run_decision_full_real",
     "run_decision_final_smoke",
     "run_research_decision_alternative_generator_smoke",
     "run_research_decision_evidence_judge_smoke",
