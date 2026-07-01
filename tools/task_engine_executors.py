@@ -37,6 +37,7 @@ from tools.decision_context_contract import (
     validate_calibration_object,
     validate_contract_schema,
     validate_convergence_contract_alignment,
+    validate_final_report_contract_rendering,
     validate_provenance,
     validate_required_fields,
     write_decision_context_contract_artifacts,
@@ -3181,7 +3182,13 @@ def run_decision_final_smoke(
             "convergence_report",
             "external_calibration",
         ], base_dir=base_dir, consumer_stage=stage.stage_name)
-        packet = _decision_final_controller_packet(stages, query=query, base_dir=base_dir, research_packet_path=research_packet_path)
+        packet = _decision_final_controller_packet(
+            stages,
+            query=query,
+            base_dir=base_dir,
+            research_packet_path=research_packet_path,
+            decision_context_required=production,
+        )
         content = run_stage(stage, lambda: executor.run_final_controller_report(stage, packet))
         leaked = _final_controller_report_forbidden_tokens(content)
         if leaked:
@@ -8681,6 +8688,7 @@ def _decision_final_controller_packet(
     query: str,
     base_dir: str | Path,
     research_packet_path: str | Path | None = None,
+    decision_context_required: bool = False,
 ) -> dict[str, Any]:
     base = Path(base_dir).resolve()
     excerpts: dict[str, str] = {}
@@ -8726,6 +8734,11 @@ def _decision_final_controller_packet(
         "stage_trace": trace,
         "excerpts": excerpts,
     }
+    decision_context = _load_decision_context_contract_for_final_controller(base, required=decision_context_required)
+    if decision_context is not None:
+        packet["decision_context_contract"] = decision_context
+        packet["decision_context_contract_path"] = str(base / "decision_context_contract" / "decision_context_contract.json")
+        packet["decision_context_contract_required"] = bool(decision_context_required)
     convergence_digest = _convergence_fixed_section_digest(raw_convergence)
     if convergence_digest:
         packet["convergence_fixed_section_digest"] = convergence_digest
@@ -8744,6 +8757,29 @@ def _decision_final_controller_packet(
                 "evidence_boundary_policy": "Keep this as a short boundary statement, not a literature review; do not raw dump research packet metadata.",
             }
     return packet
+
+
+def _load_decision_context_contract_for_final_controller(
+    base_dir: str | Path,
+    *,
+    required: bool,
+) -> dict[str, Any] | None:
+    path = Path(base_dir) / "decision_context_contract" / "decision_context_contract.json"
+    if not path.is_file():
+        if required:
+            raise RuntimeError("FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT")
+        return None
+    try:
+        contract = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT:invalid_json:{exc}") from exc
+    errors: list[str] = []
+    errors.extend(validate_contract_schema(contract))
+    errors.extend(validate_required_fields(contract))
+    errors.extend(validate_provenance(contract))
+    if errors:
+        raise RuntimeError("FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT:" + ",".join(dict.fromkeys(errors)))
+    return contract
 
 
 def _intelligence_layer_prompt_from_research_packet(
@@ -9952,6 +9988,15 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
     alternatives = _safe_final_excerpt(str(excerpts.get("alternative_generator") or ""))
     premise = _safe_final_excerpt(str(excerpts.get("premise_auditor") or ""))
     if mode == ENGINE_DECISION:
+        contract = packet.get("decision_context_contract") if isinstance(packet.get("decision_context_contract"), dict) else None
+        if packet.get("decision_context_contract_required") and not contract:
+            raise RuntimeError("FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT")
+        if contract:
+            content = _decision_contract_driven_final_report(query, packet, contract)
+            errors = validate_final_report_contract_rendering(content, contract)
+            if errors:
+                raise RuntimeError("FINAL_CONTROLLER_CONTRACT_RENDERING_INVALID:" + ",".join(errors))
+            return _sanitize_final_controller_user_facing_output(content)
         include_evidence_boundary = _decision_final_requires_evidence_boundary(packet)
         profiles = _normalize_profiles(packet.get("output_quality_profile"))
         if (
@@ -9982,6 +10027,225 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
     if absorption_domain == "education_ai_tutoring":
         return _sanitize_final_controller_user_facing_output(_research_decision_education_final_report(query, packet))
     return _sanitize_final_controller_user_facing_output(_research_decision_generic_final_report(query, packet))
+
+
+def _decision_contract_driven_final_report(query: str, packet: dict[str, Any], contract: dict[str, Any]) -> str:
+    excerpts = packet.get("excerpts") if isinstance(packet.get("excerpts"), dict) else {}
+    convergence_text = str(excerpts.get("convergence_report") or "")
+    calibration_text = str(excerpts.get("external_calibration") or "")
+    if not convergence_text.strip() or not calibration_text.strip():
+        raise RuntimeError("FINAL_CONTROLLER_MISSING_VALIDATED_CONVERGENCE_OR_CALIBRATION")
+    output_contract = contract.get("user_output_contract") if isinstance(contract.get("user_output_contract"), dict) else {}
+    sections = [str(section) for section in output_contract.get("required_sections") or []]
+    if not sections:
+        raise RuntimeError("FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT:missing_required_sections")
+    required_counts = output_contract.get("required_counts") if isinstance(output_contract.get("required_counts"), dict) else {}
+    top_fields = [
+        str(field.get("label") or "")
+        for field in output_contract.get("required_item_fields") or []
+        if isinstance(field, dict) and str(field.get("label") or "").strip()
+    ]
+    if not top_fields:
+        raise RuntimeError("FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT:missing_required_item_fields")
+    variables = _contract_labels(contract.get("key_variables") or [])
+    moderators = _contract_labels(contract.get("moderator_variables") or [])
+    dimensions = _contract_labels(contract.get("required_dimensions") or [])
+    evidence_tiers = _contract_evidence_tier_labels(contract)
+    title = str(contract.get("task_topic", {}).get("title") or "决策问题")
+    lines = ["# 决策任务最终报告", ""]
+    for section in sections:
+        lines.append(f"## {section}")
+        if _is_contract_top5_section(section):
+            count = int(required_counts.get(section) or 5)
+            mode = "trap" if "陷阱" in section else "advantage"
+            lines.extend(
+                _contract_top_items(
+                    mode=mode,
+                    count=count,
+                    field_labels=top_fields,
+                    variables=variables,
+                    moderators=moderators,
+                    dimensions=dimensions,
+                    evidence_tiers=evidence_tiers,
+                )
+            )
+        elif "最危险" in section:
+            lines.extend(_contract_dangerous_path_section(variables, moderators, dimensions, evidence_tiers))
+        elif "最反直觉" in section:
+            lines.extend(_contract_counterintuitive_hypothesis_section(variables, moderators, dimensions, evidence_tiers))
+        elif section == "danger_flag":
+            lines.extend(_contract_danger_flag_section(title, variables, moderators, dimensions, evidence_tiers))
+        else:
+            lines.extend(_contract_generic_required_section(section, variables, moderators, dimensions, evidence_tiers))
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _contract_labels(records: Any) -> list[str]:
+    labels: list[str] = []
+    if not isinstance(records, list):
+        return labels
+    for record in records:
+        if isinstance(record, dict):
+            label = str(record.get("label") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+    return labels
+
+
+def _contract_evidence_tier_labels(contract: dict[str, Any]) -> list[str]:
+    allowed = contract.get("evidence_tiers", {}).get("allowed") if isinstance(contract.get("evidence_tiers"), dict) else []
+    mapping = {
+        "evidence_supported": "证据支持",
+        "plausible_inference": "合理推断",
+        "forward_looking_hypothesis": "前瞻假设",
+        "unsupported_or_speculative": "证据不足",
+    }
+    labels = [mapping.get(str(item), str(item)) for item in allowed or []]
+    return labels or ["合理推断", "前瞻假设"]
+
+
+def _is_contract_top5_section(section: str) -> bool:
+    return "Top5" in section or "top5" in section.lower()
+
+
+def _cycle_label(labels: list[str], index: int, fallback: str) -> str:
+    if not labels:
+        return fallback
+    return labels[index % len(labels)]
+
+
+def _moderator_phrase(moderators: list[str], dimensions: list[str], index: int) -> str:
+    primary = _cycle_label(moderators, index, "关键调节变量")
+    secondary = _cycle_label(moderators, index + 1, primary)
+    dimension = _cycle_label(dimensions, index, "核心能力维度")
+    if primary == secondary:
+        return f"{primary} 通过 {dimension} 改变机制强度。"
+    return f"{primary} 与 {secondary} 共同通过 {dimension} 改变机制强度。"
+
+
+def _contract_top_items(
+    *,
+    mode: str,
+    count: int,
+    field_labels: list[str],
+    variables: list[str],
+    moderators: list[str],
+    dimensions: list[str],
+    evidence_tiers: list[str],
+) -> list[str]:
+    trap_pairs = [
+        ("快速理解", "未经验证的快速接受"),
+        ("兴趣驱动", "持续换题和难以闭环"),
+        ("高联想速度", "观点过剩但证据不足"),
+        ("即时反馈敏感", "延迟反馈耐受下降"),
+        ("身体训练纪律", "用体感确定性替代事实核查"),
+    ]
+    advantage_pairs = [
+        ("对低价值重复敏感", "更早识别可自动化或低价值任务"),
+        ("注意力波动", "在多信号环境中发现异常和新问题"),
+        ("内在走神", "形成跨领域假设和反常识连接"),
+        ("执行功能摩擦", "更依赖外化流程与验证清单"),
+        ("延迟反馈耐受弱", "更重视身体反馈和真实约束"),
+    ]
+    pairs = trap_pairs if mode == "trap" else advantage_pairs
+    lines: list[str] = []
+    for idx in range(1, count + 1):
+        current, reversal = pairs[(idx - 1) % len(pairs)]
+        variable = _cycle_label(variables, idx - 1, "核心变量")
+        dimension = _cycle_label(dimensions, idx - 1, "关键能力")
+        tier = _cycle_label(evidence_tiers, idx - 1, "合理推断")
+        certainty = _cycle_label(["中", "中", "低", "中", "低"], idx - 1, "中")
+        trigger = (
+            f"当 AI 让知识获取成本继续下降，而 {variable} 被速度和即时反馈放大时。"
+            if mode == "trap"
+            else f"当 AI 承担低价值知识获取后，{variable} 可以转向问题选择和验证时。"
+        )
+        mechanism = f"{_moderator_phrase(moderators, dimensions, idx - 1)} 关键维度是 {dimension}。"
+        failure = (
+            "如果仍保留验证、收束和延迟反馈边界，这一反转会减弱。"
+            if mode == "trap"
+            else "如果缺少验证、收束或真实反馈，这一优势不会稳定出现。"
+        )
+        field_values = {
+            "当前优势 / 当前缺陷": current,
+            "触发条件": trigger,
+            "中间机制": mechanism,
+            "反转后的陷阱 / 反转后的优势": reversal,
+            "失效条件": failure,
+            "确定性等级": f"{certainty}；证据层级：{tier}",
+            "证据层级": tier,
+        }
+        lines.append(f"{idx}. {current} -> {reversal}")
+        for label in field_labels:
+            value = field_values.get(label, field_values.get(label.split("/")[0].strip(), "按合同要求保留该字段。"))
+            lines.append(f"   - {label}：{value}")
+    return lines
+
+
+def _contract_dangerous_path_section(
+    variables: list[str],
+    moderators: list[str],
+    dimensions: list[str],
+    evidence_tiers: list[str],
+) -> list[str]:
+    return [
+        f"- 把速度、答案数量和短期表现放在 {_cycle_label(dimensions, 1, '问题选择能力')}、{_cycle_label(dimensions, 2, '验证能力')}、{_cycle_label(dimensions, 3, '收束能力')} 之前，是最危险的错误路径。",
+        f"- 触发条件：{_cycle_label(variables, 4, 'AI 信息环境')} 提供即时解释和规划，但没有同步保留延迟反馈、事实核查和反证边界。",
+        f"- 调节变量：{_moderator_phrase(moderators, dimensions, 1)} 如果只放大速度而不放大验证，风险上升。",
+        f"- 确定性等级：中；证据层级：{_cycle_label(evidence_tiers, 1, '合理推断')}。",
+    ]
+
+
+def _contract_counterintuitive_hypothesis_section(
+    variables: list[str],
+    moderators: list[str],
+    dimensions: list[str],
+    evidence_tiers: list[str],
+) -> list[str]:
+    return [
+        f"- 最反直觉的假设：未来稀缺的不是更快获得知识，而是更慢地选择问题、验证问题并收束问题。",
+        f"- 机制：{_cycle_label(variables, 0, '注意力波动')} 和 {_cycle_label(variables, 1, '兴趣驱动')} 在 AI 信息环境中可能同时放大探索优势和闭环风险。",
+        f"- 调节变量：{_moderator_phrase(moderators, dimensions, 4)} 这会决定假设是转为优势还是转为陷阱。",
+        f"- 确定性等级：低；证据层级：{_cycle_label(evidence_tiers, 2, '前瞻假设')}。",
+    ]
+
+
+def _contract_danger_flag_section(
+    title: str,
+    variables: list[str],
+    moderators: list[str],
+    dimensions: list[str],
+    evidence_tiers: list[str],
+) -> list[str]:
+    return [
+        f"- 合同变量覆盖：{_join_contract_labels(variables)}。",
+        f"- 调节变量覆盖：{_join_contract_labels(moderators)}。",
+        f"- 能力维度覆盖：{_join_contract_labels(dimensions)}。",
+        f"- danger_flag：如果 {title} 被简化为更快学习或更多产出，而没有同步检查 {_cycle_label(dimensions, 2, '验证能力')}、{_cycle_label(dimensions, 3, '收束能力')}、{_cycle_label(dimensions, 4, '延迟反馈耐受')}，应视为高风险信号。",
+        f"- 反证信号：{_cycle_label(moderators, 0, '调节变量')} 和 {_cycle_label(moderators, 1, '调节变量')} 没有改善真实反馈循环，只提升了即时满足。",
+        f"- 确定性等级：中；证据层级：{_cycle_label(evidence_tiers, 1, '合理推断')}。",
+    ]
+
+
+def _join_contract_labels(labels: list[str]) -> str:
+    return "、".join(labels) if labels else "无额外合同锚点"
+
+
+def _contract_generic_required_section(
+    section: str,
+    variables: list[str],
+    moderators: list[str],
+    dimensions: list[str],
+    evidence_tiers: list[str],
+) -> list[str]:
+    return [
+        f"- 本节按合同保留：{section}。",
+        f"- 关键变量：{_cycle_label(variables, 0, '核心变量')}。",
+        f"- 调节变量：{_cycle_label(moderators, 0, '调节变量')}。",
+        f"- 必须覆盖维度：{_cycle_label(dimensions, 0, '关键维度')}。",
+        f"- 确定性等级：中；证据层级：{_cycle_label(evidence_tiers, 0, '合理推断')}。",
+    ]
 
 
 def _research_decision_foresight_final_report(query: str, packet: dict[str, Any]) -> str:

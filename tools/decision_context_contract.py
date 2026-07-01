@@ -84,6 +84,18 @@ DEFAULT_FINAL_ACCEPTANCE_CHECKS = {
     "generic_template_residue_absent": True,
 }
 
+GENERIC_TEMPLATE_RESIDUE_SECTION_HEADINGS = [
+    "用户画像与约束如何进入判断",
+    "逐题回答",
+    "证据支持",
+    "合理推断",
+    "前瞻假设",
+    "情景分叉",
+    "观察指标与反证信号",
+    "最终决策含义",
+    "证据边界",
+]
+
 DEFAULT_CLAIM_STRENGTH_POLICY = {
     "future_claims_cannot_be_evidence_supported_without_direct_current_evidence": True,
     "snippet_only_sources_must_be_low_or_conditional": True,
@@ -844,6 +856,56 @@ def validate_convergence_contract_alignment(convergence_text: str, contract: dic
     errors.extend(validate_required_dimensions_present(convergence_text, contract))
     errors.extend(validate_evidence_tiers_present(convergence_text, contract))
     return _dedupe_error_list(errors)
+
+
+def validate_final_report_contract_rendering(text: str, contract: dict[str, Any]) -> list[str]:
+    errors = validate_contract_schema(contract)
+    value = text or ""
+    required_sections = contract.get("user_output_contract", {}).get("required_sections") or []
+    required_counts = contract.get("user_output_contract", {}).get("required_counts") or {}
+    required_item_fields = contract.get("user_output_contract", {}).get("required_item_fields") or []
+    required_field_labels = [str(field.get("label") or "") for field in required_item_fields if isinstance(field, dict)]
+    for section in required_sections:
+        body = _markdown_section_body(value, str(section))
+        if not body:
+            errors.append(f"missing_required_section:{section}")
+            continue
+        expected_count = int(required_counts.get(section) or 0)
+        if expected_count:
+            item_count = len(re.findall(r"(?m)^\s*\d+\.\s+", body))
+            if item_count < expected_count:
+                errors.append(f"missing_required_count:{section}:{expected_count}")
+            for label in required_field_labels:
+                if label and body.count(label) < expected_count:
+                    errors.append(f"missing_item_field:{section}:{label}")
+    for variable in contract.get("key_variables") or []:
+        if variable.get("required_in_final") and not _match_any_alias(value, _record_aliases(variable)):
+            errors.append(f"missing_key_variable:{variable.get('id') or variable.get('label')}")
+    for moderator in contract.get("moderator_variables") or []:
+        if moderator.get("required_in_final") and not _match_any_alias(value, _record_aliases(moderator)):
+            errors.append(f"missing_moderator_variable:{moderator.get('id') or moderator.get('label')}")
+    for dimension in contract.get("required_dimensions") or []:
+        if not _match_any_alias(value, _record_aliases(dimension)):
+            errors.append(f"missing_required_dimension:{dimension.get('id') or dimension.get('label')}")
+    if validate_evidence_tiers_present(value, contract):
+        errors.append("missing_evidence_tiers")
+    for term in contract.get("forbidden_internal_terms") or []:
+        if str(term).lower() in value.lower():
+            errors.append(f"forbidden_internal_term:{term}")
+    for heading in GENERIC_TEMPLATE_RESIDUE_SECTION_HEADINGS:
+        if re.search(rf"(?m)^#{{2,6}}\s*{re.escape(heading)}\s*$", value):
+            errors.append(f"generic_template_residue:{heading}")
+    return _dedupe_error_list(errors)
+
+
+def _markdown_section_body(text: str, heading: str) -> str:
+    pattern = re.compile(rf"(?m)^#{{2,6}}\s*{re.escape(heading)}\s*$")
+    match = pattern.search(text or "")
+    if not match:
+        return ""
+    next_heading = re.search(r"(?m)^#{2,6}\s+", text[match.end():])
+    end = match.end() + next_heading.start() if next_heading else len(text)
+    return text[match.end():end].strip()
 
 
 def _dedupe_error_list(errors: list[str]) -> list[str]:
