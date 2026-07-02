@@ -26,6 +26,23 @@ DEFAULT_EVIDENCE_TIERS = [
     "unsupported_or_speculative",
 ]
 
+EVIDENCE_TIER_CANONICAL_LABELS = {
+    "evidence_supported": "证据支持",
+    "plausible_inference": "合理推断",
+    "forward_looking_hypothesis": "前瞻假设",
+    "unsupported_or_speculative": "不支持或推测",
+}
+
+CONVERGENCE_CONTRACT_PREAMBLE_START = "<!-- decision_context_contract_preamble:start -->"
+CONVERGENCE_CONTRACT_PREAMBLE_END = "<!-- decision_context_contract_preamble:end -->"
+CONVERGENCE_METADATA_KEYS = {
+    "decision_context_contract_id",
+    "task_topic",
+    "key_variables",
+    "required_dimensions",
+    "evidence_tiers",
+}
+
 DEFAULT_FORBIDDEN_INTERNAL_TERMS = [
     "research packet",
     "Stage",
@@ -870,6 +887,105 @@ def validate_convergence_uses_contract(convergence_text: str, contract: dict[str
     return errors
 
 
+def _record_labels(records: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        label = str(record.get("label") or "").strip()
+        if label:
+            labels.append(label)
+    return labels
+
+
+def _convergence_evidence_tier_line(contract: dict[str, Any]) -> str:
+    allowed = contract.get("evidence_tiers", {}).get("allowed") or []
+    parts = [
+        f"{tier} / {EVIDENCE_TIER_CANONICAL_LABELS.get(str(tier), str(tier))}"
+        for tier in allowed
+    ]
+    return "; ".join(parts)
+
+
+def render_convergence_contract_preamble(contract: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            CONVERGENCE_CONTRACT_PREAMBLE_START,
+            f"decision_context_contract_id: {contract.get('contract_id', '')}",
+            f"task_topic: {contract.get('task_topic', {}).get('title', '')}",
+            "key_variables: " + "; ".join(_record_labels(contract.get("key_variables") or [])),
+            "required_dimensions: " + "; ".join(_record_labels(contract.get("required_dimensions") or [])),
+            "evidence_tiers: " + _convergence_evidence_tier_line(contract),
+            CONVERGENCE_CONTRACT_PREAMBLE_END,
+        ]
+    )
+
+
+def split_convergence_contract_preamble(text: str) -> tuple[str, str]:
+    value = text or ""
+    start = value.find(CONVERGENCE_CONTRACT_PREAMBLE_START)
+    end = value.find(CONVERGENCE_CONTRACT_PREAMBLE_END)
+    if start < 0 or end < start:
+        return "", value
+    end += len(CONVERGENCE_CONTRACT_PREAMBLE_END)
+    return value[start:end], (value[:start] + value[end:]).strip()
+
+
+def _strip_outer_markdown_fence(text: str) -> str:
+    lines = (text or "").strip().splitlines()
+    if len(lines) >= 2 and lines[0].strip().lower() in {"```", "```markdown", "```md"} and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text or ""
+
+
+def _metadata_lines_conflicting_with_contract(text: str, contract: dict[str, Any]) -> list[str]:
+    expected = {
+        "decision_context_contract_id": [str(contract.get("contract_id") or "")],
+        "task_topic": [str(contract.get("task_topic", {}).get("title") or "")],
+        "key_variables": _record_labels(contract.get("key_variables") or []),
+        "required_dimensions": _record_labels(contract.get("required_dimensions") or []),
+        "evidence_tiers": list(contract.get("evidence_tiers", {}).get("allowed") or []),
+    }
+    errors: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        if key not in CONVERGENCE_METADATA_KEYS:
+            continue
+        for required in expected.get(key, []):
+            if required and required not in value:
+                errors.append(f"contradictory_contract_metadata:{key}")
+                break
+    return _dedupe_error_list(errors)
+
+
+def _remove_model_emitted_convergence_metadata(text: str) -> str:
+    kept: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if ":" in stripped and stripped.split(":", 1)[0].strip() in CONVERGENCE_METADATA_KEYS:
+            continue
+        if stripped in {CONVERGENCE_CONTRACT_PREAMBLE_START, CONVERGENCE_CONTRACT_PREAMBLE_END}:
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def normalize_convergence_contract_output(text: str, contract: dict[str, Any]) -> tuple[str, list[str]]:
+    errors = validate_contract_schema(contract)
+    body = _strip_outer_markdown_fence(text or "")
+    errors.extend(_metadata_lines_conflicting_with_contract(body, contract))
+    if errors:
+        return text or "", _dedupe_error_list(errors)
+    _existing_preamble, body_without_preamble = split_convergence_contract_preamble(body)
+    body = _remove_model_emitted_convergence_metadata(body_without_preamble)
+    normalized = render_convergence_contract_preamble(contract) + "\n\n" + body.strip()
+    return normalized.strip() + "\n", []
+
+
 def validate_no_meta_execution_drift(text: str, contract: dict[str, Any]) -> list[str]:
     errors = validate_contract_schema(contract)
     value = text or ""
@@ -931,11 +1047,14 @@ def validate_calibration_object(calibration_text: str, contract: dict[str, Any])
 
 
 def validate_convergence_contract_alignment(convergence_text: str, contract: dict[str, Any]) -> list[str]:
-    errors = validate_convergence_uses_contract(convergence_text, contract)
-    errors.extend(validate_no_meta_execution_drift(convergence_text, contract))
-    errors.extend(validate_required_variables_present(convergence_text, contract))
-    errors.extend(validate_required_dimensions_present(convergence_text, contract))
-    errors.extend(validate_evidence_tiers_present(convergence_text, contract))
+    preamble, body = split_convergence_contract_preamble(convergence_text)
+    metadata_text = preamble or convergence_text
+    semantic_text = body if preamble else convergence_text
+    errors = validate_convergence_uses_contract(metadata_text, contract)
+    errors.extend(validate_no_meta_execution_drift(semantic_text, contract))
+    errors.extend(validate_required_variables_present(semantic_text, contract))
+    errors.extend(validate_required_dimensions_present(semantic_text, contract))
+    errors.extend(validate_evidence_tiers_present(metadata_text, contract))
     return _dedupe_error_list(errors)
 
 

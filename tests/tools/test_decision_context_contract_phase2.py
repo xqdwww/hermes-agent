@@ -104,10 +104,16 @@ def test_convergence_prompt_input_includes_contract(tmp_path):
         "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
         "AI 信息环境; 知识获取成本下降; 儿童长期发展"
     ) in prompt
+    assert (
+        "required_dimensions: 知识获取能力; 问题选择能力; 验证能力; 收束能力; "
+        "延迟反馈耐受; 身体反馈系统"
+    ) in prompt
     assert "evidence_tiers: evidence_supported / 证据支持" in prompt
     assert "plausible_inference / 合理推断" in prompt
     assert "forward_looking_hypothesis / 前瞻假设" in prompt
     assert "unsupported_or_speculative / 不支持或推测" in prompt
+    assert "semantic_contract_coverage" in prompt
+    assert "deterministic contract header alone is not enough" in prompt
 
 
 def test_external_calibration_prompt_input_includes_contract(tmp_path):
@@ -155,6 +161,22 @@ def _aligned_convergence_text(contract):
             "user_output_contract_intent: 未来优势变陷阱 Top5; 未来缺陷变优势 Top5; danger_flag",
             "evidence_tiers: evidence_supported, plausible_inference, forward_looking_hypothesis, unsupported_or_speculative",
             "convergence: 结构性反转必须围绕 ADHD x AI 的用户决策问题，而不是执行准备。",
+            "## semantic_contract_coverage",
+            "- key_variable ADHD 注意力波动: ADHD 注意力波动决定AI反馈密度何时帮助聚焦、何时放大切换。",
+            "- key_variable 兴趣驱动: 兴趣驱动会把低成本知识探索推向高价值问题或低价值漫游。",
+            "- key_variable 执行功能: 执行功能决定能否从AI生成内容中形成闭环。",
+            "- key_variable 内在走神: 内在走神会影响问题重组，也可能削弱收束。",
+            "- key_variable AI 信息环境: AI 信息环境降低反馈成本，也放大选择和验证负担。",
+            "- key_variable 知识获取成本下降: 知识获取成本下降把瓶颈从获取转向选择、验证和收束。",
+            "- key_variable 儿童长期发展: 儿童长期发展需要看十年尺度的能力迁移，而非短期表现。",
+            "- moderator IQ 124: IQ 124 调节抽象吸收速度和验证负荷。",
+            "- moderator 长期柔术训练: 长期柔术训练通过身体反馈系统调节延迟反馈耐受。",
+            "- required_dimension 知识获取能力: 知识获取能力会从找资料转向筛选和整合。",
+            "- required_dimension 问题选择能力: 问题选择能力决定探索是否变成低价值漫游。",
+            "- required_dimension 验证能力: 验证能力约束AI幻觉和自我确认。",
+            "- required_dimension 收束能力: 收束能力决定是否能从多路径中完成一个路径。",
+            "- required_dimension 延迟反馈耐受: 延迟反馈耐受决定是否能承受慢变量学习。",
+            "- required_dimension 身体反馈系统: 身体反馈系统提供非数字化的校准信号。",
             "## key_drivers",
             "AI feedback cost, ADHD attention variability, IQ 124, and long-term BJJ body feedback.",
             "## mechanism_chain",
@@ -240,6 +262,7 @@ def test_convergence_contract_retry_regenerates_instead_of_reusing_stale_failed_
         "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
         "AI 信息环境; 知识获取成本下降; 儿童长期发展"
     ) in convergence_prompts[1]
+    assert "semantic_contract_coverage" in convergence_prompts[1]
     invalid_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.contract_retry_source.invalid.md"
     convergence_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.md"
     assert invalid_path.exists()

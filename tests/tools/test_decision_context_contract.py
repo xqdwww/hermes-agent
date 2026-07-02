@@ -6,6 +6,9 @@ from tools.decision_context_contract import (
     RUNTIME_INTEGRATION_ENABLED,
     compute_contract_hash,
     generate_decision_context_contract,
+    normalize_convergence_contract_output,
+    render_convergence_contract_preamble,
+    split_convergence_contract_preamble,
     validate_calibration_object,
     validate_contract_schema,
     validate_convergence_contract_alignment,
@@ -328,6 +331,106 @@ def _aligned_convergence_text(contract):
             "convergence: 结构性反转必须围绕 ADHD x AI 的用户决策问题，而不是执行准备。",
         ]
     )
+
+
+def _semantic_convergence_body():
+    return "\n".join(
+        [
+            "## semantic_contract_coverage",
+            "- key_variable ADHD 注意力波动: ADHD 注意力波动决定AI反馈密度何时帮助聚焦、何时放大切换。",
+            "- key_variable 兴趣驱动: 兴趣驱动会把低成本知识探索推向高价值问题或低价值漫游。",
+            "- key_variable 执行功能: 执行功能决定能否从AI生成内容中形成闭环。",
+            "- key_variable 内在走神: 内在走神会影响问题重组，也可能削弱收束。",
+            "- key_variable AI 信息环境: AI 信息环境降低反馈成本，也放大选择和验证负担。",
+            "- key_variable 知识获取成本下降: 知识获取成本下降把瓶颈从获取转向选择、验证和收束。",
+            "- key_variable 儿童长期发展: 儿童长期发展需要看十年尺度的能力迁移，而非短期表现。",
+            "- moderator IQ 124: IQ 124 调节抽象吸收速度和验证负荷。",
+            "- moderator 长期柔术训练: 长期柔术训练通过身体反馈系统调节延迟反馈耐受。",
+            "- required_dimension 知识获取能力: 知识获取能力会从找资料转向筛选和整合。",
+            "- required_dimension 问题选择能力: 问题选择能力决定探索是否变成低价值漫游。",
+            "- required_dimension 验证能力: 验证能力约束AI幻觉和自我确认。",
+            "- required_dimension 收束能力: 收束能力决定是否能从多路径中完成一个路径。",
+            "- required_dimension 延迟反馈耐受: 延迟反馈耐受决定是否能承受慢变量学习。",
+            "- required_dimension 身体反馈系统: 身体反馈系统提供非数字化的校准信号。",
+            "evidence_tiers: evidence_supported, plausible_inference, forward_looking_hypothesis, unsupported_or_speculative",
+            "## key_drivers",
+            "ADHD x AI structural reversal remains centered on the user decision.",
+        ]
+    )
+
+
+def test_convergence_deterministic_contract_header_and_valid_body_passes(tmp_path):
+    contract = _generate(tmp_path)
+    normalized, errors = normalize_convergence_contract_output(_semantic_convergence_body(), contract)
+
+    assert errors == []
+    assert validate_convergence_contract_alignment(normalized, contract) == []
+    preamble, body = split_convergence_contract_preamble(normalized)
+    assert contract["contract_id"] in preamble
+    assert contract["task_topic"]["title"] in preamble
+    assert "儿童长期发展" in body
+
+
+def test_convergence_header_only_does_not_satisfy_semantic_body(tmp_path):
+    contract = _generate(tmp_path)
+    text = render_convergence_contract_preamble(contract) + "\n\n## body\nOnly generic synthesis."
+
+    errors = validate_convergence_contract_alignment(text, contract)
+
+    assert "missing_key_variable:child_long_term_development" in errors
+    assert "missing_required_dimension:problem_selection_ability" in errors
+
+
+def test_convergence_body_missing_key_variable_blocks_even_with_header(tmp_path):
+    contract = _generate(tmp_path)
+    body = _semantic_convergence_body().replace("儿童长期发展", "成长轨迹")
+    text = render_convergence_contract_preamble(contract) + "\n\n" + body
+
+    errors = validate_convergence_contract_alignment(text, contract)
+
+    assert "missing_key_variable:child_long_term_development" in errors
+
+
+def test_convergence_body_missing_required_dimension_blocks_even_with_header(tmp_path):
+    contract = _generate(tmp_path)
+    body = _semantic_convergence_body().replace("问题选择能力", "选题偏好")
+    text = render_convergence_contract_preamble(contract) + "\n\n" + body
+
+    errors = validate_convergence_contract_alignment(text, contract)
+
+    assert "missing_required_dimension:problem_selection_ability" in errors
+
+
+def test_convergence_normalizer_rejects_contradictory_model_metadata(tmp_path):
+    contract = _generate(tmp_path)
+    raw = "\n".join(
+        [
+            f"decision_context_contract_id: {contract['contract_id']}",
+            "task_topic: unrelated rollout readiness",
+            _semantic_convergence_body(),
+        ]
+    )
+
+    _normalized, errors = normalize_convergence_contract_output(raw, contract)
+
+    assert "contradictory_contract_metadata:task_topic" in errors
+
+
+def test_convergence_normalizer_preserves_canonical_contract_fields_for_generic_contract(tmp_path):
+    missing_packet = tmp_path / "missing.md"
+    contract = generate_decision_context_contract(
+        original_query="This is a decision task: should we choose option A or option B?",
+        research_packet_path=missing_packet,
+    )
+    body = "Alternatives and Evaluation Criteria shape the recommendation. Stakeholders remain relevant."
+    normalized, errors = normalize_convergence_contract_output(body, contract)
+
+    assert errors == []
+    preamble, _body = split_convergence_contract_preamble(normalized)
+    assert contract["contract_id"] in preamble
+    assert "Alternatives" in preamble
+    assert "Evaluation Criteria" in preamble
+    assert "ADHD" not in preamble
 
 
 def test_convergence_with_adhd_ai_contract_content_passes(tmp_path):
