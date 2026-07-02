@@ -202,6 +202,15 @@ GENERIC_DECISION_REQUIRED_SECTIONS = [
     "Risks and Uncertainties",
 ]
 
+BUSINESS_STRATEGY_DEFAULT_REQUIRED_SECTIONS = [
+    "1. 下一阶段最应该押注的增长顺序",
+    "2. 哪些增长动作是虚荣指标",
+    "3. 如何判断真实需求和市场匹配信号",
+    "4. 什么时候应该暂停产品功能扩张",
+    "5. 90 天执行计划",
+    "证据与推断边界",
+]
+
 ADHD_AI_KEY_VARIABLES = [
     {
         "id": "adhd_attention_variability",
@@ -303,6 +312,77 @@ GENERIC_DECISION_REQUIRED_DIMENSIONS = [
         "id": "stakeholder_fit",
         "label": "Stakeholders",
         "aliases": ["Stakeholders", "相关方", "利益相关方"],
+    },
+]
+
+BUSINESS_STRATEGY_KEY_VARIABLES = [
+    {
+        "id": "runway_constraint",
+        "label": "6 个月 runway",
+        "aliases": ["6 个月 runway", "six-month runway", "runway", "现金约束"],
+    },
+    {
+        "id": "early_b2b_saas_team",
+        "label": "早期 B2B SaaS 团队",
+        "aliases": ["早期 B2B SaaS", "B2B SaaS", "早期团队"],
+    },
+    {
+        "id": "workflow_automation_context",
+        "label": "专业服务 workflow automation",
+        "aliases": ["workflow automation", "专业服务", "工作流"],
+    },
+    {
+        "id": "gtm_order",
+        "label": "GTM 顺序",
+        "aliases": ["GTM", "GTM 顺序", "go-to-market", "founder-led sales", "PLG"],
+    },
+    {
+        "id": "pmf_signal_quality",
+        "label": "PMF 信号",
+        "aliases": ["PMF", "市场匹配", "真实信号", "付费", "留存"],
+    },
+    {
+        "id": "feature_expansion_pause",
+        "label": "暂停产品功能扩张",
+        "aliases": ["暂停产品功能扩张", "功能扩张", "feature expansion"],
+    },
+    {
+        "id": "ninety_day_plan",
+        "label": "90 天执行计划",
+        "aliases": ["90 天", "90天", "90-day", "阶段计划"],
+    },
+]
+
+BUSINESS_STRATEGY_REQUIRED_DIMENSIONS = [
+    {
+        "id": "gtm_sequence",
+        "label": "GTM 顺序",
+        "aliases": ["GTM 顺序", "优先级", "排序", "founder-led sales", "PLG"],
+    },
+    {
+        "id": "vanity_metric_filter",
+        "label": "虚荣指标",
+        "aliases": ["虚荣指标", "虚假信号", "vanity metric", "vanity"],
+    },
+    {
+        "id": "market_fit_signal_quality",
+        "label": "PMF/真实市场匹配信号",
+        "aliases": ["PMF", "市场匹配", "真实信号", "付费", "留存"],
+    },
+    {
+        "id": "stop_pause_feature_expansion",
+        "label": "暂停产品功能扩张条件",
+        "aliases": ["暂停产品功能扩张", "暂停", "功能扩张", "feature expansion"],
+    },
+    {
+        "id": "phased_execution_plan",
+        "label": "90 天执行计划",
+        "aliases": ["90 天", "90天", "90-day", "0-30", "31-60", "61-90"],
+    },
+    {
+        "id": "evidence_inference_boundary",
+        "label": "证据与推断边界",
+        "aliases": ["证据与推断边界", "证据强度", "合理推断", "前瞻假设"],
     },
 ]
 
@@ -445,6 +525,8 @@ def _extract_domain(original_query: str, combined_text: str) -> str:
     text = f"{original_query}\n{combined_text}"
     if _contains_any(text, ["ADHD", "注意力", "执行功能"]) and _contains_any(text, ["AI", "人工智能"]):
         return "research_decision"
+    if _is_business_strategy_decision_task(original_query, combined_text):
+        return "business_strategy"
     if _contains_any(text, ["literature review", "文献综述", "academic"]):
         return "academic_literature_review"
     if _contains_any(text, ["travel", "itinerary", "hotel", "旅行", "酒店"]):
@@ -524,8 +606,55 @@ def _is_adhd_ai_structural_reversal_task(original_query: str, combined_text: str
 def _is_generic_decision_task(original_query: str) -> bool:
     return _contains_any(
         original_query,
-        ["decision", "decide", "should", "决策", "是否", "要不要", "选择", "推荐"],
+        ["decision", "decide", "should", "决策", "判断", "是否", "要不要", "选择", "推荐", "优先级", "排序", "取舍", "最应该"],
     )
+
+
+def _is_business_strategy_decision_task(original_query: str, combined_text: str) -> bool:
+    text = f"{original_query}\n{combined_text}"
+    business_terms = [
+        "B2B SaaS",
+        "GTM",
+        "go-to-market",
+        "PMF",
+        "PLG",
+        "founder-led",
+        "runway",
+        "workflow automation",
+        "商业策略",
+        "增长策略",
+        "市场进入",
+        "虚荣指标",
+        "获客",
+        "渠道",
+        "销售",
+        "转化",
+        "留存",
+        "付费",
+    ]
+    decision_terms = ["判断", "决策", "最应该", "顺序", "优先级", "90 天", "90天", "计划", "暂停", "pause"]
+    return _contains_any(text, business_terms) and _contains_any(text, decision_terms)
+
+
+def _extract_numbered_required_sections(original_query: str) -> list[str]:
+    sections: list[str] = []
+    for match in re.finditer(r"(?m)^\s*(\d{1,2})[.、)]\s*(.+?)\s*$", original_query or ""):
+        index = match.group(1).strip()
+        body = match.group(2).strip().rstrip("。；;")
+        if body:
+            sections.append(f"{index}. {body}")
+    return sections
+
+
+def _extract_business_strategy_required_sections(original_query: str) -> list[str]:
+    numbered = _extract_numbered_required_sections(original_query)
+    if len(numbered) >= 3:
+        sections = numbered[:5]
+    else:
+        sections = list(BUSINESS_STRATEGY_DEFAULT_REQUIRED_SECTIONS[:5])
+    if not any("证据" in section and "推断" in section for section in sections):
+        sections.append("证据与推断边界")
+    return sections
 
 
 def _extract_required_sections(original_query: str, combined_text: str) -> list[str]:
@@ -536,6 +665,8 @@ def _extract_required_sections(original_query: str, combined_text: str) -> list[
         return list(ADHD_AI_REQUIRED_SECTIONS)
     if _is_adhd_ai_structural_reversal_task(original_query, combined_text):
         return list(ADHD_AI_REQUIRED_SECTIONS)
+    if _is_business_strategy_decision_task(original_query, combined_text):
+        return _extract_business_strategy_required_sections(original_query)
     sections: list[str] = []
     for line in original_query.splitlines():
         stripped = line.strip(" -*\t")
@@ -549,9 +680,17 @@ def _extract_required_sections(original_query: str, combined_text: str) -> list[
 def _extract_key_variables(original_query: str, combined_text: str) -> list[dict[str, Any]]:
     text = original_query + "\n" + combined_text
     records: list[dict[str, Any]] = []
-    for item in ADHD_AI_KEY_VARIABLES:
-        if _contains_any(text, [item["label"], *item["aliases"]]):
-            records.append(_record_with_source(item, "original_query_or_stage_a", "global"))
+    is_adhd_ai_task = _is_adhd_ai_structural_reversal_task(original_query, combined_text)
+    is_business_strategy_task = _is_business_strategy_decision_task(original_query, combined_text)
+    if is_adhd_ai_task:
+        for item in ADHD_AI_KEY_VARIABLES:
+            if _contains_any(text, [item["label"], *item["aliases"]]):
+                records.append(_record_with_source(item, "original_query_or_stage_a", "global"))
+    elif is_business_strategy_task:
+        records = [
+            _record_with_source(item, "business_strategy_task_type", "global")
+            for item in BUSINESS_STRATEGY_KEY_VARIABLES
+        ]
     if not records:
         for index, term in enumerate(_extract_requirement_terms(original_query)[:8], start=1):
             records.append(
@@ -579,17 +718,20 @@ def _extract_moderator_variables(original_query: str, combined_text: str) -> lis
 def _extract_required_dimensions(original_query: str, combined_text: str) -> list[dict[str, Any]]:
     text = original_query + "\n" + combined_text
     records: list[dict[str, Any]] = []
-    for item in ADHD_AI_REQUIRED_DIMENSIONS:
-        if _contains_any(text, [item["label"], *item["aliases"]]):
-            records.append(
-                _record_with_source(
-                    item,
-                    "original_query_or_stage_a",
-                    "per_core_item",
-                    {"coverage_requirement": "applied_per_core_item"},
+    is_adhd_ai_task = _is_adhd_ai_structural_reversal_task(original_query, combined_text)
+    is_business_strategy_task = _is_business_strategy_decision_task(original_query, combined_text)
+    if is_adhd_ai_task:
+        for item in ADHD_AI_REQUIRED_DIMENSIONS:
+            if _contains_any(text, [item["label"], *item["aliases"]]):
+                records.append(
+                    _record_with_source(
+                        item,
+                        "original_query_or_stage_a",
+                        "per_core_item",
+                        {"coverage_requirement": "applied_per_core_item"},
+                    )
                 )
-            )
-    if not records and _is_adhd_ai_structural_reversal_task(original_query, combined_text):
+    if not records and is_adhd_ai_task:
         records = [
             _record_with_source(
                 item,
@@ -598,6 +740,16 @@ def _extract_required_dimensions(original_query: str, combined_text: str) -> lis
                 {"coverage_requirement": "applied_per_core_item"},
             )
             for item in ADHD_AI_REQUIRED_DIMENSIONS
+        ]
+    if not records and is_business_strategy_task:
+        records = [
+            _record_with_source(
+                item,
+                "business_strategy_task_type",
+                "global",
+                {"coverage_requirement": "decision_context"},
+            )
+            for item in BUSINESS_STRATEGY_REQUIRED_DIMENSIONS
         ]
     if not records and _is_generic_decision_task(original_query):
         records = [

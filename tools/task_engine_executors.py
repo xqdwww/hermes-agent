@@ -10296,7 +10296,11 @@ def _final_controller_report_from_packet(packet: dict[str, Any]) -> str:
         if packet.get("decision_context_contract_required") and not contract:
             raise RuntimeError("FINAL_CONTROLLER_MISSING_DECISION_CONTEXT_CONTRACT")
         if contract:
-            content = _decision_contract_driven_final_report(query, packet, contract)
+            profiles = _normalize_profiles(packet.get("output_quality_profile"))
+            if PROFILE_BUSINESS_STRATEGY_PLAN in profiles:
+                content = _research_decision_business_strategy_final_report(query, packet)
+            else:
+                content = _decision_contract_driven_final_report(query, packet, contract)
             errors = validate_final_report_contract_rendering(content, contract)
             if errors:
                 raise RuntimeError("FINAL_CONTROLLER_CONTRACT_RENDERING_INVALID:" + ",".join(errors))

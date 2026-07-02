@@ -47,6 +47,16 @@ danger_flag
 禁止输出医学诊断、治疗建议、家长建议、培养计划。
 """
 
+BUSINESS_GTM_QUERY = """
+一个早期 B2B SaaS 团队有 6 个月 runway，产品是面向专业服务公司的 workflow automation。
+团队在纠结 PLG、自助试用、founder-led sales、渠道合作和内容获客。请判断：
+1. 下一阶段最应该押注的 GTM 顺序；
+2. 哪些增长动作是虚荣指标；
+3. 如何判断 PMF 信号是真的；
+4. 什么时候应该暂停产品功能扩张；
+5. 给出 90 天执行计划，但明确哪些只是合理推断。
+"""
+
 
 def _write_stage_a_fixture(tmp_path: Path) -> dict[str, Path]:
     run_dir = tmp_path / ".hermes_task_engine_runs" / "1782891050_research_research_l1_l5"
@@ -181,6 +191,38 @@ def test_generic_decision_without_output_contract_uses_generic_fallback_schema(t
     assert {"Alternatives", "Evaluation Criteria", "Stakeholders"} <= dimension_labels
     assert "missing_required_sections" not in validate_required_fields(contract)
     assert "missing_required_dimensions" not in validate_required_fields(contract)
+
+
+def test_business_gtm_chinese_judgment_uses_business_contract_schema(tmp_path):
+    missing_packet = tmp_path / "missing" / "research_evidence_packet.md"
+    contract = generate_decision_context_contract(
+        original_query=BUSINESS_GTM_QUERY,
+        research_packet_path=missing_packet,
+    )
+
+    assert contract["task_topic"]["domain"] == "business_strategy"
+    assert contract["user_output_contract"]["required_sections"] == [
+        "1. 下一阶段最应该押注的 GTM 顺序",
+        "2. 哪些增长动作是虚荣指标",
+        "3. 如何判断 PMF 信号是真的",
+        "4. 什么时候应该暂停产品功能扩张",
+        "5. 给出 90 天执行计划，但明确哪些只是合理推断",
+        "证据与推断边界",
+    ]
+    variable_ids = {variable["id"] for variable in contract["key_variables"]}
+    dimension_ids = {dimension["id"] for dimension in contract["required_dimensions"]}
+    assert {"gtm_order", "pmf_signal_quality", "feature_expansion_pause", "ninety_day_plan"} <= variable_ids
+    assert {
+        "gtm_sequence",
+        "vanity_metric_filter",
+        "market_fit_signal_quality",
+        "stop_pause_feature_expansion",
+        "phased_execution_plan",
+        "evidence_inference_boundary",
+    } <= dimension_ids
+    assert "未来优势变陷阱 Top5" not in contract["user_output_contract"]["required_sections"]
+    assert "iq_124" not in {moderator["id"] for moderator in contract["moderator_variables"]}
+    assert validate_required_fields(contract) == []
 
 
 def test_top5_item_fields_enter_contract(tmp_path):

@@ -5310,6 +5310,32 @@ def test_business_strategy_final_good():
     executors._assert_final_controller_packet_quality(packet, text)
 
 
+def test_business_strategy_decision_contract_final_good(tmp_path):
+    import tools.task_engine_executors as executors
+    from tools.decision_context_contract import (
+        generate_decision_context_contract,
+        validate_final_report_contract_rendering,
+    )
+
+    packet = _business_strategy_final_packet()
+    query = str(packet["query"])
+    contract = generate_decision_context_contract(
+        original_query=query,
+        research_packet_path=tmp_path / "missing" / "research_evidence_packet.md",
+    )
+    packet["mode"] = ENGINE_DECISION
+    packet["decision_context_contract"] = contract
+    packet["decision_context_contract_required"] = True
+
+    text = executors._final_controller_report_from_packet(packet)
+
+    assert "## 1. 下一阶段最应该押注的 GTM 顺序" in text
+    assert "## 证据与推断边界" in text
+    assert "Founder-led" in text or "founder-led" in text
+    assert validate_final_report_contract_rendering(text, contract) == []
+    executors._assert_final_controller_packet_quality(packet, text)
+
+
 def test_business_strategy_final_missing_sequence_bad():
     import tools.task_engine_executors as executors
 
