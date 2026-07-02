@@ -8135,7 +8135,23 @@ def test_decision_evidence_judge_prompt_includes_schema_contract(tmp_path: Path)
 
     assert "Your first non-empty line must be exactly: evidence_quality_map" in prompt
     assert "Write strength_by_claim as a standalone line exactly: strength_by_claim" in prompt
+    assert "Use this exact section scaffold" in prompt
+    assert "\nstrength_by_claim\n" in prompt
+    assert "  evidence_basis: <current-run artifact or research packet basis>" in prompt
     assert "Do not write a report title" in prompt
+
+
+def test_decision_evidence_judge_retry_prompt_includes_exact_schema_scaffold():
+    import tools.task_engine_executors as executors
+
+    retry_prompt = executors._decision_evidence_judge_schema_retry_prompt("base prompt")
+
+    assert "Schema retry contract" in retry_prompt
+    assert "Use this exact section scaffold" in retry_prompt
+    assert "\nevidence_quality_map\n" in retry_prompt
+    assert "\nstrength_by_claim\n" in retry_prompt
+    assert "  strength: <high|medium|low>" in retry_prompt
+    assert "No title, no markdown heading prefix" in retry_prompt
 
 
 def test_evidence_judge_not_applicable_sections_continue_to_fail_closed():
@@ -8152,6 +8168,26 @@ def test_evidence_judge_not_applicable_sections_continue_to_fail_closed():
         raise AssertionError("not-applicable evidence_judge output must fail closed")
 
     assert "evidence_judge: artifact_quality_error:section_start_mismatch" in error
+
+
+def test_evidence_judge_strength_by_claim_inline_label_still_blocks():
+    import tools.task_engine_executors as executors
+
+    invalid = """evidence_quality_map
+
+strength_by_claim claim: trend evidence is uncertain / strength: medium / evidence_basis: current run / uncertainty_or_gap: direct data missing
+
+applicability_to_user_context
+Applicable with limits.
+
+uncertainty_and_limits
+Evidence remains incomplete.
+
+evidence_gaps_for_later_stages
+Need direct evidence.
+"""
+
+    assert executors._evidence_judge_artifact_quality_error(invalid) == "missing_strength_by_claim"
 
 
 def test_evidence_judge_schema_failure_retries_with_compact_prompt(tmp_path: Path):

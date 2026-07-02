@@ -8711,6 +8711,30 @@ def _decision_stage_output_contract_lines(stage: StageSpec) -> list[str]:
         "Write strength_by_claim as a standalone line exactly: strength_by_claim",
         "Do not write a report title, markdown H1/H2 heading, table-first response, summary judgment, recommendation, or downstream advice.",
         "For each strength_by_claim item include: claim / strength: high-medium-low / evidence_basis / uncertainty_or_gap.",
+        *_decision_evidence_judge_schema_scaffold_lines(),
+    ]
+
+
+def _decision_evidence_judge_schema_scaffold_lines() -> list[str]:
+    return [
+        "Use this exact section scaffold; keep every section heading on its own line:",
+        "evidence_quality_map",
+        "- evidence area: <quality / applicability / gap>",
+        "",
+        "strength_by_claim",
+        "- claim: <decision-relevant claim>",
+        "  strength: <high|medium|low>",
+        "  evidence_basis: <current-run artifact or research packet basis>",
+        "  uncertainty_or_gap: <specific uncertainty or missing evidence>",
+        "",
+        "applicability_to_user_context",
+        "- applicability: <where evidence does and does not apply>",
+        "",
+        "uncertainty_and_limits",
+        "- limit: <overclaim boundary>",
+        "",
+        "evidence_gaps_for_later_stages",
+        "- gap: <gap later stages must preserve>",
     ]
 
 
@@ -8724,6 +8748,7 @@ def _decision_evidence_judge_schema_retry_prompt(prompt: str) -> str:
             "Return only the five required sections now.",
             "First line exactly: evidence_quality_map",
             "Second required section heading exactly: strength_by_claim",
+            *_decision_evidence_judge_schema_scaffold_lines(),
             "No title, no markdown heading prefix, no table-first answer, no recommendation, no final decision.",
         ]
     )
