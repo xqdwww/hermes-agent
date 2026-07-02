@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,27 @@ def test_evidence_tiers_per_item_retained(tmp_path):
     assert "证据支持" in text
     assert "合理推断" in text
     assert "前瞻假设" in text
+    assert "证据层级：证据层级" not in text
+    assert not re.search(r"(?m)^\d+\.\s+\[不支持/风险\]", text)
+
+
+def test_contract_final_report_avoids_scaffold_anchor_residue(tmp_path):
+    text, _contract = _render(tmp_path)
+
+    assert "最强结构性判断是" in text
+    assert "判断锚点" not in text
+    assert "提醒这个判断" not in text
+    assert "按要求保留该字段" not in text
+    for fragment in [
+        "触发条件限定的是起点",
+        "中间机制限定的是起点",
+        "反转后的陷阱限定的是起点",
+        "反转后的优势限定的是起点",
+        "失效条件限定的是起点",
+        "确定性等级限定的是起点",
+        "证据层级限定的是起点",
+    ]:
+        assert fragment not in text
 
 
 def test_internal_language_absent(tmp_path):

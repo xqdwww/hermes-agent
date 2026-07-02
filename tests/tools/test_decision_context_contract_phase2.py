@@ -127,18 +127,28 @@ def test_convergence_prompt_input_includes_contract(tmp_path):
 
 def test_external_calibration_prompt_input_includes_contract(tmp_path):
     _paths, context = _contract_context(tmp_path)
+    contract = context["contract"]
 
     prompt = _decision_external_calibration_prompt(
         [],
         query=ADHD_AI_QUERY,
         base_dir=tmp_path / "decision_run",
-        research_packet_path=context["contract"]["source_provenance"]["research_packet_path"],
-        decision_context_contract=context["contract"],
+        research_packet_path=contract["source_provenance"]["research_packet_path"],
+        decision_context_contract=contract,
     )
 
     assert "## decision_context_contract" in prompt
     assert context["contract_id"] in prompt
     assert "Do not switch the object of analysis to pipeline execution" in prompt
+    assert "## external_calibration contract output schema" in prompt
+    assert f"decision_context_contract_id: {contract['contract_id']}" in prompt
+    assert f"task_topic: {contract['task_topic']['title']}" in prompt
+    assert (
+        "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
+        "AI 信息环境; 知识获取成本下降; 儿童长期发展"
+    ) in prompt
+    assert "moderator_variables: IQ 124; 长期柔术训练" in prompt
+    assert "calibration_contract_coverage" in prompt
 
 
 def test_decision_dry_intercept_generates_contract_and_enables_checks(tmp_path):

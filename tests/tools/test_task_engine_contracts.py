@@ -9034,6 +9034,7 @@ def test_external_calibration_wrapper_success_uses_gpt_bridge_without_gemini(mon
     monkeypatch.setenv("CHATGPT_BRIDGE_TOKEN", secret)
     monkeypatch.setattr(executors, "_hermes_env_value", lambda key: "")
     monkeypatch.setattr(executors, "CHATGPT_APP_BRIDGE_WRAPPER", wrapper)
+    monkeypatch.setattr(executors, "_gpt_bridge_gui_session_locked", lambda: False)
 
     class NoGeminiExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
@@ -9063,6 +9064,7 @@ def test_external_calibration_wrapper_failure_falls_back_to_gemini(monkeypatch, 
     monkeypatch.delenv("HERMES_GPT_BRIDGE_URL", raising=False)
     monkeypatch.setattr(executors, "_hermes_env_value", lambda key: "")
     monkeypatch.setattr(executors, "CHATGPT_APP_BRIDGE_WRAPPER", wrapper)
+    monkeypatch.setattr(executors, "_gpt_bridge_gui_session_locked", lambda: False)
 
     class FallbackExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
@@ -9088,6 +9090,7 @@ def test_external_calibration_wrapper_absent_and_env_absent_not_configured(monke
     monkeypatch.setattr(executors, "_hermes_env_value", lambda key: "")
     monkeypatch.setattr(executors, "CHATGPT_APP_BRIDGE_WRAPPER", tmp_path / "missing.py")
     monkeypatch.setattr(executors, "_decision_engine_bridge_script", lambda: None)
+    monkeypatch.setattr(executors, "_gpt_bridge_gui_session_locked", lambda: False)
 
     class FailingExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
@@ -9103,6 +9106,39 @@ def test_external_calibration_wrapper_absent_and_env_absent_not_configured(monke
 
     assert "GPT_BRIDGE_UNAVAILABLE:GPT_BRIDGE_NOT_CONFIGURED" in message
     assert "AGY_UNAVAILABLE" in message
+
+
+def test_external_calibration_locked_gui_routes_to_gemini_fallback(monkeypatch, tmp_path: Path):
+    import tools.task_engine_executors as executors
+
+    wrapper = tmp_path / "chatgpt_app_bridge_http_cli.py"
+    wrapper.write_text(
+        "import json\n"
+        "print(json.dumps({'success': True, 'response': 'calibration_verdict\\nwrong bridge path'}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HERMES_GPT_BRIDGE_CMD", raising=False)
+    monkeypatch.delenv("HERMES_GPT_BRIDGE_URL", raising=False)
+    monkeypatch.setattr(executors, "_hermes_env_value", lambda key: "")
+    monkeypatch.setattr(executors, "CHATGPT_APP_BRIDGE_WRAPPER", wrapper)
+    monkeypatch.setattr(executors, "_gpt_bridge_gui_session_locked", lambda: True)
+
+    class FallbackExecutor(LocalTaskEngineExecutor):
+        def run_agy_gemini(self, stage, prompt, model, timeout_s=None):
+            assert stage.stage_name == "external_calibration"
+            assert stage.model == GEMINI_PRO_HIGH
+            assert model == GEMINI_PRO_HIGH
+            self.last_executor_models[stage.stage_name] = GEMINI_PRO_HIGH
+            return COMPLETE_EXTERNAL_CALIBRATION_FIXTURE
+
+    stage = CANONICAL_STAGES[ENGINE_RESEARCH_DECISION][14]
+    executor = FallbackExecutor()
+    output = executor.run_external_calibration(stage, {"prompt": "calibrate this"})
+
+    assert executor.last_executor_models["external_calibration"] == GEMINI_PRO_HIGH
+    assert "executor_model: Gemini 3.1 Pro (High)" in output
+    assert "GPT_BRIDGE_UNAVAILABLE:GPT_BRIDGE_GUI_SESSION_LOCKED" in output
+    assert "wrong bridge path" not in output
 
 
 def test_external_calibration_gpt_unavailable_falls_back_to_gemini_pro(monkeypatch):

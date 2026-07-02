@@ -16,6 +16,7 @@ from tools.task_engine_contracts import (
     validate_pipeline,
 )
 from tools.task_engine_executors import _final_controller_report_from_packet
+from tools.task_engine_executors import _assert_final_controller_packet_quality
 
 
 ADHD_AI_QUERY = """
@@ -127,6 +128,52 @@ def test_valid_contract_driven_adhd_final_passes_phase4_gate(tmp_path):
     assert _errors_for(text, contract) == []
 
 
+def test_contract_driven_adhd_final_passes_user_facing_quality_gate(tmp_path):
+    packet = {
+        "mode": ENGINE_DECISION,
+        "query": ADHD_AI_QUERY,
+        "decision_context_contract_required": True,
+        "decision_context_contract": _contract(tmp_path),
+        "excerpts": {
+            "convergence_report": "validated convergence text",
+            "external_calibration": "validated calibration text",
+        },
+    }
+    text = _final_controller_report_from_packet(packet)
+
+    assert "   - 当前优势 / 当前缺陷" not in text
+    assert "最强结构性判断是" in text
+    assert "[证据支持]" in text
+    assert "[合理推断]" in text
+    assert "[前瞻假设]" in text
+    assert "[不支持/风险]" in text
+    assert "判断锚点" not in text
+    assert "证据层级：证据层级" not in text
+    assert "提醒这个判断" not in text
+    assert "按要求保留该字段" not in text
+    assert not re.search(r"(?m)^\d+\.\s+\[不支持/风险\]", text)
+    for required_quality_term in ["关键驱动", "机制链", "输入变量", "中介机制", "输出变量", "情景分叉", "证据强度", "争议点", "证据缺口"]:
+        assert required_quality_term in text
+    _assert_final_controller_packet_quality(packet, text)
+
+
+def test_contract_driven_final_does_not_use_contract_field_names_as_reasoning_anchors(tmp_path):
+    text, _contract = _valid_final(tmp_path)
+
+    scaffold_anchor_fragments = [
+        "触发条件限定的是起点",
+        "中间机制限定的是起点",
+        "反转后的陷阱限定的是起点",
+        "反转后的优势限定的是起点",
+        "失效条件限定的是起点",
+        "确定性等级限定的是起点",
+        "证据层级限定的是起点",
+        "当前优势 / 当前缺陷限定的是起点",
+    ]
+    for fragment in scaffold_anchor_fragments:
+        assert fragment not in text
+
+
 def test_production_pipeline_final_validation_passes_with_contract(tmp_path):
     text, contract = _valid_final(tmp_path)
     decision_dir = tmp_path / "decision_run"
@@ -212,7 +259,7 @@ def test_missing_required_dimension_blocks(tmp_path):
 
 def test_missing_evidence_tier_blocks(tmp_path):
     text, contract = _valid_final(tmp_path)
-    bad = text.replace("证据层级：证据支持", "证据类型：证据支持", 2)
+    bad = text.replace("证据层级：合理推断", "证据类型：合理推断", 1)
 
     assert any(error.startswith("missing_evidence_tier_field:未来优势变陷阱 Top5:1") for error in _errors_for(bad, contract))
 

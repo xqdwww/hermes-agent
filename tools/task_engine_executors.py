@@ -3190,6 +3190,7 @@ def run_decision_final_smoke(
                         decision_context_contract=decision_context["contract"] if decision_context else None,
                     ),
                     "base_dir": str(base_dir),
+                    "decision_context_contract": decision_context["contract"] if decision_context else None,
                 },
             ),
         )
@@ -3199,10 +3200,69 @@ def run_decision_final_smoke(
         if decision_context:
             calibration_errors = validate_calibration_object(content, decision_context["contract"])
             if calibration_errors:
-                raise RuntimeError(
-                    "EXTERNAL_CALIBRATION_WRONG_OBJECT_NOT_USER_DECISION:"
-                    + ",".join(calibration_errors)
+                executor_model = str(
+                    (getattr(executor, "last_executor_models", {}) or {}).get(stage.stage_name)
+                    or stage.model
                 )
+                _write_external_calibration_invalid(
+                    stage,
+                    base_dir=base_dir,
+                    content=content,
+                    executor_model=executor_model,
+                    fallback_used=executor_model == GEMINI_PRO_HIGH or "GEMINI" in executor_model.upper(),
+                    error_summary=(
+                        "EXTERNAL_CALIBRATION_WRONG_OBJECT_NOT_USER_DECISION:"
+                        + ",".join(calibration_errors)
+                    ),
+                    attempt="contract_validation",
+                )
+                retry_prompt = _decision_external_calibration_contract_retry_prompt(
+                    _decision_external_calibration_prompt(
+                        stages,
+                        query=query,
+                        base_dir=base_dir,
+                        research_packet_path=research_packet_path,
+                        decision_context_contract=decision_context["contract"],
+                    ),
+                    contract_errors=calibration_errors,
+                    contract=decision_context["contract"],
+                )
+                content = run_stage(
+                    stage,
+                    lambda: executor.run_external_calibration(
+                        stage,
+                        {
+                            "prompt": retry_prompt,
+                            "base_dir": str(base_dir),
+                            "decision_context_contract": decision_context["contract"],
+                        },
+                    ),
+                )
+                leaked = _external_calibration_forbidden_tokens(content)
+                if leaked:
+                    raise RuntimeError(f"external_calibration: contract_retry_forbidden final-output tokens: {', '.join(leaked)}")
+                calibration_errors = validate_calibration_object(content, decision_context["contract"])
+                if calibration_errors:
+                    executor_model = str(
+                        (getattr(executor, "last_executor_models", {}) or {}).get(stage.stage_name)
+                        or stage.model
+                    )
+                    _write_external_calibration_invalid(
+                        stage,
+                        base_dir=base_dir,
+                        content=content,
+                        executor_model=executor_model,
+                        fallback_used=executor_model == GEMINI_PRO_HIGH or "GEMINI" in executor_model.upper(),
+                        error_summary=(
+                            "EXTERNAL_CALIBRATION_WRONG_OBJECT_NOT_USER_DECISION:"
+                            + ",".join(calibration_errors)
+                        ),
+                        attempt="contract_retry_validation",
+                    )
+                    raise RuntimeError(
+                        "EXTERNAL_CALIBRATION_WRONG_OBJECT_NOT_USER_DECISION:"
+                        + ",".join(calibration_errors)
+                    )
         _append_real_stage(
             stages,
             stage,
@@ -3555,6 +3615,48 @@ def _decision_context_contract_convergence_output_schema_lines(contract: dict[st
         "In the body, include a semantic_contract_coverage section that reasons about every key_variables item, every moderator_variables item, and every required_dimensions item.",
         "The deterministic contract header alone is not enough; the body must substantively discuss each required item.",
     ]
+
+
+def _decision_context_contract_calibration_output_schema_lines(contract: dict[str, Any] | None) -> list[str]:
+    if not contract:
+        return []
+    title = str(contract.get("task_topic", {}).get("title") or "")
+    return [
+        "",
+        "## external_calibration contract output schema",
+        "The active external_calibration output must begin with these machine-readable contract lines before prose:",
+        f"decision_context_contract_id: {contract.get('contract_id')}",
+        f"task_topic: {title}",
+        _contract_key_variables_line(contract),
+        _contract_moderator_variables_line(contract),
+        _contract_required_dimensions_line(contract),
+        _contract_evidence_tier_mapping_line(contract),
+        "Then write calibration_verdict, agreement_points, disagreement_or_risk_points, missing_considerations, and final_adjustment_recommendation around the actual user decision object.",
+        "In the body, include calibration_contract_coverage that substantively discusses every key_variables item, every moderator_variables item, every required_dimensions item, and all allowed evidence_tiers.",
+        "Do not omit task_topic, any key_variables entry, moderator_variables entry, required_dimensions entry, or evidence_tiers; omission blocks this stage.",
+        "Do not calibrate pipeline execution, production readiness, schema rollout, pilot rollout, task-engine implementation, or tool availability.",
+    ]
+
+
+def _decision_external_calibration_contract_retry_prompt(
+    prompt: str,
+    *,
+    contract_errors: list[str],
+    contract: dict[str, Any],
+) -> str:
+    return "\n".join(
+        [
+            prompt,
+            "",
+            "## External calibration contract retry instructions",
+            "The previous external_calibration output failed the decision_context_contract identity validator.",
+            "Failed contract checks: " + ", ".join(contract_errors),
+            "Return a complete external_calibration artifact for the actual user decision object now.",
+            *_decision_context_contract_calibration_output_schema_lines(contract),
+            "The contract header alone is not enough; the body must substantively calibrate the same task_topic, key_variables, moderator_variables, required_dimensions, and evidence_tiers.",
+            "Do not discuss pipeline readiness, executor readiness, schema readiness, tool availability, or rollout status except to say they are out of scope.",
+        ]
+    )
 
 
 def _decision_convergence_contract_retry_prompt(
@@ -3954,6 +4056,9 @@ def _run_gpt_bridge_calibration(prompt: str) -> str:
     url_value = os.getenv("HERMES_GPT_BRIDGE_URL", "").strip() or _hermes_env_value("HERMES_GPT_BRIDGE_URL")
     timeout_s = _gpt_bridge_timeout_s()
     settle_s = _gpt_bridge_settle_s()
+    if _gpt_bridge_gui_session_locked():
+        _GPT_BRIDGE_LAST_EXECUTOR_MODEL = "GPT Bridge"
+        raise RuntimeError("GPT_BRIDGE_GUI_SESSION_LOCKED")
     if command_value:
         _GPT_BRIDGE_LAST_EXECUTOR_MODEL = "GPT Bridge"
         command = shlex.split(command_value)
@@ -4032,6 +4137,30 @@ def _decision_engine_bridge_script() -> Path | None:
         value = stripped.split(":", 1)[1].strip().strip('"').strip("'")
         return Path(value) if value else None
     return None
+
+
+def _gpt_bridge_gui_session_locked() -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        result = subprocess.run(
+            ["ioreg", "-n", "Root", "-d1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    return _ioreg_console_session_locked(result.stdout or "")
+
+
+def _ioreg_console_session_locked(text: str) -> bool:
+    for session in re.findall(r"\{[^{}]*\}", text or ""):
+        if '"kCGSSessionOnConsoleKey"=Yes' in session and '"CGSSessionScreenIsLocked"=Yes' in session:
+            return True
+    return False
 
 
 def _run_chatgpt_app_bridge_wrapper(wrapper: Path, prompt: str, *, timeout_s: int, settle_s: int) -> str:
@@ -8853,6 +8982,7 @@ def _decision_external_calibration_prompt(
     if context:
         lines.extend(["", "## optional_research_evidence_packet_context", context])
     lines.extend(_decision_context_contract_prompt_block(decision_context_contract))
+    lines.extend(_decision_context_contract_calibration_output_schema_lines(decision_context_contract))
     return "\n".join(lines)
 
 
@@ -10225,8 +10355,20 @@ def _decision_contract_driven_final_report(query: str, packet: dict[str, Any], c
     moderators = _contract_labels(contract.get("moderator_variables") or [])
     dimensions = _contract_labels(contract.get("required_dimensions") or [])
     evidence_tiers = _contract_evidence_tier_labels(contract)
+    anchor_terms = _contract_final_anchor_terms(query, contract)
+    context_terms = _contract_final_context_terms(query, contract)
     title = str(contract.get("task_topic", {}).get("title") or "决策问题")
     lines = ["# 决策任务最终报告", ""]
+    scope = _contract_final_scope_sentence(
+        title,
+        anchor_terms,
+        context_terms=context_terms,
+        variables=variables,
+        moderators=moderators,
+        dimensions=dimensions,
+    )
+    if scope:
+        lines.extend([scope, ""])
     for section in sections:
         lines.append(f"## {section}")
         if _is_contract_top5_section(section):
@@ -10241,14 +10383,16 @@ def _decision_contract_driven_final_report(query: str, packet: dict[str, Any], c
                     moderators=moderators,
                     dimensions=dimensions,
                     evidence_tiers=evidence_tiers,
+                    anchor_terms=anchor_terms,
+                    calibration_text=calibration_text,
                 )
             )
         elif "最危险" in section:
-            lines.extend(_contract_dangerous_path_section(variables, moderators, dimensions, evidence_tiers))
+            lines.extend(_contract_dangerous_path_section(variables, moderators, dimensions, evidence_tiers, anchor_terms))
         elif "最反直觉" in section:
-            lines.extend(_contract_counterintuitive_hypothesis_section(variables, moderators, dimensions, evidence_tiers))
+            lines.extend(_contract_counterintuitive_hypothesis_section(variables, moderators, dimensions, evidence_tiers, anchor_terms))
         elif section == "danger_flag":
-            lines.extend(_contract_danger_flag_section(title, variables, moderators, dimensions, evidence_tiers))
+            lines.extend(_contract_danger_flag_section(title, variables, moderators, dimensions, evidence_tiers, anchor_terms))
         else:
             lines.extend(_contract_generic_required_section(section, variables, moderators, dimensions, evidence_tiers))
         lines.append("")
@@ -10279,6 +10423,200 @@ def _contract_evidence_tier_labels(contract: dict[str, Any]) -> list[str]:
     return labels or ["合理推断", "前瞻假设"]
 
 
+def _contract_final_anchor_terms(query: str, contract: dict[str, Any]) -> list[str]:
+    forbidden = _contract_forbidden_output_terms(contract)
+    scaffold_terms = _contract_scaffold_anchor_terms(contract)
+    candidates: list[str] = []
+    candidates.extend(_contract_labels(contract.get("key_variables") or []))
+    candidates.extend(_contract_labels(contract.get("moderator_variables") or []))
+    candidates.extend(_contract_labels(contract.get("required_dimensions") or []))
+    task_topic = contract.get("task_topic") if isinstance(contract.get("task_topic"), dict) else {}
+    candidates.extend(str(term) for term in task_topic.get("must_match_terms") or [])
+    for _name, terms in _case_anchor_groups_from_query(query):
+        candidates.extend(terms)
+    anchors: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        term = " ".join(str(raw or "").strip(" ：:，,。；;、/()（）").split())
+        if len(term) < 2 or len(term) > 46:
+            continue
+        if re.search(r"(?:不要|禁止|不得|不能|避免)", term):
+            continue
+        normalized = re.sub(r"\s+", "", term).lower()
+        if not normalized or normalized in seen:
+            continue
+        if normalized in scaffold_terms:
+            continue
+        if _contract_anchor_is_overbroad_shorthand(normalized):
+            continue
+        if _contract_anchor_contains_forbidden_output(normalized, forbidden):
+            continue
+        seen.add(normalized)
+        anchors.append(term)
+    return anchors[:18]
+
+
+def _contract_anchor_is_overbroad_shorthand(normalized: str) -> bool:
+    return normalized in {"ai", "iq", "adhd", "top5", "top"}
+
+
+def _contract_final_context_terms(query: str, contract: dict[str, Any]) -> list[str]:
+    forbidden = _contract_forbidden_output_terms(contract)
+    scaffold_terms = _contract_scaffold_anchor_terms(contract)
+    labels = {
+        re.sub(r"\s+", "", label).lower()
+        for label in [
+            *_contract_labels(contract.get("key_variables") or []),
+            *_contract_labels(contract.get("moderator_variables") or []),
+            *_contract_labels(contract.get("required_dimensions") or []),
+        ]
+        if label
+    }
+    context: list[str] = []
+    seen: set[str] = set()
+    for name, terms in _case_anchor_groups_from_query(query):
+        if name.startswith(("ranking_item", "question_term", "negative_constraint")):
+            continue
+        for raw in terms:
+            term = " ".join(str(raw or "").strip(" ：:，,。；;、/()（）").split())
+            normalized = re.sub(r"\s+", "", term).lower()
+            if not normalized or normalized in seen or normalized in labels:
+                continue
+            if normalized in scaffold_terms or _contract_anchor_is_overbroad_shorthand(normalized):
+                continue
+            if _contract_anchor_contains_forbidden_output(normalized, forbidden):
+                continue
+            if not _context_term_is_case_boundary(term):
+                continue
+            seen.add(normalized)
+            context.append(term)
+    return context[:4]
+
+
+def _context_term_is_case_boundary(term: str) -> bool:
+    value = term or ""
+    return bool(
+        re.search(r"\d+(?:\.\d+)?\s*岁", value)
+        or re.search(r"\d+\s*年", value)
+        or any(token in value for token in ("男孩", "女孩", "未来", "长期", "成本", "训练"))
+    )
+
+
+def _contract_scaffold_anchor_terms(contract: dict[str, Any]) -> set[str]:
+    terms = {
+        "top5",
+        "top",
+        "当前优势",
+        "当前缺陷",
+        "当前优势/当前缺陷",
+        "触发条件",
+        "中间机制",
+        "反转后的陷阱",
+        "反转后的优势",
+        "反转后的陷阱/反转后的优势",
+        "失效条件",
+        "确定性等级",
+        "证据层级",
+        "决策含义",
+        "最终输出必须包含",
+        "每条top5必须包含",
+        "ai信息环境下",
+        "dangerflag",
+        "danger_flag",
+    }
+    output_contract = contract.get("user_output_contract") if isinstance(contract.get("user_output_contract"), dict) else {}
+    terms.update(str(section or "") for section in output_contract.get("required_sections") or [])
+    for field in output_contract.get("required_item_fields") or []:
+        if isinstance(field, dict):
+            terms.add(str(field.get("label") or ""))
+    return {re.sub(r"\s+", "", term).lower() for term in terms if str(term or "").strip()}
+
+
+def _contract_forbidden_output_terms(contract: dict[str, Any]) -> set[str]:
+    terms: set[str] = set()
+    for record in contract.get("forbidden_content") or []:
+        if not isinstance(record, dict):
+            continue
+        for raw in [record.get("label"), *(record.get("aliases") or [])]:
+            term = re.sub(r"\s+", "", str(raw or "")).lower()
+            if term:
+                terms.add(term)
+    return terms
+
+
+def _contract_anchor_contains_forbidden_output(normalized: str, forbidden: set[str]) -> bool:
+    return any(term and (term in normalized or normalized in term) for term in forbidden)
+
+
+def _contract_final_scope_sentence(
+    title: str,
+    anchor_terms: list[str],
+    *,
+    context_terms: list[str],
+    variables: list[str],
+    moderators: list[str],
+    dimensions: list[str],
+) -> str:
+    anchors = "、".join(anchor_terms[:6])
+    if not anchors:
+        return ""
+    variable_focus = "、".join(variables[:3]) or "注意力、兴趣和执行功能"
+    moderator_focus = "、".join(moderators[:2]) or "关键调节变量"
+    dimension_focus = "、".join(dimensions[1:4] or dimensions[:3]) or "问题选择、验证和收束"
+    context_sentence = ""
+    if context_terms:
+        context_sentence = "案例边界还包括：" + "、".join(context_terms[:3]) + "；这些只限定适用场景，不提高结论确定性。"
+    return (
+        f"判断对象：{title}；适用范围锁定在 {anchors}。"
+        f"{context_sentence}"
+        f"最强结构性判断是：AI 降低知识获取成本后，真正稀缺的不是更快得到答案，而是保留{dimension_focus}；"
+        f"{variable_focus}只有经过{moderator_focus}和真实反馈约束，才可能转成长期优势。"
+        f"关键驱动：{variable_focus}、{moderator_focus}、AI 信息环境和真实反馈闭环共同决定反转方向。"
+        f"机制链：输入变量是{variable_focus}，中介机制是 AI 降低知识获取成本后改变反馈速度和验证负担，输出变量是{dimension_focus}是否被保留。"
+        f"情景分叉：情景 A 是速度被验证和收束约束，优势转成可用能力；情景 B 是速度绕过验证，优势转成长期陷阱。"
+        "证据使用方式是：[证据支持]只用于当前材料能直接支持的事实底座；"
+        "[合理推断]用于机制链判断；[前瞻假设]用于十年尺度的结构性反转。"
+        "[不支持/风险]只用于反证信号和证据不足的风险提醒。"
+        "因此下面的 Top5 不是培养方案或医学判断，而是风险/机会的条件化排序。"
+    )
+
+
+def _contract_evidence_marker(tier: str) -> str:
+    if tier == "证据不足":
+        return "[不支持/风险]"
+    return f"[{tier}]"
+
+
+def _contract_clause(label: str, value: str) -> str:
+    return f"{label}：{str(value).strip().rstrip('。；;')}"
+
+
+def _contract_adjusted_evidence_tier(raw_tier: str, *, mode: str, index: int, calibration_text: str) -> str:
+    """Keep evidence discipline when contract order offers stronger tiers than calibration allows."""
+    value = (calibration_text or "").lower()
+    if raw_tier == "证据不足":
+        return "合理推断" if index <= 2 else "前瞻假设"
+    if raw_tier == "证据支持" and (
+        mode in {"trap", "advantage"}
+        or "downgrade" in value
+        or "over-estimates" in value
+        or "over-inference" in value
+        or "strict downgrade" in value
+    ):
+        return "合理推断" if index <= 2 else "前瞻假设"
+    return raw_tier
+
+
+def _contract_tier_rationale(tier: str) -> str:
+    if tier == "证据支持":
+        return "证据支持；只限当前材料直接支撑的事实底座"
+    if tier == "合理推断":
+        return "合理推断；用于机制链和条件判断，不能写成已证实结果"
+    if tier == "前瞻假设":
+        return "前瞻假设；用于十年尺度趋势，必须保留反证信号"
+    return "证据不足；只能作为风险提醒或待核验假设"
+
+
 def _is_contract_top5_section(section: str) -> bool:
     return "Top5" in section or "top5" in section.lower()
 
@@ -10294,8 +10632,8 @@ def _moderator_phrase(moderators: list[str], dimensions: list[str], index: int) 
     secondary = _cycle_label(moderators, index + 1, primary)
     dimension = _cycle_label(dimensions, index, "核心能力维度")
     if primary == secondary:
-        return f"{primary} 通过 {dimension} 改变机制强度。"
-    return f"{primary} 与 {secondary} 共同通过 {dimension} 改变机制强度。"
+        return f"{primary}通过{dimension}改变机制强度。"
+    return f"{primary}与{secondary}共同通过{dimension}改变机制强度。"
 
 
 def _contract_top_items(
@@ -10307,6 +10645,8 @@ def _contract_top_items(
     moderators: list[str],
     dimensions: list[str],
     evidence_tiers: list[str],
+    anchor_terms: list[str],
+    calibration_text: str,
 ) -> list[str]:
     trap_pairs = [
         ("快速理解", "未经验证的快速接受"),
@@ -10328,18 +10668,42 @@ def _contract_top_items(
         current, reversal = pairs[(idx - 1) % len(pairs)]
         variable = _cycle_label(variables, idx - 1, "核心变量")
         dimension = _cycle_label(dimensions, idx - 1, "关键能力")
-        tier = _cycle_label(evidence_tiers, idx - 1, "合理推断")
+        raw_tier = _cycle_label(evidence_tiers, idx - 1, "合理推断")
+        tier = _contract_adjusted_evidence_tier(raw_tier, mode=mode, index=idx, calibration_text=calibration_text)
+        marker = _contract_evidence_marker(tier)
         certainty = _cycle_label(["中", "中", "低", "中", "低"], idx - 1, "中")
+        anchor = _cycle_label(anchor_terms, idx - 1 if mode == "trap" else idx + 7, "")
         trigger = (
-            f"当 AI 让知识获取成本继续下降，而 {variable} 被速度和即时反馈放大时。"
+            f"当 AI 让知识获取、解释、反馈、规划和个性化学习成本继续下降，而{variable}被速度和即时反馈放大时"
             if mode == "trap"
-            else f"当 AI 承担低价值知识获取后，{variable} 可以转向问题选择和验证时。"
+            else f"当 AI 承担低价值知识获取后，{variable}可以转向问题选择、验证和收束时"
         )
-        mechanism = f"{_moderator_phrase(moderators, dimensions, idx - 1)} 关键维度是 {dimension}。"
+        mechanism = (
+            _contract_top_item_mechanism(
+                mode=mode,
+                current=current,
+                reversal=reversal,
+                variable=variable,
+                dimension=dimension,
+                moderators=moderators,
+                index=idx - 1,
+                anchor=anchor,
+            )
+        )
         failure = (
-            "如果仍保留验证、收束和延迟反馈边界，这一反转会减弱。"
+            f"如果{dimension}、真实反馈和延迟反馈边界仍被保留，这一反转会减弱"
             if mode == "trap"
-            else "如果缺少验证、收束或真实反馈，这一优势不会稳定出现。"
+            else f"如果缺少{dimension}、收束或真实反馈，这一优势不会稳定出现"
+        )
+        decision_use = (
+            f"把{current}降级为需要验证的条件性收益；重点观察它是否损害{dimension}"
+            if mode == "trap"
+            else f"把{current}视为可能的情境优势；只有在{dimension}被保留时才提高判断权重"
+        )
+        headline = (
+            f"{current}的陷阱不是速度本身，而是速度绕过{dimension}后变成{reversal}"
+            if mode == "trap"
+            else f"{current}只有被{dimension}拉回验证闭环时，才可能变成{reversal}"
         )
         field_values = {
             "当前优势 / 当前缺陷": current,
@@ -10347,14 +10711,55 @@ def _contract_top_items(
             "中间机制": mechanism,
             "反转后的陷阱 / 反转后的优势": reversal,
             "失效条件": failure,
-            "确定性等级": f"{certainty}；证据层级：{tier}",
-            "证据层级": tier,
+            "确定性等级": certainty,
+            "证据层级": _contract_tier_rationale(tier),
         }
-        lines.append(f"{idx}. {current} -> {reversal}")
+        pieces = []
         for label in field_labels:
-            value = field_values.get(label, field_values.get(label.split("/")[0].strip(), "按合同要求保留该字段。"))
-            lines.append(f"   - {label}：{value}")
+            value = field_values.get(label, field_values.get(label.split("/")[0].strip(), "按要求保留该字段。"))
+            pieces.append(_contract_clause(label, value))
+        if "证据层级" not in field_labels:
+            pieces.append(field_values["证据层级"])
+        pieces.append(_contract_clause("决策含义", decision_use))
+        lines.append(f"{idx}. {marker} {headline}。" + "；".join(pieces) + "。")
     return lines
+
+
+def _contract_top_item_mechanism(
+    *,
+    mode: str,
+    current: str,
+    reversal: str,
+    variable: str,
+    dimension: str,
+    moderators: list[str],
+    index: int,
+    anchor: str,
+) -> str:
+    moderator = _moderator_phrase(moderators, [dimension], index).rstrip("。")
+    anchor_clause = _contract_anchor_reasoning_clause(anchor, variable, index=index)
+    if mode == "trap":
+        return (
+            f"{moderator}；{anchor_clause}。"
+            f"如果{current}被 AI 的低摩擦反馈持续奖励，却没有经过{dimension}，它会从当前优势滑向{reversal}"
+        )
+    return (
+        f"{moderator}；{anchor_clause}。"
+        f"如果{current}能把分散信号带回问题选择、验证和收束，它才会从当前缺陷转成{reversal}"
+    )
+
+
+def _contract_anchor_reasoning_clause(anchor: str, variable: str, *, index: int) -> str:
+    if not anchor:
+        return f"{variable}不能只按表现速度解释"
+    patterns = [
+        f"{anchor}限定的是起点，不等于结果已经成立",
+        f"{anchor}会放大分叉敏感度，但方向仍取决于真实反馈",
+        f"{anchor}只能提高机制相关性，不能替代证据",
+        f"{anchor}需要被验证和收束重新约束",
+        f"{anchor}必须和长期行为变化一起看",
+    ]
+    return patterns[index % len(patterns)]
 
 
 def _contract_dangerous_path_section(
@@ -10362,12 +10767,16 @@ def _contract_dangerous_path_section(
     moderators: list[str],
     dimensions: list[str],
     evidence_tiers: list[str],
+    anchor_terms: list[str],
 ) -> list[str]:
+    anchor = _cycle_label(anchor_terms, 10, _cycle_label(variables, 0, "核心变量"))
+    tier = _cycle_label(evidence_tiers, 1, "合理推断")
     return [
-        f"- 把速度、答案数量和短期表现放在 {_cycle_label(dimensions, 1, '问题选择能力')}、{_cycle_label(dimensions, 2, '验证能力')}、{_cycle_label(dimensions, 3, '收束能力')} 之前，是最危险的错误路径。",
+        f"- {_contract_evidence_marker(tier)} 最危险路径是把速度、答案数量和短期表现放在 {_cycle_label(dimensions, 1, '问题选择能力')}、{_cycle_label(dimensions, 2, '验证能力')}、{_cycle_label(dimensions, 3, '收束能力')} 之前；因为 {anchor} 只说明情境约束，不说明长期结果已经确定。",
         f"- 触发条件：{_cycle_label(variables, 4, 'AI 信息环境')} 提供即时解释和规划，但没有同步保留延迟反馈、事实核查和反证边界。",
-        f"- 调节变量：{_moderator_phrase(moderators, dimensions, 1)} 如果只放大速度而不放大验证，风险上升。",
-        f"- 确定性等级：中；证据层级：{_cycle_label(evidence_tiers, 1, '合理推断')}。",
+        f"- 中间机制：{_moderator_phrase(moderators, dimensions, 1)} 如果只放大速度而不放大验证，风险会上升并挤压身体反馈系统。",
+        f"- 失效条件：一旦问题选择能力、验证能力、收束能力和延迟反馈耐受同时被保留，这条危险路径的确定性下降。",
+        f"- 确定性等级：中；证据层级：{tier}。",
     ]
 
 
@@ -10376,12 +10785,16 @@ def _contract_counterintuitive_hypothesis_section(
     moderators: list[str],
     dimensions: list[str],
     evidence_tiers: list[str],
+    anchor_terms: list[str],
 ) -> list[str]:
+    tier = _cycle_label(evidence_tiers, 2, "前瞻假设")
+    anchor = _cycle_label(anchor_terms, 12, _cycle_label(variables, 1, "关键变量"))
     return [
-        f"- 最反直觉的假设：未来稀缺的不是更快获得知识，而是更慢地选择问题、验证问题并收束问题。",
-        f"- 机制：{_cycle_label(variables, 0, '注意力波动')} 和 {_cycle_label(variables, 1, '兴趣驱动')} 在 AI 信息环境中可能同时放大探索优势和闭环风险。",
+        f"- {_contract_evidence_marker(tier)} 最反直觉的假设：未来稀缺的不是更快获得知识，而是更慢地选择问题、验证问题并收束问题。",
+        f"- 机制：{_cycle_label(variables, 0, '注意力波动')} 和 {_cycle_label(variables, 1, '兴趣驱动')} 在 AI 信息环境中可能同时放大探索优势和闭环风险；{anchor} 是判断这一分叉是否成立的情境锚点。",
         f"- 调节变量：{_moderator_phrase(moderators, dimensions, 4)} 这会决定假设是转为优势还是转为陷阱。",
-        f"- 确定性等级：低；证据层级：{_cycle_label(evidence_tiers, 2, '前瞻假设')}。",
+        f"- 失效条件：如果真实反馈不足、验证能力外包、收束能力没有形成，反直觉优势不会成立。",
+        f"- 确定性等级：低；证据层级：{tier}。",
     ]
 
 
@@ -10391,14 +10804,20 @@ def _contract_danger_flag_section(
     moderators: list[str],
     dimensions: list[str],
     evidence_tiers: list[str],
+    anchor_terms: list[str],
 ) -> list[str]:
+    tier = _cycle_label(evidence_tiers, 1, "合理推断")
+    anchor = _cycle_label(anchor_terms, 14, _cycle_label(variables, 0, "关键变量"))
     return [
-        f"- 合同变量覆盖：{_join_contract_labels(variables)}。",
+        f"- 关键变量覆盖：{_join_contract_labels(variables)}。",
         f"- 调节变量覆盖：{_join_contract_labels(moderators)}。",
         f"- 能力维度覆盖：{_join_contract_labels(dimensions)}。",
         f"- danger_flag：如果 {title} 被简化为更快学习或更多产出，而没有同步检查 {_cycle_label(dimensions, 2, '验证能力')}、{_cycle_label(dimensions, 3, '收束能力')}、{_cycle_label(dimensions, 4, '延迟反馈耐受')}，应视为高风险信号。",
-        f"- 反证信号：{_cycle_label(moderators, 0, '调节变量')} 和 {_cycle_label(moderators, 1, '调节变量')} 没有改善真实反馈循环，只提升了即时满足。",
-        f"- 确定性等级：中；证据层级：{_cycle_label(evidence_tiers, 1, '合理推断')}。",
+        f"- 反证信号：{_cycle_label(moderators, 0, '调节变量')} 和 {_cycle_label(moderators, 1, '调节变量')} 没有改善真实反馈循环，只提升即时满足；{anchor} 因此只应作为风险判断入口。",
+        "- 证据强度：中等偏谨慎；当前特征和调节变量可作为事实底座，但十年结构性反转只能写成合理推断或前瞻假设。",
+        "- 争议点：AI 降低知识获取成本到底会放大自主验证，还是会诱导更快接受答案，取决于真实反馈和反证是否被保留。",
+        "- 证据缺口：缺少同一儿童在 AI 高可用环境中的长期追踪，因此任何优势/陷阱排序都必须保留可反驳边界。",
+        f"- 确定性等级：中；证据层级：{tier}。",
     ]
 
 
@@ -10414,7 +10833,7 @@ def _contract_generic_required_section(
     evidence_tiers: list[str],
 ) -> list[str]:
     return [
-        f"- 本节按合同保留：{section}。",
+        f"- 本节保留：{section}。",
         f"- 关键变量：{_cycle_label(variables, 0, '核心变量')}。",
         f"- 调节变量：{_cycle_label(moderators, 0, '调节变量')}。",
         f"- 必须覆盖维度：{_cycle_label(dimensions, 0, '关键维度')}。",
