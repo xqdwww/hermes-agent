@@ -39,6 +39,7 @@ CONVERGENCE_METADATA_KEYS = {
     "decision_context_contract_id",
     "task_topic",
     "key_variables",
+    "moderator_variables",
     "required_dimensions",
     "evidence_tiers",
 }
@@ -914,6 +915,7 @@ def render_convergence_contract_preamble(contract: dict[str, Any]) -> str:
             f"decision_context_contract_id: {contract.get('contract_id', '')}",
             f"task_topic: {contract.get('task_topic', {}).get('title', '')}",
             "key_variables: " + "; ".join(_record_labels(contract.get("key_variables") or [])),
+            "moderator_variables: " + "; ".join(_record_labels(contract.get("moderator_variables") or [])),
             "required_dimensions: " + "; ".join(_record_labels(contract.get("required_dimensions") or [])),
             "evidence_tiers: " + _convergence_evidence_tier_line(contract),
             CONVERGENCE_CONTRACT_PREAMBLE_END,
@@ -943,6 +945,7 @@ def _metadata_lines_conflicting_with_contract(text: str, contract: dict[str, Any
         "decision_context_contract_id": [str(contract.get("contract_id") or "")],
         "task_topic": [str(contract.get("task_topic", {}).get("title") or "")],
         "key_variables": _record_labels(contract.get("key_variables") or []),
+        "moderator_variables": _record_labels(contract.get("moderator_variables") or []),
         "required_dimensions": _record_labels(contract.get("required_dimensions") or []),
         "evidence_tiers": list(contract.get("evidence_tiers", {}).get("allowed") or []),
     }

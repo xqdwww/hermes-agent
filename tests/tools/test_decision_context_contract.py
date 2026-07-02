@@ -368,6 +368,7 @@ def test_convergence_deterministic_contract_header_and_valid_body_passes(tmp_pat
     preamble, body = split_convergence_contract_preamble(normalized)
     assert contract["contract_id"] in preamble
     assert contract["task_topic"]["title"] in preamble
+    assert "moderator_variables: IQ 124; 长期柔术训练" in preamble
     assert "儿童长期发展" in body
 
 
@@ -399,6 +400,16 @@ def test_convergence_body_missing_required_dimension_blocks_even_with_header(tmp
     errors = validate_convergence_contract_alignment(text, contract)
 
     assert "missing_required_dimension:problem_selection_ability" in errors
+
+
+def test_convergence_body_missing_moderator_blocks_even_with_header(tmp_path):
+    contract = _generate(tmp_path)
+    body = _semantic_convergence_body().replace("IQ 124", "高抽象能力")
+    text = render_convergence_contract_preamble(contract) + "\n\n" + body
+
+    errors = validate_convergence_contract_alignment(text, contract)
+
+    assert "missing_moderator_variable:iq_124" in errors
 
 
 def test_convergence_normalizer_rejects_contradictory_model_metadata(tmp_path):

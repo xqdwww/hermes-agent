@@ -104,6 +104,7 @@ def test_convergence_prompt_input_includes_contract(tmp_path):
         "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
         "AI 信息环境; 知识获取成本下降; 儿童长期发展"
     ) in prompt
+    assert "moderator_variables: IQ 124; 长期柔术训练" in prompt
     assert (
         "required_dimensions: 知识获取能力; 问题选择能力; 验证能力; 收束能力; "
         "延迟反馈耐受; 身体反馈系统"
@@ -119,6 +120,7 @@ def test_convergence_prompt_input_includes_contract(tmp_path):
     assert "## certainty_levels" in prompt
     assert "## uncertainty_boundary" in prompt
     assert "semantic_contract_coverage" in prompt
+    assert "every moderator_variables item" in prompt
     assert "include both the required quality sections and semantic_contract_coverage" in prompt
     assert "deterministic contract header alone is not enough" in prompt
 
@@ -292,7 +294,9 @@ def test_convergence_contract_retry_regenerates_instead_of_reusing_stale_failed_
         "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
         "AI 信息环境; 知识获取成本下降; 儿童长期发展"
     ) in convergence_prompts[1]
+    assert "moderator_variables: IQ 124; 长期柔术训练" in convergence_prompts[1]
     assert "semantic_contract_coverage" in convergence_prompts[1]
+    assert "every moderator_variables item" in convergence_prompts[1]
     assert "## key_drivers" in convergence_prompts[1]
     assert "include both the required quality sections and semantic_contract_coverage" in convergence_prompts[1]
     invalid_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.contract_retry_source.invalid.md"

@@ -3498,6 +3498,18 @@ def _contract_key_variables_line(contract: dict[str, Any]) -> str:
     return "key_variables: " + "; ".join(labels)
 
 
+def _contract_moderator_variables_line(contract: dict[str, Any]) -> str:
+    moderators = contract.get("moderator_variables") or []
+    labels = []
+    for moderator in moderators:
+        if not isinstance(moderator, dict):
+            continue
+        label = str(moderator.get("label") or "").strip()
+        if label:
+            labels.append(label)
+    return "moderator_variables: " + "; ".join(labels)
+
+
 def _contract_required_dimensions_line(contract: dict[str, Any]) -> str:
     dimensions = contract.get("required_dimensions") or []
     labels = []
@@ -3534,12 +3546,13 @@ def _decision_context_contract_convergence_output_schema_lines(contract: dict[st
         f"decision_context_contract_id: {contract.get('contract_id')}",
         f"task_topic: {title}",
         _contract_key_variables_line(contract),
+        _contract_moderator_variables_line(contract),
         _contract_required_dimensions_line(contract),
         _contract_evidence_tier_mapping_line(contract),
         "Then write the convergence body around the user decision problem, preserving key variables, moderators, required dimensions, and evidence tier boundaries.",
         "Do not omit task_topic, any key_variables entry, or evidence_tiers; omission blocks this stage.",
         *_decision_convergence_required_quality_section_lines(),
-        "In the body, include a semantic_contract_coverage section that reasons about every key_variables item and every required_dimensions item.",
+        "In the body, include a semantic_contract_coverage section that reasons about every key_variables item, every moderator_variables item, and every required_dimensions item.",
         "The deterministic contract header alone is not enough; the body must substantively discuss each required item.",
     ]
 
