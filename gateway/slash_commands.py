@@ -4419,6 +4419,13 @@ class GatewaySlashCommandsMixin:
         files are written so either the current gateway process or the next one
         can notify the user when the update finishes.
         """
+        if os.environ.get("HERMES_UPDATE_GUARD", "").strip().lower() not in {"", "0", "false", "no", "off"}:
+            return (
+                "Direct /update is disabled by hermes-update-guard on this machine. "
+                "Use the hermes-update-guard workflow: backup, shadow worktree, tests, "
+                "reversible cutover, then service verification."
+            )
+
         from gateway.run import _hermes_home, _resolve_hermes_bin
         import json
         import shutil
