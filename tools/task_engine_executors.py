@@ -3137,6 +3137,12 @@ def run_decision_final_smoke(
                     raise RuntimeError(f"convergence_report: contract_retry_forbidden final/tool-chain tokens: {', '.join(leaked)}")
                 profile_errors = _quality_profile_errors(content, _task_engine_profiles_from_query(query), stage_name="convergence_report")
                 if profile_errors:
+                    _write_invalid_stage_debug(
+                        stage,
+                        content,
+                        base_dir=base_dir,
+                        filename=f"{stage.stage_name}.contract_retry_quality_profile_source.invalid.md",
+                    )
                     raise RuntimeError(f"convergence_report: contract_retry_output_quality_profile_error:{','.join(profile_errors)}")
                 content, normalization_errors = normalize_convergence_contract_output(content, decision_context["contract"])
                 if normalization_errors:
@@ -3504,6 +3510,19 @@ def _contract_required_dimensions_line(contract: dict[str, Any]) -> str:
     return "required_dimensions: " + "; ".join(labels)
 
 
+def _decision_convergence_required_quality_section_lines() -> list[str]:
+    return [
+        "The convergence body must include these required section headings exactly:",
+        "## key_drivers",
+        "## mechanism_chain",
+        "## scenario_branches",
+        "## counter_signals",
+        "## certainty_levels",
+        "## uncertainty_boundary",
+        "Do not replace those sections with semantic_contract_coverage; include both the required quality sections and semantic_contract_coverage.",
+    ]
+
+
 def _decision_context_contract_convergence_output_schema_lines(contract: dict[str, Any] | None) -> list[str]:
     if not contract:
         return []
@@ -3519,6 +3538,7 @@ def _decision_context_contract_convergence_output_schema_lines(contract: dict[st
         _contract_evidence_tier_mapping_line(contract),
         "Then write the convergence body around the user decision problem, preserving key variables, moderators, required dimensions, and evidence tier boundaries.",
         "Do not omit task_topic, any key_variables entry, or evidence_tiers; omission blocks this stage.",
+        *_decision_convergence_required_quality_section_lines(),
         "In the body, include a semantic_contract_coverage section that reasons about every key_variables item and every required_dimensions item.",
         "The deterministic contract header alone is not enough; the body must substantively discuss each required item.",
     ]

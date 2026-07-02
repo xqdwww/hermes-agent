@@ -112,7 +112,14 @@ def test_convergence_prompt_input_includes_contract(tmp_path):
     assert "plausible_inference / 合理推断" in prompt
     assert "forward_looking_hypothesis / 前瞻假设" in prompt
     assert "unsupported_or_speculative / 不支持或推测" in prompt
+    assert "## key_drivers" in prompt
+    assert "## mechanism_chain" in prompt
+    assert "## scenario_branches" in prompt
+    assert "## counter_signals" in prompt
+    assert "## certainty_levels" in prompt
+    assert "## uncertainty_boundary" in prompt
     assert "semantic_contract_coverage" in prompt
+    assert "include both the required quality sections and semantic_contract_coverage" in prompt
     assert "deterministic contract header alone is not enough" in prompt
 
 
@@ -193,6 +200,29 @@ def _aligned_convergence_text(contract):
     )
 
 
+def _semantic_contract_only_text():
+    return "\n".join(
+        [
+            "## semantic_contract_coverage",
+            "- key_variable ADHD 注意力波动: ADHD 注意力波动决定AI反馈密度何时帮助聚焦、何时放大切换。",
+            "- key_variable 兴趣驱动: 兴趣驱动会把低成本知识探索推向高价值问题或低价值漫游。",
+            "- key_variable 执行功能: 执行功能决定能否从AI生成内容中形成闭环。",
+            "- key_variable 内在走神: 内在走神会影响问题重组，也可能削弱收束。",
+            "- key_variable AI 信息环境: AI 信息环境降低反馈成本，也放大选择和验证负担。",
+            "- key_variable 知识获取成本下降: 知识获取成本下降把瓶颈从获取转向选择、验证和收束。",
+            "- key_variable 儿童长期发展: 儿童长期发展需要看十年尺度的能力迁移，而非短期表现。",
+            "- moderator IQ 124: IQ 124 调节抽象吸收速度和验证负荷。",
+            "- moderator 长期柔术训练: 长期柔术训练通过身体反馈系统调节延迟反馈耐受。",
+            "- required_dimension 知识获取能力: 知识获取能力会从找资料转向筛选和整合。",
+            "- required_dimension 问题选择能力: 问题选择能力决定探索是否变成低价值漫游。",
+            "- required_dimension 验证能力: 验证能力约束AI幻觉和自我确认。",
+            "- required_dimension 收束能力: 收束能力决定是否能从多路径中完成一个路径。",
+            "- required_dimension 延迟反馈耐受: 延迟反馈耐受决定是否能承受慢变量学习。",
+            "- required_dimension 身体反馈系统: 身体反馈系统提供非数字化的校准信号。",
+        ]
+    )
+
+
 def test_convergence_contract_retry_regenerates_instead_of_reusing_stale_failed_output(tmp_path):
     paths, context = _contract_context(tmp_path)
     contract = context["contract"]
@@ -263,6 +293,8 @@ def test_convergence_contract_retry_regenerates_instead_of_reusing_stale_failed_
         "AI 信息环境; 知识获取成本下降; 儿童长期发展"
     ) in convergence_prompts[1]
     assert "semantic_contract_coverage" in convergence_prompts[1]
+    assert "## key_drivers" in convergence_prompts[1]
+    assert "include both the required quality sections and semantic_contract_coverage" in convergence_prompts[1]
     invalid_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.contract_retry_source.invalid.md"
     convergence_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.md"
     assert invalid_path.exists()
@@ -271,3 +303,76 @@ def test_convergence_contract_retry_regenerates_instead_of_reusing_stale_failed_
     assert "missing topic and tiers" not in convergence_text
     assert f"task_topic: {contract['task_topic']['title']}" in convergence_text
     assert "evidence_tiers: evidence_supported" in convergence_text
+
+
+def test_convergence_contract_retry_quality_profile_failure_saves_retry_source(tmp_path):
+    paths, context = _contract_context(tmp_path)
+    contract = context["contract"]
+    convergence_prompts = []
+
+    class FakeExecutor(LocalTaskEngineExecutor):
+        def __init__(self):
+            super().__init__()
+            self.last_executor_models = {}
+
+        def run_agy_gemini(self, stage, prompt, model):
+            self.last_executor_models[stage.stage_name] = model
+            return "user_question_map\nresearch_packet_map"
+
+        def run_ddgs(self, stage, queries):
+            self.last_executor_models[stage.stage_name] = stage.model
+            return [{"title": "ADHD AI structural reversal", "url": "https://example.test/adhd-ai"}]
+
+        def run_omlx_model(self, stage, model, prompt):
+            self.last_executor_models[stage.stage_name] = model
+            if stage.stage_name == "evidence_judge":
+                return "evidence_quality_map\nstrength_by_claim\napplicability_to_user_context\nuncertainty_and_limits"
+            if stage.stage_name == "convergence_report":
+                convergence_prompts.append(prompt)
+                if len(convergence_prompts) == 1:
+                    return "\n".join(
+                        [
+                            f"decision_context_contract_id: {contract['contract_id']}",
+                            "missing task topic, evidence tiers, and semantic dimensions",
+                            "## key_drivers",
+                            "AI feedback cost and ADHD attention variability.",
+                            "## mechanism_chain",
+                            "input variable -> mediating mechanism -> reversal result.",
+                            "## scenario_branches",
+                            "Scenario A; Scenario B.",
+                            "## counter_signals",
+                            "falsification_signals: observable signal.",
+                            "## certainty_levels",
+                            "high / medium / low.",
+                            "## uncertainty_boundary",
+                            "evidence stops at current ADHD and learning-support research.",
+                        ]
+                    )
+                return _semantic_contract_only_text()
+            return (
+                "ADHD AI 结构性反转 IQ 124 长期柔术训练 身体反馈系统 "
+                "知识获取能力 问题选择能力 验证能力 收束能力 延迟反馈耐受 "
+                "evidence_supported plausible_inference forward_looking_hypothesis unsupported_or_speculative"
+            )
+
+    result = run_decision_full_real(
+        ADHD_AI_QUERY,
+        base_dir=tmp_path / "decision_run",
+        executor=FakeExecutor(),
+        research_packet_path=paths["packet"],
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_stage"] == "convergence_report"
+    assert "contract_retry_output_quality_profile_error:missing_key_drivers" in result["blocked_reason"]
+    retry_invalid_path = (
+        tmp_path
+        / "decision_run"
+        / "convergence_report"
+        / "convergence_report.contract_retry_quality_profile_source.invalid.md"
+    )
+    assert retry_invalid_path.exists()
+    retry_invalid = retry_invalid_path.read_text(encoding="utf-8")
+    assert "semantic_contract_coverage" in retry_invalid
+    assert "## key_drivers" not in retry_invalid
+    assert not (tmp_path / "decision_run" / "convergence_report" / "convergence_report.md").exists()
