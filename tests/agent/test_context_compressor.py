@@ -501,8 +501,8 @@ class TestNonStringContent:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             summary = c._generate_summary(messages)
         assert summary is None
-        assert c._last_summary_validation_failed is True
         assert c._summary_failure_cooldown_until > 0
+        assert "empty content" in (c._last_summary_error or "")
 
     def test_empty_content_falls_back_to_main_model(self):
         """When the auxiliary summary model returns empty content and a distinct
@@ -535,7 +535,7 @@ class TestNonStringContent:
     def test_string_message_coerced_to_summary_content(self):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message = "plain summary text"
+        mock_response.choices[0].message = "plain summary text."
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True)
@@ -548,7 +548,7 @@ class TestNonStringContent:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             summary = c._generate_summary(messages)
 
-        assert summary == f"{SUMMARY_PREFIX}\nplain summary text"
+        assert summary.startswith(f"{SUMMARY_PREFIX}\nplain summary text.")
 
     def test_summary_call_does_not_force_temperature(self):
         mock_response = MagicMock()
@@ -706,10 +706,9 @@ class TestAuthFailureAborts:
         # Did NOT fall through to the static-fallback (drop-the-middle) path.
         assert c._last_summary_fallback_used is False
 
-    def test_non_auth_failure_still_uses_fallback_path(self):
-        """A generic (non-auth) failure with abort_on_summary_failure=False
-        keeps the historical behavior: insert a static fallback + drop the
-        middle window (does NOT abort)."""
+    def test_non_auth_failure_aborts_when_llm_replacement_enabled(self):
+        """With LLM replacement enabled, even generic failures preserve the
+        original messages instead of dropping the middle window."""
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(
                 model="test",
@@ -722,8 +721,9 @@ class TestAuthFailureAborts:
         with patch("agent.context_compressor.call_llm", side_effect=Exception("boom 500")):
             result = c.compress(msgs, current_tokens=999999, force=True)
         assert c._last_summary_auth_failure is False
-        assert c._last_compress_aborted is False
-        assert len(result) < len(msgs)  # middle window dropped
+        assert c._last_compress_aborted is True
+        assert result == msgs
+        assert c._last_summary_fallback_used is False
 
     def test_generate_summary_flags_network_failure(self):
         """A connection/network error on the summary call flags
@@ -772,7 +772,7 @@ class TestAuthFailureAborts:
         NOT aborted (the aux creds were the only broken thing)."""
         mock_ok = MagicMock()
         mock_ok.choices = [MagicMock()]
-        mock_ok.choices[0].message.content = "summary via main model"
+        mock_ok.choices[0].message.content = "summary via main model."
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(
                 model="main-model",
@@ -786,6 +786,7 @@ class TestAuthFailureAborts:
             result = c._generate_summary(self._msgs())
         assert mock_call.call_count == 2
         assert isinstance(result, str)
+        assert result.startswith(f"{SUMMARY_PREFIX}\nsummary via main model.")
         assert c._last_summary_auth_failure is False  # cleared on success
 
 
@@ -1496,7 +1497,7 @@ class TestAbortOnSummaryFailure:
     def test_force_true_bypasses_persisted_session_cooldown(self, tmp_path):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "summary text"
+        mock_response.choices[0].message.content = "summary text."
 
         db = SessionDB(db_path=tmp_path / "state.db")
         db.create_session("s1", "cli")
@@ -1532,7 +1533,7 @@ class TestAbortOnSummaryFailure:
     def test_success_clears_persisted_session_cooldown(self, tmp_path):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "summary text"
+        mock_response.choices[0].message.content = "summary text."
 
         db = SessionDB(db_path=tmp_path / "state.db")
         db.create_session("s1", "cli")
@@ -1741,7 +1742,7 @@ class TestCompressWithClient:
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "[CONTEXT SUMMARY]: stuff happened"
+        mock_response.choices[0].message.content = "[CONTEXT SUMMARY]: stuff happened."
         mock_client.chat.completions.create.return_value = mock_response
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
@@ -1978,7 +1979,7 @@ class TestCompressWithClient:
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "SUMMARY_BODY"
+        mock_response.choices[0].message.content = "SUMMARY_BODY."
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=3)
@@ -3232,7 +3233,7 @@ class TestDoubleCompactionSummaryRole:
         """
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "summary of earlier turns"
+        mock_response.choices[0].message.content = "summary of earlier turns."
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(
@@ -3272,7 +3273,7 @@ class TestDoubleCompactionSummaryRole:
         """
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "summary of earlier turns"
+        mock_response.choices[0].message.content = "summary of earlier turns."
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(
