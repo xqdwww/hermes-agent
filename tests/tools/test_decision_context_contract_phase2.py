@@ -100,6 +100,10 @@ def test_convergence_prompt_input_includes_contract(tmp_path):
     assert "知识获取能力" in prompt
     assert "## convergence contract output schema" in prompt
     assert f"task_topic: {context['contract']['task_topic']['title']}" in prompt
+    assert (
+        "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
+        "AI 信息环境; 知识获取成本下降; 儿童长期发展"
+    ) in prompt
     assert "evidence_tiers: evidence_supported / 证据支持" in prompt
     assert "plausible_inference / 合理推断" in prompt
     assert "forward_looking_hypothesis / 前瞻假设" in prompt
@@ -232,6 +236,10 @@ def test_convergence_contract_retry_regenerates_instead_of_reusing_stale_failed_
     assert result["blocked_stage"] == "external_calibration"
     assert len(convergence_prompts) == 2
     assert "Contract retry instructions" in convergence_prompts[1]
+    assert (
+        "key_variables: ADHD 注意力波动; 兴趣驱动; 执行功能; 内在走神; "
+        "AI 信息环境; 知识获取成本下降; 儿童长期发展"
+    ) in convergence_prompts[1]
     invalid_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.contract_retry_source.invalid.md"
     convergence_path = tmp_path / "decision_run" / "convergence_report" / "convergence_report.md"
     assert invalid_path.exists()

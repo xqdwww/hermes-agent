@@ -3464,6 +3464,21 @@ def _contract_evidence_tier_mapping_line(contract: dict[str, Any]) -> str:
     return "evidence_tiers: " + "; ".join(parts)
 
 
+def _contract_key_variables_line(contract: dict[str, Any]) -> str:
+    variables = contract.get("key_variables") or []
+    labels = []
+    for variable in variables:
+        if not isinstance(variable, dict):
+            continue
+        label = str(variable.get("label") or "").strip()
+        aliases = [str(alias).strip() for alias in variable.get("aliases", []) if str(alias).strip()]
+        if label:
+            labels.append(label)
+        elif aliases:
+            labels.append(aliases[0])
+    return "key_variables: " + "; ".join(labels)
+
+
 def _decision_context_contract_convergence_output_schema_lines(contract: dict[str, Any] | None) -> list[str]:
     if not contract:
         return []
@@ -3474,9 +3489,10 @@ def _decision_context_contract_convergence_output_schema_lines(contract: dict[st
         "The active convergence_report output must begin with these machine-readable contract lines before prose:",
         f"decision_context_contract_id: {contract.get('contract_id')}",
         f"task_topic: {title}",
+        _contract_key_variables_line(contract),
         _contract_evidence_tier_mapping_line(contract),
         "Then write the convergence body around the user decision problem, preserving key variables, moderators, required dimensions, and evidence tier boundaries.",
-        "Do not omit task_topic or evidence_tiers; omission blocks this stage.",
+        "Do not omit task_topic, any key_variables entry, or evidence_tiers; omission blocks this stage.",
     ]
 
 

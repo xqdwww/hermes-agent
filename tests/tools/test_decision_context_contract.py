@@ -336,6 +336,24 @@ def test_convergence_with_adhd_ai_contract_content_passes(tmp_path):
     assert validate_convergence_contract_alignment(_aligned_convergence_text(contract), contract) == []
 
 
+def test_convergence_missing_child_long_term_development_blocks(tmp_path):
+    contract = _generate(tmp_path)
+    text = _aligned_convergence_text(contract).replace("儿童长期发展", "成长路径")
+
+    errors = validate_required_variables_present(text, contract)
+
+    assert "missing_key_variable:child_long_term_development" in errors
+
+
+def test_convergence_containing_child_long_term_development_passes_key_variable_check(tmp_path):
+    contract = _generate(tmp_path)
+
+    assert "missing_key_variable:child_long_term_development" not in validate_required_variables_present(
+        _aligned_convergence_text(contract),
+        contract,
+    )
+
+
 def test_convergence_missing_task_topic_blocks(tmp_path):
     contract = _generate(tmp_path)
     text = _aligned_convergence_text(contract).replace(
