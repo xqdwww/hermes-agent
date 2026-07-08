@@ -186,6 +186,30 @@ def build_turn_context(
                 gate_state,
                 getattr(agent, "session_id", "")[:16],
             )
+
+        # Gate release detection: if the gate is active and the user's
+        # message contains an explicit release phrase, automatically
+        # reset the runtime so engineering/local tasks can proceed.
+        if gate_state and user_message:
+            _release_phrases = (
+                "GATE_RELEASE_CONFIRMED",
+                "gate_release_confirmed",
+                "释放开关",
+                "这是普通工程",
+                "不是 RESEARCH",
+                "不是 DECISION",
+                "本地文件检查",
+                "只做只读检查",
+            )
+            if any(p in user_message for p in _release_phrases):
+                from tools.task_mode_runtime import get_task_mode_runtime
+                rt = get_task_mode_runtime()
+                rt.reset()
+                logger.info(
+                    "Task mode gate auto-released via user phrase: session=%s",
+                    getattr(agent, "session_id", "")[:16],
+                )
+                gate_state = None  # Gate is now inactive
     except Exception:
         pass
 

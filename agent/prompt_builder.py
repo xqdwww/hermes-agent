@@ -612,6 +612,44 @@ STEER_CHANNEL_NOTE = (
 # message representation stays consistent ("system" everywhere).
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
+# URL routing guidance — tells the model how to handle bare URLs from the
+# user, especially links to specific platforms, and when to ask for intent.
+# Injected when ``web_extract`` is available.
+URL_ROUTING_GUIDANCE = (
+    "# Bare URL handling\n"
+    "When the user sends only a URL with **no explicit instruction** "
+    "(no \"summarize\", \"extract\", \"analyze\", \"check\", \"see what's on\"):\n"
+    "1. Do NOT jump into heavy processing chains (research_pipeline_runner, "
+    "task_engine_runner, youtube-content skill, terminal curl).\n"
+    "2. Ask briefly what the user wants to do with the URL, unless the URL's "
+    "platform and the conversation context make the intent obvious.\n"
+    "3. For Bilibili URLs (bilibili.com, b23.tv): do NOT load or invoke "
+    "the youtube-content skill — it only handles YouTube. Use web_extract "
+    "for basic page metadata, or ask the user what they need.\n"
+    "4. If web_extract fails (timeout, blocked, error), do NOT fall back to "
+    "research_pipeline_runner or terminal curl. Report the failure and ask "
+    "the user for an alternative approach.\n"
+)
+
+# Engineering-override guidance — tells the model how to handle the RESEARCH
+# hard gate when the user explicitly wants engineering/local work.
+# Injected when ``task_engine_runner`` is available and the gate is active.
+ENGINEERING_OVERRIDE_GUIDANCE = (
+    "# RESEARCH gate override for engineering tasks\n"
+    "If the RESEARCH/DECISION gate is active (tools are blocked with "
+    "\"GATE BLOCKED\" messages) but the user explicitly said this is an "
+    "engineering, local-file, or read-only task:\n"
+    "1. Use clarify() or todo() to tell the user: \"The RESEARCH gate is "
+    "active. Reply with GATE_RELEASE_CONFIRMED to release it for this "
+    "engineering/local task.\"\n"
+    "2. If the user responds with GATE_RELEASE_CONFIRMED or an equivalent "
+    "explicit release phrase, resume normal tool usage — the gate will be "
+    "released for the remainder of this turn.\n"
+    "3. If the user says \"这是普通工程X任务，不是 RESEARCH / DECISION pipeline run\" "
+    "or similar engineering-task declaration, report this to the user and "
+    "ask them to send GATE_RELEASE_CONFIRMED.\n"
+)
+
 PLATFORM_HINTS = {
     "whatsapp": (
         "You are on a text messaging communication platform, WhatsApp. "
