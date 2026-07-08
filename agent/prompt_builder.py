@@ -629,6 +629,28 @@ URL_ROUTING_GUIDANCE = (
     "4. If web_extract fails (timeout, blocked, error), do NOT fall back to "
     "research_pipeline_runner or terminal curl. Report the failure and ask "
     "the user for an alternative approach.\n"
+    "5. When you have obtained information about a URL-based resource (video, "
+    "article, social-media post), explicitly separate METADATA from CONTENT "
+    "in your output:\n"
+    "   - METADATA includes: title, author/uploader, duration, publish date, "
+    "view/like/comment/danmaku counts.\n"
+    "   - CONTENT includes: description/abstract, subtitle/transcript text, "
+    "comment text, danmaku text, article/body text.\n"
+    "6. If you ONLY obtained metadata (no description, no subtitle, no "
+    "transcript, no comment text, no danmaku text, no article body):\n"
+    "   - Do NOT claim you have parsed or extracted the content "
+    '(e.g., do NOT say "内容已解析" or "content parsed").\n'
+    '   - Do NOT output a content summary or "内容概要" — you have '
+    "insufficient evidence to summarize the actual content.\n"
+    "7. You MAY output a title-based inference if you explicitly label it as "
+    'such. Example disclaimer: "⚠️ The following is inferred from the title '
+    'only and does not represent actual video/article content."\n'
+    "8. Comment count and danmaku count are METADATA (raw numbers). Do NOT "
+    "present them as if you have read the actual comments or danmaku text.\n"
+    "9. If the user wants real content (transcript, comments, danmaku), ask "
+    "whether to: fetch subtitles/transcript (if available), fetch comments "
+    "via API, fetch danmaku via API, or perform ASR (speech-to-text) on "
+    "the audio track.\n"
 )
 
 # Engineering-override guidance — tells the model how to handle the RESEARCH
