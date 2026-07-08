@@ -31,6 +31,7 @@ from agent.prompt_builder import (
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
+    URL_ROUTING_GUIDANCE,
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
 )
@@ -53,6 +54,34 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+    def test_url_routing_guidance_includes_metadata_vs_content_separation(self):
+        """Rule 5: URL_ROUTING_GUIDANCE must define METADATA vs CONTENT."""
+        assert "METADATA includes" in URL_ROUTING_GUIDANCE
+        assert "CONTENT includes" in URL_ROUTING_GUIDANCE
+
+    def test_url_routing_guidance_bans_overclaim_with_metadata_only(self):
+        """Rule 6: Must forbid "内容已解析" or "content parsed" when only metadata is available."""
+        assert "Do NOT claim you have parsed" in URL_ROUTING_GUIDANCE
+        assert "内容已解析" in URL_ROUTING_GUIDANCE
+        assert "Do NOT output a content summary" in URL_ROUTING_GUIDANCE
+        assert "内容概要" in URL_ROUTING_GUIDANCE
+
+    def test_url_routing_guidance_title_inference_label_required(self):
+        """Rule 7: Title-based inference must carry an explicit disclaimer."""
+        assert "title-based inference" in URL_ROUTING_GUIDANCE
+        assert "explicitly label" in URL_ROUTING_GUIDANCE
+
+    def test_url_routing_guidance_comment_count_is_not_content(self):
+        """Rule 8: Comment/danmaku counts are METADATA, not content."""
+        assert "Comment count" in URL_ROUTING_GUIDANCE
+        assert "METADATA" in URL_ROUTING_GUIDANCE
+
+    def test_url_routing_guidance_asks_for_real_content(self):
+        """Rule 9: Must prompt user to fetch subtitles/comments/danmaku/ASR when real content is needed."""
+        assert "fetch subtitles" in URL_ROUTING_GUIDANCE
+        assert "fetch comments" in URL_ROUTING_GUIDANCE
+        assert "ASR" in URL_ROUTING_GUIDANCE
 
 
 # =========================================================================

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
+    ENGINEERING_OVERRIDE_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
@@ -43,6 +44,7 @@ from agent.prompt_builder import (
     TASK_COMPLETION_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    URL_ROUTING_GUIDANCE,
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
@@ -210,6 +212,24 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
+
+    # URL routing guidance: only relevant when the web_extract tool is loaded.
+    # Tells the model how to handle bare URLs, Bilibili exclusions, and
+    # failure fallback boundaries.
+    if "web_extract" in agent.valid_tool_names:
+        stable_parts.append(URL_ROUTING_GUIDANCE)
+
+    # Engineering-override guidance: tells the model how to handle the
+    # RESEARCH hard gate when the user explicitly wants engineering/local work.
+    # Only injected when the task_engine_runner is available (so the gate CAN
+    # be active) and the gate is actually locked.
+    if "task_engine_runner" in agent.valid_tool_names:
+        try:
+            from tools.task_mode_runtime import get_task_mode_runtime
+            if get_task_mode_runtime().is_gated:
+                stable_parts.append(ENGINEERING_OVERRIDE_GUIDANCE)
+        except Exception:
+            pass  # Fail-open: don't break prompt build
 
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).
