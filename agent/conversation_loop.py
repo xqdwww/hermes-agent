@@ -127,6 +127,21 @@ def _should_disable_tools_for_lightweight_diagnostic(user_message: str | None) -
     return bool(_LIGHTWEIGHT_DIAGNOSTIC_REQUEST_RE.search(text))
 
 
+def _video_summary_header(content: str) -> str:
+    """Return a brief one-line preamble for a passthrough video summary.
+
+    Includes the total character count so the user knows the full report
+    was delivered without any LLM re-summarization.
+    """
+    char_count = len(content)
+    line_count = content.count("\n") + 1
+    return (
+        f"📹 Video summary report delivered verbatim "
+        f"({line_count} lines, {char_count:,} chars) — "
+        f"no LLM re-summarization applied."
+    )
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -4623,6 +4638,56 @@ def run_conversation(
                             except Exception:
                                 pass
                     break
+
+                # ── Video report passthrough ────────────────────────────
+                # When video_report_passthrough was called, use its result
+                # as the final_response directly — bypassing DeepSeek
+                # re-summarization.
+                _passthrough_tc_ids = [
+                    tc.id for tc in assistant_message.tool_calls
+                    if tc.function.name == "video_report_passthrough"
+                ]
+                if _passthrough_tc_ids:
+                    _passthrough_content = None
+                    for msg in reversed(messages):
+                        if (
+                            isinstance(msg, dict)
+                            and msg.get("role") == "tool"
+                            and msg.get("tool_call_id") in _passthrough_tc_ids
+                        ):
+                            _raw = msg.get("content", "") or ""
+                            _passthrough_content = _raw
+                            break
+                    if _passthrough_content:
+                        # Validate it's not a JSON error response.
+                        try:
+                            _parsed = json.loads(_passthrough_content)
+                            if isinstance(_parsed, dict) and "error" in _parsed:
+                                # Error response — do NOT passthrough; the
+                                # model should see the error and handle it.
+                                _passthrough_content = None
+                        except (json.JSONDecodeError, TypeError):
+                            pass  # Not JSON = report content itself.
+                    if _passthrough_content:
+                        _turn_exit_reason = "video_report_passthrough"
+                        final_response = _passthrough_content
+                        messages.append({
+                            "role": "assistant",
+                            "content": final_response,
+                        })
+                        if final_response:
+                            agent._safe_print(
+                                f"\n{_video_summary_header(final_response)}\n"
+                            )
+                            if agent.stream_delta_callback:
+                                try:
+                                    agent.stream_delta_callback(
+                                        final_response
+                                    )
+                                    agent.stream_delta_callback(None)
+                                except Exception:
+                                    pass
+                        break
 
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
