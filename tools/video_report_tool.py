@@ -104,18 +104,26 @@ def _list_reports() -> list[str]:
 # ── Tool handler ─────────────────────────────────────────────────────────────
 
 def video_report_passthrough(
-    path: str | None = None,
+    args: dict,
     **kwargs,
 ) -> str:
     """Read a video-summary report and return its full content.
 
+    The registry dispatches tools as ``entry.handler(args_dict, **extra_kwargs)``
+    where *args* is the JSON-decoded function-arguments dict containing the
+    named parameter ``"path"``.  We unpack it here.
+
     Args:
-        path: Optional explicit file path.  When omitted, discovers the
-              most recent report.
+        args: Tool-call arguments dict.  May contain ``"path"`` (optional
+              explicit file path).  When omitted, discovers the most recent
+              report.
 
     Returns:
         Full report content as a string, or a JSON error dict.
     """
+    path: str | None = None
+    if isinstance(args, dict):
+        path = args.get("path")
     report_path: Path | None = None
 
     if path:

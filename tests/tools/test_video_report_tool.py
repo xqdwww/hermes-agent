@@ -113,7 +113,7 @@ class TestListReports:
 class TestVideoReportPassthrough:
     def test_returns_content_with_explicit_path(self, sample_report: Path, monkeypatch):
         monkeypatch.setattr("tools.video_report_tool._REPORT_DIR", sample_report.parent)
-        result = video_report_passthrough(path=str(sample_report))
+        result = video_report_passthrough({"path": str(sample_report)})
         assert "# Video Summary: Test Video" in result
         assert "Point one" in result
         assert result.endswith("- Point three\n")
@@ -125,23 +125,23 @@ class TestVideoReportPassthrough:
         r2 = temp_report_dir / f"{_REPORT_PREFIX}b{_REPORT_SUFFIX}"
         r2.write_text("report b")
         r2.touch()  # make it newer
-        result = video_report_passthrough(path=None)
+        result = video_report_passthrough({"path": None})
         assert result == "report b"
 
     def test_error_on_nonexistent_path(self, temp_report_dir: Path, monkeypatch):
         monkeypatch.setattr("tools.video_report_tool._REPORT_DIR", temp_report_dir)
-        result = video_report_passthrough(path=str(temp_report_dir / "nonexistent.md"))
+        result = video_report_passthrough({"path": str(temp_report_dir / "nonexistent.md")})
         parsed = json.loads(result)
         assert "error" in parsed
 
     def test_error_on_disallowed_path(self, monkeypatch):
-        result = video_report_passthrough(path="/etc/passwd")
+        result = video_report_passthrough({"path": "/etc/passwd"})
         parsed = json.loads(result)
         assert "error" in parsed
 
     def test_error_no_reports_when_empty(self, temp_report_dir: Path, monkeypatch):
         monkeypatch.setattr("tools.video_report_tool._REPORT_DIR", temp_report_dir)
-        result = video_report_passthrough(path=None)
+        result = video_report_passthrough({"path": None})
         parsed = json.loads(result)
         assert "error" in parsed
         assert "No video-summary report found" in parsed["error"]
@@ -150,7 +150,7 @@ class TestVideoReportPassthrough:
         monkeypatch.setattr("tools.video_report_tool._REPORT_DIR", temp_report_dir)
         r = temp_report_dir / f"{_REPORT_PREFIX}empty{_REPORT_SUFFIX}"
         r.write_text("")
-        result = video_report_passthrough(path=str(r))
+        result = video_report_passthrough({"path": str(r)})
         parsed = json.loads(result)
         assert "error" in parsed
         assert "empty" in parsed["error"].lower()
@@ -159,7 +159,7 @@ class TestVideoReportPassthrough:
         monkeypatch.setattr("tools.video_report_tool._REPORT_DIR", temp_report_dir)
         d = temp_report_dir / f"{_REPORT_PREFIX}dir{_REPORT_SUFFIX}"
         d.mkdir()
-        result = video_report_passthrough(path=str(d))
+        result = video_report_passthrough({"path": str(d)})
         parsed = json.loads(result)
         assert "error" in parsed
         assert "not a regular file" in parsed["error"].lower()
