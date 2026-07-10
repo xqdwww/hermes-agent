@@ -412,23 +412,49 @@ def _local_mechanism_check(*, mode: str, base_dir: str | None, metadata: dict[st
     )
 
 
+def _inject_passive_guard_debug(json_str: str, query: str, passive_guard_debug: bool) -> str:
+    """Inject passive-guard diagnostic fields when debug is opt-in.
+
+    Returns the original json_str unchanged when debug is disabled or when
+    the payload cannot be parsed, so default contracts are never affected.
+    """
+    if not passive_guard_debug:
+        return json_str
+    try:
+        payload = json.loads(json_str)
+    except json.JSONDecodeError:
+        return json_str
+    if not isinstance(payload, dict):
+        return json_str
+    from tools.passive_intelligence_guard import classify_skill_triggers
+
+    payload["passive_intelligence_guard"] = {
+        "skill_triggers": classify_skill_triggers(query),
+        "production_behavior_change": False,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def task_engine_runner(**kwargs: Any) -> str:
     normalized = _normalize_task_engine_handler_args(kwargs)
     if isinstance(normalized, str):
         return normalized
     kwargs = normalized
+
+    passive_guard_debug = kwargs.pop("passive_guard_debug", False)
+
     action = str(kwargs.get("action") or "contract").strip().lower().replace("_", "-")
     mode = str(kwargs.get("mode") or "AUTO").strip().upper().replace("-", "_")
 
     verified, reason, metadata = _verify_rd_source()
     if action == "status":
-        return _local_status(mode=mode, metadata=metadata)
+        return _inject_passive_guard_debug(_local_status(mode=mode, metadata=metadata), kwargs.get("query", ""), passive_guard_debug)
     if action == "mechanism-check":
-        return _local_mechanism_check(mode=mode, base_dir=kwargs.get("base_dir"), metadata=metadata)
+        return _inject_passive_guard_debug(_local_mechanism_check(mode=mode, base_dir=kwargs.get("base_dir"), metadata=metadata), kwargs.get("query", ""), passive_guard_debug)
     if not verified:
-        return _blocked(str(reason), metadata=metadata)
+        return _inject_passive_guard_debug(_blocked(str(reason), metadata=metadata), kwargs.get("query", ""), passive_guard_debug)
 
-    script = """
+    script = """\
 import json
 import os
 import sys
@@ -446,6 +472,7 @@ sys.stdout.write(result)
     env = dict(os.environ)
     env["HERMES_RD_REPO"] = str(RD_REPO)
     timeout_s = int(os.getenv("HERMES_RESEARCH_DECISION_RUNNER_TIMEOUT_SECONDS", "7200"))
+    query = kwargs.get("query", "")
     try:
         proc = subprocess.run(
             [_runner_python(), "-c", script],
@@ -458,17 +485,17 @@ sys.stdout.write(result)
             timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
-        return _blocked("rd_runner_delegate_timeout", stage="RD_RUNNER_DELEGATE", metadata=metadata)
+        return _inject_passive_guard_debug(_blocked("rd_runner_delegate_timeout", stage="RD_RUNNER_DELEGATE", metadata=metadata), query, passive_guard_debug)
     except Exception as exc:
-        return _blocked(f"rd_runner_delegate_error:{type(exc).__name__}", stage="RD_RUNNER_DELEGATE", metadata=metadata)
+        return _inject_passive_guard_debug(_blocked(f"rd_runner_delegate_error:{type(exc).__name__}", stage="RD_RUNNER_DELEGATE", metadata=metadata), query, passive_guard_debug)
 
     if proc.returncode != 0:
         fail_meta = dict(metadata)
         fail_meta["delegate_returncode"] = proc.returncode
         fail_meta["delegate_stderr_tail"] = (proc.stderr or "")[-4000:]
-        return _blocked("rd_runner_delegate_failed", stage="RD_RUNNER_DELEGATE", metadata=fail_meta)
+        return _inject_passive_guard_debug(_blocked("rd_runner_delegate_failed", stage="RD_RUNNER_DELEGATE", metadata=fail_meta), query, passive_guard_debug)
 
-    return _attach_metadata(proc.stdout, metadata)
+    return _inject_passive_guard_debug(_attach_metadata(proc.stdout, metadata), query, passive_guard_debug)
 
 
 def _task_engine_handler(args: dict[str, Any], **kw: Any) -> str:
