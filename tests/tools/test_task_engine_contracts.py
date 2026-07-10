@@ -22,8 +22,10 @@ from tools.task_engine_contracts import (
     PIPELINE_INCOMPLETE,
     QWEN72B,
     R1_32B,
+    ROUTE_SOURCE_RAW_USER_EXPLICIT,
     StageSpec,
     build_engine_contract,
+    check_explicit_heavy_mode_declaration,
     detect_task_engine_mode,
     planned_outputs,
     render_final_markdown,
@@ -197,6 +199,249 @@ def test_auto_detection_keeps_ordinary_chat_out_of_engine_modes():
     result = json.loads(task_engine_runner(query="帮我改一下这个按钮的颜色", mode="AUTO"))
     assert result["status"] == "not_applicable"
     assert result["ordinary_chat_model_replaced"] is False
+
+
+# ====================================================================
+# Explicit mode declaration — negation / code-block / quote filtering
+# ====================================================================
+
+# --- Requirement A, B: false positives that must NOT trigger ---
+
+def test_negation_not_research_should_not_match():
+    """'不是 RESEARCH' must NOT be treated as an explicit RESEARCH declaration."""
+    mode, diag = check_explicit_heavy_mode_declaration("不是 RESEARCH")
+    assert mode is None, f"Expected None, got {mode}"
+    assert diag["filtered_by_negation"], "Should have negated match"
+
+
+def test_negation_not_decision_should_not_match():
+    """'不是 DECISION' must NOT be treated as an explicit DECISION declaration."""
+    mode, diag = check_explicit_heavy_mode_declaration("不是 DECISION")
+    assert mode is None, f"Expected None, got {mode}"
+    assert diag["filtered_by_negation"]
+
+
+def test_negation_no_research_should_not_match():
+    """'no RESEARCH needed' must NOT match."""
+    mode, _diag = check_explicit_heavy_mode_declaration("no RESEARCH needed for this task")
+    assert mode is None
+
+
+def test_negation_dont_run_decision_should_not_match():
+    """'don't run DECISION' must NOT match."""
+    mode, _diag = check_explicit_heavy_mode_declaration("don't run DECISION on this")
+    assert mode is None
+
+
+def test_fenced_code_block_containing_research_should_not_match():
+    """A fenced code block containing 'research' must NOT trigger."""
+    text = (
+        "Here is an example config:\n"
+        "```python\n"
+        "# This is a RESEARCH task configuration\n"
+        "mode = 'RESEARCH'\n"
+        "```\n"
+        "Please fix the bug above."
+    )
+    mode, diag = check_explicit_heavy_mode_declaration(text)
+    assert mode is None, f"Expected None, got {mode}"
+    assert len(diag["filtered_by_fence"]) > 0
+
+
+def test_inline_code_containing_research_should_not_match():
+    """Inline code like `research` must NOT trigger."""
+    mode, _diag = check_explicit_heavy_mode_declaration(
+        "The `research` package has a known bug with type inference."
+    )
+    assert mode is None
+
+
+def test_block_quote_containing_research_should_not_match():
+    """A block quote containing 'research' must NOT trigger."""
+    text = (
+        "As noted in the issue:\n"
+        "> The RESEARCH pipeline failed due to a network error.\n"
+        "We should fix this."
+    )
+    mode, diag = check_explicit_heavy_mode_declaration(text)
+    assert mode is None, f"Expected None, got {mode}"
+    assert len(diag["filtered_by_blockquote"]) > 0
+
+
+def test_error_log_containing_research_should_not_match():
+    """An error log mentioning 'research' must NOT trigger."""
+    text = (
+        "Got error: task_engine_runner RESEARCH pipeline crashed with "
+        "Traceback (most recent call last):"
+    )
+    mode, _diag = check_explicit_heavy_mode_declaration(text)
+    assert mode is None
+
+
+def test_discussion_of_mode_detection_bug_should_not_match():
+    """Discussion about the bug itself must NOT trigger mode detection."""
+    text = "修复 RESEARCH DECISION 识别 bug，用户否定句中提及 RESEARCH 仍被识别为显式声明"
+    mode, _diag = check_explicit_heavy_mode_declaration(text)
+    assert mode is None
+
+
+def test_engineering_task_mentioning_research_tool_should_not_match():
+    """Normal engineering work that happens to mention 'research' must NOT trigger."""
+    text = "这是普通工程任务，修复 task_engine_runner 这个入口工具的问题"
+    mode, _diag = check_explicit_heavy_mode_declaration(text)
+    assert mode is None
+
+
+def test_stale_gate_should_not_inherit_without_new_declaration():
+    """A new user message without a valid declaration must NOT inherit
+    a prior stale gate state.  (This is a code-level check; the state
+    inheritance is handled by activate_or_resume + turn_context.)
+
+    The detection function itself must return None for non-declarations,
+    ensuring the caller can distinguish 'no active declaration' from
+    'declaration found'.
+    """
+    mode, _diag = check_explicit_heavy_mode_declaration(
+        "继续刚才的工作"
+    )
+    assert mode is None
+    mode, _diag = check_explicit_heavy_mode_declaration(
+        "好的，开始写代码"
+    )
+    assert mode is None
+
+
+# --- Requirement D: legitimate affirmative declarations still work ---
+
+def test_affirmative_research_declaration_matches():
+    """'这是一个 RESEARCH 任务' must match as RESEARCH."""
+    mode, diag = check_explicit_heavy_mode_declaration("这是一个 RESEARCH 任务")
+    assert mode == ENGINE_RESEARCH, f"Expected RESEARCH, got {mode}"
+    assert diag["route_source"] == ROUTE_SOURCE_RAW_USER_EXPLICIT
+    assert diag["non_negated_research"] is True
+
+
+def test_affirmative_decision_declaration_matches():
+    """'这是一个 DECISION 任务' must match as DECISION."""
+    mode, diag = check_explicit_heavy_mode_declaration("这是一个 DECISION 任务，请分析")
+    assert mode == ENGINE_DECISION, f"Expected DECISION, got {mode}"
+    assert diag["non_negated_decision"] is True
+
+
+def test_affirmative_research_decision_declaration_matches():
+    """'这是一个 RESEARCH_DECISION 任务' must match as RESEARCH_DECISION."""
+    mode, _diag = check_explicit_heavy_mode_declaration("这是一个 RESEARCH_DECISION 任务")
+    assert mode == ENGINE_RESEARCH_DECISION
+
+
+def test_detect_task_engine_mode_forwarded_legacy_still_works():
+    """Legacy detect_task_engine_mode delegates to new checker and still returns correct results."""
+    assert detect_task_engine_mode(ADHD_PROMPT) == ENGINE_RESEARCH_DECISION
+    assert detect_task_engine_mode("帮我改一下这个按钮的颜色") is None
+    assert detect_task_engine_mode("研究一下最新的 ADHD 治疗方案，并做一个决策") == ENGINE_RESEARCH_DECISION
+
+
+def test_affirmative_chinese_research_declaration_matches():
+    """Chinese '研究' declaration must match."""
+    mode, _diag = check_explicit_heavy_mode_declaration(
+        "请做一个关于最新技术的 RESEARCH"
+    )
+    assert mode == ENGINE_RESEARCH
+
+
+# --- Requirement E: diagnostic completeness ---
+
+def test_diagnostic_includes_route_source():
+    """Diagnostic dict must include route_source when mode is detected."""
+    _mode, diag = check_explicit_heavy_mode_declaration("这是一个 RESEARCH 任务")
+    assert diag["route_source"] == ROUTE_SOURCE_RAW_USER_EXPLICIT
+
+
+def test_diagnostic_includes_detected_mode():
+    """Diagnostic dict must include detected_mode."""
+    _mode, diag = check_explicit_heavy_mode_declaration("这是一个 DECISION 任务")
+    assert diag["detected_mode"] == ENGINE_DECISION
+
+
+def test_diagnostic_includes_all_matches():
+    """Diagnostic dict must list all matches with positions and negation info."""
+    _mode, diag = check_explicit_heavy_mode_declaration("这是一个 RESEARCH 任务，需要决策")
+    assert len(diag["all_matches"]) >= 2
+    for match in diag["all_matches"]:
+        assert "token" in match
+        assert "matched_text" in match
+        assert "char_start" in match
+        assert "char_end" in match
+        assert "negated" in match
+        assert "matched_via" in match
+
+
+def test_diagnostic_includes_active_matches():
+    """Diagnostic dict must list active (non-negated) matches."""
+    _mode, diag = check_explicit_heavy_mode_declaration("这不是 RESEARCH 而是 DECISION")
+    # "research" is negated, "decision" should be active
+    assert len(diag["all_matches"]) >= 2
+    for m in diag["all_matches"]:
+        if m["token"].lower() == "research" or m["token"] == "research":
+            assert m["negated"] is True, f"research should be negated: {m}"
+    has_decision_active = any(
+        not m["negated"] and m["token"] in ("decision", "决策")
+        for m in diag["all_matches"]
+    )
+    assert has_decision_active, "Should have active decision match"
+
+
+def test_diagnostic_includes_filtered_by_negation():
+    """Diagnostic must list matches that were filtered by negation."""
+    _mode, diag = check_explicit_heavy_mode_declaration("不是 RESEARCH 任务")
+    assert len(diag["filtered_by_negation"]) > 0
+
+
+def test_diagnostic_includes_filtered_by_fence():
+    """Diagnostic must list matches removed from inside code fences."""
+    _mode, diag = check_explicit_heavy_mode_declaration(
+        "```\nRESEARCH mode active\n```\nFix it"
+    )
+    assert len(diag["filtered_by_fence"]) > 0
+
+
+def test_diagnostic_includes_filtered_by_blockquote():
+    """Diagnostic must list matches removed from inside block quotes."""
+    _mode, diag = check_explicit_heavy_mode_declaration(
+        "> RESEARCH pipeline failed\nLet's debug"
+    )
+    assert len(diag["filtered_by_blockquote"]) > 0
+
+
+def test_diagnostic_includes_filtered_by_inline_code():
+    """Diagnostic must list matches removed from inline code."""
+    _mode, diag = check_explicit_heavy_mode_declaration(
+        "The `research` tool needs fixing"
+    )
+    assert len(diag["filtered_by_inline_code"]) > 0
+
+
+def test_diag_clean_text_shown():
+    """Diagnostic must include the cleaned text used for matching."""
+    _mode, diag = check_explicit_heavy_mode_declaration("这是一个 RESEARCH 任务")
+    assert "clean_text_used_for_matching" in diag
+
+
+def test_strip_markdown_fences_handles_empty_text():
+    """_strip_markdown_fences must handle empty or None-like input gracefully."""
+    from tools.task_engine_contracts import _strip_markdown_fences
+    cleaned, removals = _strip_markdown_fences("")
+    assert cleaned == ""
+    assert removals == []
+
+
+def test_strip_markdown_fences_handles_nested_quotes():
+    """_strip_markdown_fences must handle nested/interleaved block quotes."""
+    from tools.task_engine_contracts import _strip_markdown_fences
+    text = "> Level 1\n> > Level 2\n> Back to L1\nNormal text"
+    cleaned, removals = _strip_markdown_fences(text)
+    assert len(removals) > 0
+    assert "Normal text" in cleaned
 
 
 def test_legacy_research_runner_blocks_heavy_task_modes():

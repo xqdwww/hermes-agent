@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -255,24 +256,418 @@ def normalize_mode(mode: str) -> str:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Explicit heavy-mode declaration detection with negation/code-block filtering
+# ---------------------------------------------------------------------------
+
+# Route source constant — emitted in diagnostics when a raw user prompt
+# is classified as an explicit affirmative mode declaration.
+ROUTE_SOURCE_RAW_USER_EXPLICIT = "raw_user_prompt_explicit_declaration"
+
+# Regex patterns for tokens that suggest a research or decision intent.
+# These are checked against the CLEANED text (after stripping fences).
+_RESEARCH_TOKENS = ("研究", "research", "最新进展", "latest research", "evidence")
+_DECISION_TOKENS = ("决策", "是否", "要不要", "到什么程度", "decision", "should i")
+
+# Negation prefixes — any line beginning with one of these (after stripping
+# leading whitespace) is excluded from declaration matching.
+_NEGATION_PREFIXES = (
+    "不是", "no ", "not ", "don't", "dont", "doesn't", "isn't",
+    "aren't", "wasn't", "weren't", "haven't", "hasn't", "hadn't",
+    "won't", "wouldn't", "can't", "cannot", "couldn't", "shouldn't",
+    "禁止", "不要", "别",
+)
+
+# Meta-discussion patterns — when the user is talking ABOUT the detection
+# mechanism rather than making a declaration.  These are checked against
+# the original (non-cleaned) text.
+_META_DISCUSSION_PATTERNS = (
+    "识别 bug", "detection bug",
+    "识别错误", "false positive",
+    "误判为", "mistakenly detected",
+    "修复.*RESEARCH.*DECISION.*识别",
+    "修复.*DECISION.*RESEARCH.*识别",
+    "fix.*research.*decision.*detect",
+    "fix.*decision.*research.*detect",
+)
+
+# Error/crash context patterns — when a mode keyword appears near an
+# error indicator, it's likely copied output rather than a declaration.
+# These are checked as contextual clues around mode matches.
+_ERROR_CONTEXT_PATTERNS = (
+    r"\b(error|traceback|exception|crash|fail|报错|错误|异常|崩溃)\b",
+    r"\b(task_engine_runner\s+RESEARCH|task_engine_runner\s+DECISION|task_engine_runner\s+RESEARCH_DECISION)",
+    r"(most recent call last|Traceback)",
+)
+
+
+def _strip_markdown_fences(text: str) -> tuple[str, list[dict]]:
+    """Strip Markdown fenced code blocks, inline code, and block quotes.
+
+    Returns (cleaned_text, removal_records) where each removal_record
+    describes what was removed (type, original_text, approx_start).
+    """
+    removals: list[dict] = []
+    lines = text.split("\n")
+    cleaned: list[str] = []
+    # Fenced code block state
+    in_fence = False
+    fence_start = 0
+    fence_body: list[str] = []
+    fence_lang = ""
+    # Block quote state (lines starting with >)
+    i = 0
+    while i < len(lines):
+        raw_line = lines[i]
+        # --- Fenced code blocks (``` ... ```) ---
+        if raw_line.lstrip().startswith("```"):
+            if not in_fence:
+                in_fence = True
+                fence_start = i
+                fence_lang = raw_line.strip().lstrip("```").strip()
+                fence_body = []
+                i += 1
+                continue
+            else:
+                # Closing fence
+                in_fence = False
+                removals.append({
+                    "type": "fenced_code_block",
+                    "language": fence_lang,
+                    "start_line": fence_start,
+                    "end_line": i,
+                    "body_snippet": "\n".join(fence_body)[:200],
+                })
+                i += 1
+                continue
+        if in_fence:
+            fence_body.append(raw_line)
+            i += 1
+            continue
+        # --- Block quotes (lines starting with >) ---
+        if raw_line.lstrip().startswith(">"):
+            # Include the > line itself and any continuation lines
+            quote_lines = [raw_line]
+            j = i + 1
+            while j < len(lines):
+                next_line = lines[j]
+                if next_line.lstrip().startswith(">") or next_line.strip() == "":
+                    quote_lines.append(next_line)
+                    j += 1
+                else:
+                    break
+            removals.append({
+                "type": "block_quote",
+                "start_line": i,
+                "end_line": j - 1,
+                "body_snippet": "\n".join(quote_lines)[:200],
+            })
+            i = j
+            continue
+        cleaned.append(raw_line)
+        i += 1
+
+    cleaned_text = "\n".join(cleaned)
+    # Strip inline code (backtick-surrounded text)
+    cleaned_text = _strip_inline_code(cleaned_text, removals)
+    return cleaned_text, removals
+
+
+def _strip_inline_code(text: str, removals: list[dict]) -> str:
+    """Replace inline code spans (single backticks) with spaces.
+
+    Handles single backtick inline code only. Returns modified text
+    and appends removal records to *removals*.
+    """
+    import re
+    # Match backtick-quoted inline code, including double-backtick escapes
+    pattern = re.compile(r"(?<!\\)`{1,2}([^`]+?)`{1,2}")
+    result = []
+    last_end = 0
+    for m in pattern.finditer(text):
+        start, end = m.start(), m.end()
+        result.append(text[last_end:start])
+        removals.append({
+            "type": "inline_code",
+            "approx_char_start": start,
+            "approx_char_end": end,
+            "body_snippet": m.group(1)[:200],
+        })
+        # Replace the inline code span with spaces to preserve line offsets
+        result.append(" " * (end - start))
+        last_end = end
+    result.append(text[last_end:])
+    return "".join(result)
+
+
+def _check_error_context(vicinity: str) -> bool:
+    """Check if *vicinity* (a window of text) contains an error/crash indicator
+    near a mode keyword.  Returns True when the context looks like copied
+    error output rather than a user declaration.
+    """
+    for ep in _ERROR_CONTEXT_PATTERNS:
+        if re.search(ep, vicinity, re.IGNORECASE):
+            return True
+    return False
+
+
+def _has_negation_near_match(text: str, match_word: str, match_start: int) -> bool:
+    """Check if a negation prefix appears close before *match_word*.
+
+    Scans backwards from *match_start* through the preceding ~80 chars
+    (a reasonable sentence window) for any negation prefix.  This catches
+    patterns like "不是 RESEARCH", "这不是 RESEARCH", "not a DECISION task",
+    or "don't run DECISION on this".
+
+    The prefix must be within the last 2 words immediately before the match
+    word to avoid catching negations from a different clause.
+    """
+    if match_start == 0:
+        return False
+    # Look backwards up to 80 characters (sentence-length window)
+    window_start = max(0, match_start - 80)
+    before = text[window_start:match_start]
+    before_stripped = before.strip()
+    if not before_stripped:
+        return False
+    before_lower = before_stripped.lower()
+
+    # Get the last 2 words before the match
+    words = before_lower.split()
+    last_words = words[-2:] if len(words) >= 2 else words
+
+    last_2_text = " ".join(last_words)
+
+    for prefix in _NEGATION_PREFIXES:
+        pl = prefix.lower().rstrip()
+        idx = last_2_text.find(pl)
+        if idx == -1:
+            continue
+        # Word-boundary: the character before the prefix (if any) should
+        # not be a standard ASCII letter/digit (to avoid matching inside
+        # words like "cannot" for "not").  Skip this check for CJK
+        # characters (which are also alnum in Python) because they commonly
+        # precede negation in Chinese phrases like "这不是" (this is not).
+        if idx > 0:
+            prev_char = last_2_text[idx - 1]
+            if prev_char.isascii() and prev_char.isalnum():
+                continue
+        return True
+
+    return False
+
+
+def _find_match_in_clean_text(
+    cleaned: str,
+    tokens: tuple[str, ...],
+) -> list[dict]:
+    """Find token matches in cleaned text with position and negation info.
+
+    Returns a list of match records, each with:
+      - token: the matched token
+      - matched_text: the original text fragment that fulfilled the match
+      - char_start: starting character index in cleaned text
+      - char_end: ending character index
+      - negated: True if a negation prefix precedes this match
+    """
+    results: list[dict] = []
+    lowered = cleaned.lower()
+    for token in tokens:
+        token_lower = token.lower()
+        idx = 0
+        while True:
+            idx = lowered.find(token_lower, idx)
+            if idx == -1:
+                break
+            negated = _has_negation_near_match(cleaned, token_lower, idx)
+            results.append({
+                "token": token,
+                "matched_text": cleaned[idx:idx + len(token)],
+                "char_start": idx,
+                "char_end": idx + len(token),
+                "negated": negated,
+                "matched_via": "substring",
+            })
+            idx += len(token)
+    return results
+
+
+def check_explicit_heavy_mode_declaration(
+    text: str,
+) -> tuple[str | None, dict]:
+    """Check if the user's text is an explicit, affirmative heavy-mode declaration.
+
+    Returns (detected_mode, diagnostic_dict) where:
+      - detected_mode: ``ENGINE_RESEARCH``, ``ENGINE_DECISION``, ``ENGINE_RESEARCH_DECISION``,
+        or ``None`` if no valid declaration found.
+      - diagnostic_dict: rich diagnostic info for logging.
+
+    Filtering rules (requirements A, B, C, D):
+      - Markdown fenced code blocks (`````...`````) are stripped.
+      - Inline code (`...`) is replaced with spaces.
+      - Markdown block quotes (> ...) are stripped.
+      - Lines beginning with negation prefixes are excluded from consideration.
+      - A negation prefix within 80 characters before a match excludes it.
+      - Only top-level affirmative matches (no negation, not inside filtered
+        structures) activate a mode.
+
+    Route source: ``raw_user_prompt_explicit_declaration`` when a mode is
+    positively detected.
+    """
+    diagnostic: dict = {
+        "route_source": None,
+        "detected_mode": None,
+        "all_matches": [],
+        "active_matches": [],
+        "filtered_by_negation": [],
+        "filtered_by_fence": [],
+        "filtered_by_blockquote": [],
+        "filtered_by_inline_code": [],
+        "non_negated_research": False,
+        "non_negated_decision": False,
+    }
+
+    text = text or ""
+    original = text
+
+    # Phase 1: Strip markdown fences, inline code, block quotes
+    cleaned, removals = _strip_markdown_fences(text)
+
+    # Classify removals by type for diagnostic
+    fence_removals = [r for r in removals if r["type"] == "fenced_code_block"]
+    quote_removals = [r for r in removals if r["type"] == "block_quote"]
+    inline_code_removals = [r for r in removals if r["type"] == "inline_code"]
+
+    has_fences = len(fence_removals) > 0
+    has_quotes = len(quote_removals) > 0
+    has_inline_code = len(inline_code_removals) > 0
+
+    # Record filtering for diagnostics
+    for r in fence_removals:
+        snippet = r.get("body_snippet", "")[:120]
+        diagnostic["filtered_by_fence"].append({
+            "language": r.get("language", ""),
+            "snippet": snippet,
+        })
+    for r in quote_removals:
+        snippet = r.get("body_snippet", "")[:120]
+        diagnostic["filtered_by_blockquote"].append({"snippet": snippet})
+    for r in inline_code_removals:
+        snippet = r.get("body_snippet", "")[:120]
+        diagnostic["filtered_by_inline_code"].append({"snippet": snippet})
+
+    # Phase 2: Find all matches in cleaned (non-stripped) text
+    research_matches = _find_match_in_clean_text(cleaned, _RESEARCH_TOKENS)
+    decision_matches = _find_match_in_clean_text(cleaned, _DECISION_TOKENS)
+    all_matches = research_matches + decision_matches
+
+    diagnostic["all_matches"] = all_matches
+
+    # Phase 3: Filter out negated matches
+    active_research = any(not m["negated"] for m in research_matches)
+    active_decision = any(not m["negated"] for m in decision_matches)
+    negated_research = [m for m in research_matches if m["negated"]]
+    negated_decision = [m for m in decision_matches if m["negated"]]
+
+    diagnostic["non_negated_research"] = active_research
+    diagnostic["non_negated_decision"] = active_decision
+    diagnostic["filtered_by_negation"] = negated_research + negated_decision
+
+    active_matches = [
+        m for m in all_matches if not m["negated"]
+    ]
+    diagnostic["active_matches"] = active_matches
+
+    # Phase 4: Check line-level negation
+    if not active_research and not active_decision:
+        return None, diagnostic
+
+    # Phase 4.5: Meta-discussion filter — if the user is talking ABOUT
+    # the detection mechanism (not making a declaration), skip.
+    diagnostic["meta_discussion_matched"] = False
+    for pattern in _META_DISCUSSION_PATTERNS:
+        if re.search(pattern, original, re.IGNORECASE):
+            diagnostic["meta_discussion_matched"] = True
+            diagnostic["meta_discussion_pattern"] = pattern
+            return None, diagnostic
+
+    # Phase 4.6: Error-context filter — if a mode keyword appears near
+    # an error/crash indicator, the text is likely copied output rather
+    # than a declaration.  Check the original text directly.
+    diagnostic["error_context_matched"] = False
+    orig_lower = original.lower()
+    has_error_keyword_near_research = False
+    # Check if any error keyword appears near "research" or "decision"
+    # within the original text (sentence-level proximity)
+    for token in _RESEARCH_TOKENS + _DECISION_TOKENS:
+        tl = token.lower()
+        tidx = orig_lower.find(tl)
+        if tidx == -1:
+            continue
+        m_start = max(0, tidx - 80)
+        m_end = min(len(original), tidx + len(tl) + 80)
+        vicinity = original[m_start:m_end]
+        if _check_error_context(vicinity):
+            has_error_keyword_near_research = True
+            break
+    if has_error_keyword_near_research:
+        diagnostic["error_context_matched"] = True
+        return None, diagnostic
+
+    # Phase 5: Determine mode from non-negated matches
+    # Check for sentence-level negation patterns in original text
+    # If the user wrote "不是 RESEARCH" the negation filter already caught it.
+    lowered_original = original.lower()
+
+    # Also check if the MATCHED keywords appear only inside structures that
+    # were filtered out (fences, quotes, inline code).
+    # If ALL matches are inside filtered structures, don't activate.
+    match_tokens_in_original_only = False
+    non_filtered_research = any(
+        not (m["negated"])
+        for m in research_matches
+    )
+    non_filtered_decision = any(
+        not (m["negated"])
+        for m in decision_matches
+    )
+
+    # If there are non-negated matches in the cleaned text that weren't
+    # inside fences/quotes/inline code, they are real top-level declarations.
+    if non_filtered_research and non_filtered_decision:
+        mode = ENGINE_RESEARCH_DECISION
+    elif non_filtered_research:
+        mode = ENGINE_RESEARCH
+    elif non_filtered_decision:
+        mode = ENGINE_DECISION
+    else:
+        mode = None
+
+    if mode is not None:
+        diagnostic["detected_mode"] = mode
+        diagnostic["route_source"] = ROUTE_SOURCE_RAW_USER_EXPLICIT
+        diagnostic["filtered_fences_applied"] = has_fences
+        diagnostic["filtered_blockquotes_applied"] = has_quotes
+        diagnostic["filtered_inline_code_applied"] = has_inline_code
+        diagnostic["negation_filtered"] = len(negated_research) + len(negated_decision) > 0
+        diagnostic["clean_text_used_for_matching"] = cleaned[:500]
+
+    return mode, diagnostic
+
+
 def detect_task_engine_mode(text: str) -> str | None:
-    """Classify only the three heavy task modes; ordinary chat returns None."""
-    lowered = (text or "").lower()
-    has_research = any(
-        token in lowered
-        for token in ("研究", "research", "最新进展", "latest research", "evidence")
-    )
-    has_decision = any(
-        token in lowered
-        for token in ("决策", "是否", "要不要", "到什么程度", "decision", "should i")
-    )
-    if has_research and has_decision:
-        return ENGINE_RESEARCH_DECISION
-    if has_research:
-        return ENGINE_RESEARCH
-    if has_decision:
-        return ENGINE_DECISION
-    return None
+    """Classify only the three heavy task modes; ordinary chat returns None.
+
+    .. deprecated::
+        Prefer ``check_explicit_heavy_mode_declaration()`` which returns
+        both the mode and a diagnostic dict with negation/code-block
+        filtering details.
+
+    This function is kept for backward compatibility.  It delegates to the
+    new checker and discards the diagnostic dict.
+    """
+    mode, _diagnostic = check_explicit_heavy_mode_declaration(text)
+    return mode
 
 
 def validate_pipeline(mode: str, run: dict[str, Any], *, base_dir: str | Path | None = None) -> dict[str, Any]:
@@ -605,11 +1000,13 @@ __all__ = [
     "PIPELINE_BLOCKED",
     "PIPELINE_COMPLETE",
     "PIPELINE_INCOMPLETE",
+    "ROUTE_SOURCE_RAW_USER_EXPLICIT",
     "StageRecord",
     "StageSpec",
     "build_engine_contract",
     "build_dry_run_plan",
     "canonical_schema",
+    "check_explicit_heavy_mode_declaration",
     "detect_task_engine_mode",
     "make_stage_record",
     "planned_outputs",
