@@ -74,3 +74,10 @@ After fetching the transcript, format it based on what the user asks for:
 - **Private/unavailable video**: relay the error and ask the user to verify the URL.
 - **No matching language**: retry without `--language` to fetch any available transcript, then note the actual language to the user.
 - **Dependency missing**: run `uv pip install youtube-transcript-api` and retry.
+
+## Routing guardrails
+
+- Do **not** use this skill for Bilibili URLs, including `bilibili.com`, `www.bilibili.com`, `m.bilibili.com`, `b23.tv`, or Bilibili short links. Bilibili is not YouTube and must not be routed to `youtube-content`.
+- If the user sends only a bare URL without asking to summarize, extract, analyze, translate, download, or otherwise process it, do not run this skill automatically. Ask the user what they want done with the link, or provide only a lightweight link-type identification.
+- If a non-YouTube media URL cannot be handled by this skill, do not fall back to heavy multi-stage processing, shell URL fetching, or unrelated content pipelines. Report that this skill does not support the URL type and ask for the intended action.
+

@@ -117,6 +117,14 @@ def _ra():
     return run_agent
 
 
+def _reduce_for_context(function_name: str, function_args: dict, raw_result: Any) -> Any:
+    try:
+        from agent.agent_runtime_helpers import reduce_tool_result_for_context
+        return reduce_tool_result_for_context(function_name, function_args, raw_result)
+    except Exception:
+        return raw_result
+
+
 def _is_interpreter_shutdown_submit_error(exc: RuntimeError) -> bool:
     return "cannot schedule new futures after interpreter shutdown" in str(exc)
 
@@ -934,7 +942,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # Text-only servers get a string-safe fallback here so a rejected
         # image tool result never poisons canonical session history.
         # String results pass through unchanged.
-        _tool_content = agent._tool_result_content_for_active_model(name, function_result)
+        _context_result = _reduce_for_context(name, args, function_result)
+        _tool_content = agent._tool_result_content_for_active_model(name, _context_result)
         messages.append(make_tool_result_message(name, _tool_content, tc.id))
         _flush_session_db_after_tool_progress(
             agent,
@@ -1583,7 +1592,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         # Unwrap _multimodal dicts to an OpenAI-style content list
         # (see parallel path for rationale). String results pass through.
-        _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
+        _context_result = _reduce_for_context(function_name, function_args, function_result)
+        _tool_content = agent._tool_result_content_for_active_model(function_name, _context_result)
         messages.append(make_tool_result_message(function_name, _tool_content, tool_call.id))
         _flush_session_db_after_tool_progress(
             agent,

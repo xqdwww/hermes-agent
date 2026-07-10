@@ -170,6 +170,49 @@ def build_turn_context(
     # Bind the skill write-origin ContextVar for this thread.
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
 
+    # Task Mode Gate: cross-session state recovery. Recovers gate state from
+    # ~/.hermes/task_mode_state.json so a gate activated in a previous session
+    # persists across sessions. Fail-open: never let the gate block chat.
+    try:
+        from tools.task_mode_runtime import activate_or_resume
+
+        gate_state = activate_or_resume(
+            user_input=user_message or "",
+            session_id=getattr(agent, "session_id", ""),
+        )
+        if gate_state:
+            logger.info(
+                "Task mode gate active: state=%s session=%s",
+                gate_state,
+                getattr(agent, "session_id", "")[:16],
+            )
+
+        # Gate release detection: if the gate is active and the user's
+        # message contains an explicit release phrase, automatically
+        # reset the runtime so engineering/local tasks can proceed.
+        if gate_state and user_message:
+            _release_phrases = (
+                "GATE_RELEASE_CONFIRMED",
+                "gate_release_confirmed",
+                "释放开关",
+                "这是普通工程",
+                "不是 RESEARCH",
+                "不是 DECISION",
+                "本地文件检查",
+                "只做只读检查",
+            )
+            if any(p in user_message for p in _release_phrases):
+                from tools.task_mode_runtime import get_task_mode_runtime
+                rt = get_task_mode_runtime()
+                rt.reset()
+                logger.info(
+                    "Task mode gate auto-released via user phrase: session=%s",
+                    getattr(agent, "session_id", "")[:16],
+                )
+                gate_state = None  # Gate is now inactive
+    except Exception:
+        pass
+
     # Restore the primary runtime if the previous turn activated fallback.
     agent._restore_primary_runtime()
 

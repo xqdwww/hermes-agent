@@ -173,6 +173,113 @@ SESSION_SEARCH_GUIDANCE = (
     "asking them to repeat themselves."
 )
 
+VIDEO_SUMMARY_DIRECT_ROUTE_GUIDANCE = (
+    "## Video summary direct route\n"
+    "When the user shares a video link AND asks you to summarize/watch/analyze it, "
+    "route the request to the summarizer video pipeline immediately.\n"
+    "Do NOT call web_extract, web_search, or research_pipeline_runner first.\n"
+    "\n"
+    "Video link patterns (route immediately):\n"
+    "- b23.tv/* (Bilibili short links)\n"
+    "- bilibili.com/video/*\n"
+    "- youtu.be/*, youtube.com/watch*\n"
+    "- BV[a-zA-Z0-9]+ (Bilibili video IDs)\n"
+    "- av[0-9]+ (Bilibili alternate IDs)\n"
+    "\n"
+    "Summary intent patterns (trigger summarizer when present near a video link):\n"
+    "- Chinese: 总结, 总结下, 总结这个, 总结视频, 看看这个, 讲讲这个, 提炼观点, 摘要, 帮我看, 分析这个视频\n"
+    "- English: summarize, tl;dr, break down, give me a summary\n"
+    "\n"
+    "## Metadata-only responses are PROHIBITED for video summary requests\n"
+    "If a video has no description or no subtitles, these are NOT stop conditions:\n"
+    "- No description (empty 简介) \u2192 continue with the summarizer pipeline; description absence does not block summarization\n"
+    "- No subtitles (no 字幕/CC) \u2192 the summarizer triggers ASR (speech-to-text) automatically\n"
+    "- Live replay / livestream recording \u2192 continue via audio extraction + ASR; these are not stop conditions\n"
+    "- Comments and danmaku (弹幕/评论) are NOT substitutes for video content\n"
+    "  Do NOT offer to fetch comments or danmaku as a primary summary source.\n"
+    "  Do NOT present metadata-only as a video summary.\n"
+    "\n"
+    "## If a summarizer report already exists\n"
+    "Check ~/OS_Core/output/video_summary_*.md for a matching report. If found, "
+    "call **video_report_passthrough** to deliver it verbatim — this bypasses "
+    "the model's re-summarization and the report is used directly as the "
+    "final response.\n"
+    "\n"
+    "The video_report_passthrough tool accepts an optional path; when "
+    "omitted it auto-discovers the latest report.\n"
+    "\n"
+    "## Response sufficiency rule\n"
+    "A valid video summary response MUST be grounded in one of:\n"
+    "1. summarizer pipeline report file (video_summary_*.md)\n"
+    "2. transcript / ASR output extracted by the summarizer\n"
+    "3. extracted video content artifact from the pipeline\n"
+    "Metadata alone (title, author, duration, view count, publish date) is INSUFFICIENT for a summary response.\n"
+    "\n"
+    "Wrong: calling web_extract on a b23.tv link \u2192 it will be blocked by the research gate.\n"
+    "Wrong: calling web_search to find more information \u2192 you already have the link.\n"
+    "Wrong: asking the user for a BV number or subtitles \u2192 the summarizer handles link resolution.\n"
+    "Wrong: replying with only metadata (play count, duration, author) when the user asked for a summary.\n"
+    "Wrong: offering to fetch comments/danmaku as the primary analysis.\n"
+    "Correct: run the summarizer video pipeline with the original URL the user provided.\n"
+    "\n"
+    "The summarizer pipeline can be invoked via:\n"
+    '  cd ~/Workspace/AI_Core/Projects && PYTHONPATH=/Users/xqdwww/Workspace/AI_Core/Projects python3.13 -u -m summarizer video "<URL>"\n'
+    "\n"
+    "Only ask the user for alternative input after the summarizer pipeline explicitly fails "
+    "with one of: short_link_unresolvable, video_unavailable, login_required, download_failed, asr_failed.\n"
+    "\n"
+    "Forbidden responses (when user asks to summarize a video):\n"
+    '- "I can only see metadata" \u2192 this is never acceptable\n'
+    '- "No subtitles so I cannot summarize" \u2192 use ASR\n'
+    '- "Please provide the BV number" \u2192 you already have the URL\n'
+    '- "Please provide subtitles/audio" \u2192 the pipeline handles this\n'
+    '- "I can fetch comments/danmaku" \u2192 these are not substitutes\n'
+    "- Any response that stops at metadata when the request was a summary"
+)
+
+TASK_ENGINE_RUNNER_GUIDANCE = (
+    "Heavy task engine entry discipline: when `task_engine_runner` is available "
+    "and the user explicitly and affirmatively declares the request as a "
+    "RESEARCH, DECISION, or RESEARCH_DECISION task in a top-level statement "
+    "(not in a negation, code block, block quote, or inline code), "
+    "call `task_engine_runner` immediately with the matching supported "
+    "action/mode. RESEARCH and DECISION are production-supported modes. "
+    "RESEARCH_DECISION real full execution is archived / integration-test only "
+    "and is not the production default; for production research-to-decision "
+    "work, run RESEARCH full to produce `research_evidence_packet.md`, then "
+    "run DECISION full with `research_packet_path`. Do not hand-write "
+    "ROUTE_CARD, EXECUTION_CONTRACT, stage plans, or confirmation prompts "
+    "for these requests. Do not answer the substantive research/decision "
+    "question directly unless the runner returns a validated final report. "
+    "Ordinary chat that does not match those heavy modes should not use the "
+    "task engine.\n\n"
+    "IMPORTANT — Do NOT treat the following as explicit mode declarations:\n"
+    "- Negations: \"不是 RESEARCH\", \"not a DECISION task\", \"禁止进入 DECISION 模式\"\n"
+    "- Code blocks or inline code containing \"research\" or \"decision\"\n"
+    "- Block quotes (> ...) containing mode keywords\n"
+    "- Error messages, logs, or reports that mention \"research\" or \"decision\"\n"
+    "- File names, tool names, or function names containing these keywords\n"
+    "- Discussion of the mode-detection bug itself\n"
+    "- Incidental mentions in engineering task descriptions\n"
+    "Only top-level affirmative user statements that the task IS a RESEARCH, "
+    "DECISION, or RESEARCH_DECISION task should trigger the engine."
+)
+
+OBSERVATION_REDUCER_GUIDANCE = (
+    "## Evidence Cards\n"
+    "Large tool observations may be reduced before entering context. A reduced "
+    "observation appears as `[OBSERVATION:<tool>]` with a short summary and a "
+    "`full:` path to the raw output, for example:\n"
+    "[OBSERVATION:terminal] exit=1 | cmd: npm run test\n"
+    "summary: 45 passed, 2 failed (test_auth.py:34, test_api.py:89)\n"
+    "full: /tmp/hermes/observations/run_20260610_143052/\n"
+    "Treat Evidence Cards as faithful summaries of tool output. If the card lacks "
+    "details needed for correctness, inspect the referenced raw files or rerun a "
+    "targeted command/read. Prefer `read_file(path, offset, limit)` with a narrow "
+    "range instead of reading whole large files. When using `skill_view`, request "
+    "the needed section, e.g. `skill_view(name=\"example\", section=\"COMMANDS\")`."
+)
+
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
     "or discovering a non-trivial workflow, save the approach as a "
@@ -280,17 +387,12 @@ KANBAN_GUIDANCE = (
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
-    "You MUST use your tools to take action — do not describe what you would do "
-    "or plan to do without actually doing it. When you say you will perform an "
-    "action (e.g. 'I will run the tests', 'Let me check the file', 'I will create "
-    "the project'), you MUST immediately make the corresponding tool call in the same "
+    "You MUST use your tools — do not describe what you would do without doing it. "
+    "When you say you will perform an action, make the tool call in the same "
     "response. Never end your turn with a promise of future action — execute it now.\n"
-    "Keep working until the task is actually complete. Do not stop with a summary of "
-    "what you plan to do next time. If you have tools available that can accomplish "
-    "the task, use them instead of telling the user what you would do.\n"
-    "Every response should either (a) contain tool calls that make progress, or "
-    "(b) deliver a final result to the user. Responses that only describe intentions "
-    "without acting are not acceptable."
+    "Keep working until the task is complete. Every response must either "
+    "(a) make tool calls that progress the task, or (b) deliver a final result. "
+    "Responses that only describe intentions without acting are not acceptable."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
@@ -315,17 +417,12 @@ TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm",
 # then amortised across all sessions via prefix caching.  Keep it tight.
 TASK_COMPLETION_GUIDANCE = (
     "# Finishing the job\n"
-    "When the user asks you to build, run, or verify something, the deliverable is "
-    "a working artifact backed by real tool output — not a description of one. "
-    "Do not stop after writing a stub, a plan, or a single command. Keep working "
-    "until you have actually exercised the code or produced the requested result, "
-    "then report what real execution returned.\n"
-    "If a tool, install, or network call fails and blocks the real path, say so "
-    "directly and try an alternative (different package manager, different "
-    "approach, ask the user). NEVER substitute plausible-looking fabricated "
-    "output (made-up data, invented file contents, synthesised API responses) "
-    "for results you couldn't actually produce. Reporting a blocker honestly "
-    "is always better than inventing a result."
+    "Deliver working artifacts backed by real tool output — not descriptions. "
+    "Do not stop after a stub or plan. Keep working until you have exercised "
+    "the code or produced the result, then report what real execution returned.\n"
+    "If a tool, install, or network call fails, say so directly and try an "
+    "alternative or ask the user. NEVER substitute fabricated output for "
+    "results you couldn't actually produce."
 )
 
 # Universal parallel-tool-call guidance — applied to ALL models.
@@ -380,60 +477,33 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
 OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
-    "- Use tools whenever they improve correctness, completeness, or grounding.\n"
-    "- Do not stop early when another tool call would materially improve the result.\n"
-    "- If a tool returns empty or partial results, retry with a different query or "
-    "strategy before giving up.\n"
-    "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
-    "the result.\n"
+    "Use tools when they improve grounding, completeness, or verification. "
+    "If results are empty or partial, retry with a different query or strategy. "
+    "Keep going until the task is complete and verified.\n"
     "</tool_persistence>\n"
-    "\n"
     "<mandatory_tool_use>\n"
-    "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
-    "- Arithmetic, math, calculations → use terminal or execute_code\n"
-    "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n"
-    "- Current time, date, timezone → use terminal (e.g. date)\n"
-    "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"
-    "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
-    "- Git history, branches, diffs → use terminal\n"
-    "- Current facts (weather, news, versions) → use web_search\n"
-    "Your memory and user profile describe the USER, not the system you are "
-    "running on. The execution environment may differ from what the user profile "
-    "says about their personal setup.\n"
+    "Always use tools, never memory/mental math, for calculations; hashes, "
+    "encodings, checksums; current time/date/timezone; live OS/CPU/memory/disk/"
+    "ports/processes; file contents/sizes/line counts; git history/diffs; and "
+    "current facts such as weather, news, or versions. User memory describes "
+    "the user, not this execution environment.\n"
     "</mandatory_tool_use>\n"
-    "\n"
     "<act_dont_ask>\n"
-    "When a question has an obvious default interpretation, act on it immediately "
-    "instead of asking for clarification. Examples:\n"
-    "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
-    "- 'What OS am I running?' → check the live system (don't use user profile)\n"
-    "- 'What time is it?' → run `date` (don't guess)\n"
-    "Only ask for clarification when the ambiguity genuinely changes what tool "
-    "you would call.\n"
+    "When the default scope is obvious, act instead of asking: check this "
+    "machine's port/OS/time with tools. Ask only when ambiguity changes which "
+    "tool or target is correct.\n"
     "</act_dont_ask>\n"
-    "\n"
     "<prerequisite_checks>\n"
-    "- Before taking an action, check whether prerequisite discovery, lookup, or "
-    "context-gathering steps are needed.\n"
-    "- Do not skip prerequisite steps just because the final action seems obvious.\n"
-    "- If a task depends on output from a prior step, resolve that dependency first.\n"
+    "Before acting, do prerequisite discovery and resolve each dependency from "
+    "prior steps.\n"
     "</prerequisite_checks>\n"
-    "\n"
     "<verification>\n"
-    "Before finalizing your response:\n"
-    "- Correctness: does the output satisfy every stated requirement?\n"
-    "- Grounding: are factual claims backed by tool outputs or provided context?\n"
-    "- Formatting: does the output match the requested format or schema?\n"
-    "- Safety: if the next step has side effects (file writes, commands, API calls), "
-    "confirm scope before executing.\n"
+    "Before finalizing, check correctness, grounding, requested format/schema, "
+    "and side-effect scope.\n"
     "</verification>\n"
-    "\n"
     "<missing_context>\n"
-    "- If required context is missing, do NOT guess or hallucinate an answer.\n"
-    "- Use the appropriate lookup tool when missing information is retrievable "
-    "(search_files, web_search, read_file, etc.).\n"
-    "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
-    "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+    "If context is missing, retrieve it with read_file/search_files/web_search "
+    "or label assumptions; do not guess.\n"
     "</missing_context>"
 )
 
@@ -616,6 +686,66 @@ STEER_CHANNEL_NOTE = (
 # The swap happens at the API boundary in _build_api_kwargs() so internal
 # message representation stays consistent ("system" everywhere).
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
+
+# URL routing guidance — tells the model how to handle bare URLs from the
+# user, especially links to specific platforms, and when to ask for intent.
+# Injected when ``web_extract`` is available.
+URL_ROUTING_GUIDANCE = (
+    "# Bare URL handling\n"
+    "When the user sends only a URL with **no explicit instruction** "
+    "(no \"summarize\", \"extract\", \"analyze\", \"check\", \"see what's on\"):\n"
+    "1. Do NOT jump into heavy processing chains (research_pipeline_runner, "
+    "task_engine_runner, youtube-content skill, terminal curl).\n"
+    "2. Ask briefly what the user wants to do with the URL, unless the URL's "
+    "platform and the conversation context make the intent obvious.\n"
+    "3. For Bilibili URLs (bilibili.com, b23.tv): do NOT load or invoke "
+    "the youtube-content skill — it only handles YouTube. Use web_extract "
+    "for basic page metadata, or ask the user what they need.\n"
+    "4. If web_extract fails (timeout, blocked, error), do NOT fall back to "
+    "research_pipeline_runner or terminal curl. Report the failure and ask "
+    "the user for an alternative approach.\n"
+    "5. When you have obtained information about a URL-based resource (video, "
+    "article, social-media post), explicitly separate METADATA from CONTENT "
+    "in your output:\n"
+    "   - METADATA includes: title, author/uploader, duration, publish date, "
+    "view/like/comment/danmaku counts.\n"
+    "   - CONTENT includes: description/abstract, subtitle/transcript text, "
+    "comment text, danmaku text, article/body text.\n"
+    "6. If you ONLY obtained metadata (no description, no subtitle, no "
+    "transcript, no comment text, no danmaku text, no article body):\n"
+    "   - Do NOT claim you have parsed or extracted the content "
+    '(e.g., do NOT say "内容已解析" or "content parsed").\n'
+    '   - Do NOT output a content summary or "内容概要" — you have '
+    "insufficient evidence to summarize the actual content.\n"
+    "7. You MAY output a title-based inference if you explicitly label it as "
+    'such. Example disclaimer: "⚠️ The following is inferred from the title '
+    'only and does not represent actual video/article content."\n'
+    "8. Comment count and danmaku count are METADATA (raw numbers). Do NOT "
+    "present them as if you have read the actual comments or danmaku text.\n"
+    "9. If the user wants real content (transcript, comments, danmaku), ask "
+    "whether to: fetch subtitles/transcript (if available), fetch comments "
+    "via API, fetch danmaku via API, or perform ASR (speech-to-text) on "
+    "the audio track.\n"
+)
+
+# Engineering-override guidance — tells the model how to handle the RESEARCH
+# hard gate when the user explicitly wants engineering/local work.
+# Injected when ``task_engine_runner`` is available and the gate is active.
+ENGINEERING_OVERRIDE_GUIDANCE = (
+    "# RESEARCH gate override for engineering tasks\n"
+    "If the RESEARCH/DECISION gate is active (tools are blocked with "
+    "\"GATE BLOCKED\" messages) but the user explicitly said this is an "
+    "engineering, local-file, or read-only task:\n"
+    "1. Use clarify() or todo() to tell the user: \"The RESEARCH gate is "
+    "active. Reply with GATE_RELEASE_CONFIRMED to release it for this "
+    "engineering/local task.\"\n"
+    "2. If the user responds with GATE_RELEASE_CONFIRMED or an equivalent "
+    "explicit release phrase, resume normal tool usage — the gate will be "
+    "released for the remainder of this turn.\n"
+    "3. If the user says \"这是普通工程X任务，不是 RESEARCH / DECISION pipeline run\" "
+    "or similar engineering-task declaration, report this to the user and "
+    "ask them to send GATE_RELEASE_CONFIRMED.\n"
+)
 
 PLATFORM_HINTS = {
     "whatsapp": (
@@ -1255,7 +1385,7 @@ def drain_truncation_warnings() -> list:
 _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-_SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_SNAPSHOT_VERSION = 2
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1348,6 +1478,8 @@ def _build_snapshot_entry(
         "category": category,
         "frontmatter_name": str(frontmatter.get("name", skill_name)),
         "description": description,
+        "hidden": bool(frontmatter.get("hidden", False)),
+        "disabled": bool(frontmatter.get("disabled", False)),
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
     }
@@ -1475,16 +1607,24 @@ def build_skills_system_prompt(
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
+    skill_count = 0
+    hidden_skill_count = 0
 
     if snapshot is not None:
         # Fast path: use pre-parsed metadata from disk
-        for entry in snapshot.get("skills", []):
+        skill_entries = snapshot.get("skills", [])
+        for entry in skill_entries:
             if not isinstance(entry, dict):
                 continue
+            skill_count += 1
+            if entry.get("hidden"):
+                hidden_skill_count += 1
             skill_name = entry.get("skill_name") or ""
             category = entry.get("category") or "general"
             frontmatter_name = entry.get("frontmatter_name") or skill_name
             platforms = entry.get("platforms") or []
+            if entry.get("hidden"):
+                continue
             if not skill_matches_platform({"platforms": platforms}):
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
@@ -1506,10 +1646,15 @@ def build_skills_system_prompt(
         # Cold path: full filesystem scan + write snapshot for next time
         skill_entries: list[dict] = []
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
+            skill_count += 1
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
             entry = _build_snapshot_entry(skill_file, skills_dir, frontmatter, desc)
             skill_entries.append(entry)
+            if entry.get("hidden"):
+                hidden_skill_count += 1
             if not is_compatible:
+                continue
+            if frontmatter.get("hidden"):
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
@@ -1563,6 +1708,8 @@ def build_skills_system_prompt(
                 if not is_compatible:
                     continue
                 entry = _build_snapshot_entry(skill_file, ext_dir, frontmatter, desc)
+                if entry.get("hidden"):
+                    continue
                 skill_name = entry["skill_name"]
                 frontmatter_name = entry["frontmatter_name"]
                 if frontmatter_name in seen_skill_names:
@@ -1638,10 +1785,7 @@ def build_skills_system_prompt(
                 if name in seen:
                     continue
                 seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
+                index_lines.append(f"    - {name}")
 
         result = (
             "## Skills (mandatory)\n"
@@ -1650,17 +1794,11 @@ def build_skills_system_prompt(
             "Err on the side of loading — it is always better to have context you don't need "
             "than to miss critical steps, pitfalls, or established workflows. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
+            "and proven workflows that outperform general-purpose approaches. "
+            "Load the skill even if you think you could handle the task with basic tools like web_search or terminal. "
             "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
+            "for tasks like code review, planning, and testing. "
+            "If a skill has issues, fix it with skill_manage(action='patch'). "
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
             "pitfalls you discovered, update it before finishing.\n"
@@ -1672,6 +1810,21 @@ def build_skills_system_prompt(
             "Only proceed without loading a skill if genuinely none are relevant to the task."
             + hidden_note
         )
+
+    # ── Statistics logging ────────────────────────────────────────────
+    _visible_skills = sum(len(skills) for skills in skills_by_category.values())
+    _skill_index_token_estimate = len(result) // 4 if result else 0
+    logger.info(
+        "Skills prompt built: skill_count=%d hidden_skill_count=%d visible_skill_count=%d "
+        "skill_index_token_estimate=%d total_system_prompt_token_estimate=%d "
+        "duplicated_context_blocks_count=%d",
+        skill_count,
+        hidden_skill_count,
+        _visible_skills,
+        _skill_index_token_estimate,
+        _skill_index_token_estimate,
+        0,  # No duplicate context blocks in skills index
+    )
 
     # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
+    ENGINEERING_OVERRIDE_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
@@ -35,12 +36,16 @@ from agent.prompt_builder import (
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
+    OBSERVATION_REDUCER_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
     STEER_CHANNEL_NOTE,
+    TASK_ENGINE_RUNNER_GUIDANCE,
     TASK_COMPLETION_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    URL_ROUTING_GUIDANCE,
+    VIDEO_SUMMARY_DIRECT_ROUTE_GUIDANCE,
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
@@ -172,6 +177,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # users who want a leaner prompt can turn it off.
     if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
         stable_parts.append(TASK_COMPLETION_GUIDANCE)
+    if agent.valid_tool_names:
+        stable_parts.append(OBSERVATION_REDUCER_GUIDANCE)
 
     # Universal parallel-tool-call guidance.  Tells the model to batch
     # independent tool calls into one assistant turn rather than emitting one
@@ -190,8 +197,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(MEMORY_GUIDANCE)
     if "session_search" in agent.valid_tool_names:
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
+    if "task_engine_runner" in agent.valid_tool_names:
+        tool_guidance.append(TASK_ENGINE_RUNNER_GUIDANCE)
     if "skill_manage" in agent.valid_tool_names:
         tool_guidance.append(SKILLS_GUIDANCE)
+    # Video summary direct route: steer model away from web_extract for
+    # video links. Injected when web tools are available — this is the
+    # primary pre-filter covering b23.tv, bilibili.com/video, and youtube
+    # URLs with summary intents.
+    if "web_extract" in agent.valid_tool_names or "web_search" in agent.valid_tool_names:
+        tool_guidance.append(VIDEO_SUMMARY_DIRECT_ROUTE_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
@@ -204,6 +219,24 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
+
+    # URL routing guidance: only relevant when the web_extract tool is loaded.
+    # Tells the model how to handle bare URLs, Bilibili exclusions, and
+    # failure fallback boundaries.
+    if "web_extract" in agent.valid_tool_names:
+        stable_parts.append(URL_ROUTING_GUIDANCE)
+
+    # Engineering-override guidance: tells the model how to handle the
+    # RESEARCH hard gate when the user explicitly wants engineering/local work.
+    # Only injected when the task_engine_runner is available (so the gate CAN
+    # be active) and the gate is actually locked.
+    if "task_engine_runner" in agent.valid_tool_names:
+        try:
+            from tools.task_mode_runtime import get_task_mode_runtime
+            if get_task_mode_runtime().is_gated:
+                stable_parts.append(ENGINEERING_OVERRIDE_GUIDANCE)
+        except Exception:
+            pass  # Fail-open: don't break prompt build
 
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).

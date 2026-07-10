@@ -657,6 +657,7 @@ def compress_context(
     # session has logically ended), and let auto-compress callers detect
     # the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
+
         try:
             _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
             if getattr(agent, "_last_compression_summary_warning", None) != _err:
@@ -672,6 +673,19 @@ def compress_context(
             return messages, _existing_sp
         finally:
             _release_lock()
+
+    if getattr(agent.context_compressor, "_last_context_replacement_applied", True) is False:
+        _diag = getattr(agent.context_compressor, "_last_context_reducer_diagnostics", {}) or {}
+        _effective_messages = compressed if _diag.get("raw_ref_reducer_applied") else messages
+        _existing_sp = getattr(agent, "_cached_system_prompt", None)
+        if not _existing_sp:
+            _existing_sp = agent._build_system_prompt(system_message)
+        try:
+            agent._emit_warning("ℹ Context compression is shadow-only; no messages were replaced.")
+        except Exception:
+            pass
+        _release_lock()
+        return _effective_messages, _existing_sp
 
     try:
         summary_error = getattr(agent.context_compressor, "_last_summary_error", None)

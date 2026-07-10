@@ -113,6 +113,19 @@ docs/superpowers/*
 # logs, and per-session caches are never artifacts of the codebase.
 .hermes/
 
+# Task engine runtime artifacts and local diagnostics
+.hermes_task_engine_runs/
+work/stress_runs/
+work/agy_logs/
+work/agy_alias_smoke_l1_l2/
+work/real_smoke_l1_l2/
+work/task_engine_simulated*/
+work/*_probe.json
+work/nightly_task_engine_*.json
+work/nightly_task_engine_*.jsonl
+work/agy_model_alias.env
+work/task_engine_closure_audit.json
+
 # Desktop/bootstrap install marker written into the managed checkout root by the
 # bootstrap installer. It is Hermes-managed runtime state, never a code change —
 # ignore it so `hermes update`'s `git stash push --include-untracked` does not
@@ -134,6 +147,23 @@ scripts/out/
 # stores the published notes. They are not a build artifact and must never be
 # committed to the repo root. See the hermes-release skill.
 RELEASE_v*.md
+
+# One-off task-engine research outputs and scratch harnesses
+adhd_cds_research_notes.json
+adhd_inattentive_cds_guide.md
+pipeline_run_summary.json
+run_adhd_pipeline.py
+work/agy_models.log
+work/full_run_output.json
+work/full_run_run/
+work/probe_agy_model_alias.py
+work/run_decision_stage1.py
+work/run_full_pipeline.py
+work/run_l1.py
+work/run_l1_only.py
+work/run_user_query.py
+work/stress_task_engine_profile.py
+work/task_engine_content_quality_audit.py
 
 # Desktop demo-run scratch output (hermes writes demo/*.txt during recorded
 # walkthroughs). Throwaway artifacts, never part of the app.

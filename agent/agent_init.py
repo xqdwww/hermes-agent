@@ -1562,6 +1562,18 @@ def init_agent(
     compression_abort_on_summary_failure = str(
         _compression_cfg.get("abort_on_summary_failure", False)
     ).lower() in {"true", "1", "yes"}
+    compression_shadow_only = str(
+        _compression_cfg.get("shadow_only", True)
+    ).lower() in {"true", "1", "yes"}
+    compression_allow_llm_replacement = str(
+        _compression_cfg.get("allow_llm_replacement", False)
+    ).lower() in {"true", "1", "yes"}
+    compression_allow_multimodal_stripping = str(
+        _compression_cfg.get("allow_multimodal_stripping", False)
+    ).lower() in {"true", "1", "yes"}
+    compression_allow_tool_call_arg_truncation = str(
+        _compression_cfg.get("allow_tool_call_arg_truncation", False)
+    ).lower() in {"true", "1", "yes"}
     # In-place compaction: when True, compress_context() rewrites the message
     # list + rebuilds the system prompt WITHOUT rotating the session id (no
     # parent_session_id chain, no `name #N` renumber). See #38763 and
@@ -1824,6 +1836,10 @@ def init_agent(
             provider=agent.provider,
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
+            shadow_only=compression_shadow_only,
+            allow_llm_replacement=compression_allow_llm_replacement,
+            allow_multimodal_stripping=compression_allow_multimodal_stripping,
+            allow_tool_call_arg_truncation=compression_allow_tool_call_arg_truncation,
             max_tokens=agent.max_tokens,
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)

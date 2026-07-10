@@ -61,6 +61,23 @@ from typing import Tuple
 __all__ = ["StreamingThinkScrubber"]
 
 
+def _find_double_newline(text: str) -> int:
+    """Return the index of the first double newline (blank line) in *text*.
+
+    A blank line is ``\\n\\n``, ``\\n\\r\\n``, or ``\\r\\n\\r\\n``.
+    Returns -1 if no blank line is found.
+    """
+    if "\n\n" in text:
+        return text.index("\n\n")
+    # Handle \r\n line endings
+    for sep in (b"\r\n\r\n", "\r\n\n", "\n\r\n"):
+        if isinstance(sep, bytes):
+            continue  # skip bytes hint; handle as str
+    if "\r\n\r\n" in text:
+        return text.index("\r\n\r\n")
+    return -1
+
+
 class StreamingThinkScrubber:
     """Stateful scrubber for streaming reasoning/thinking blocks.
 
@@ -89,17 +106,50 @@ class StreamingThinkScrubber:
     _OPEN_TAGS: Tuple[str, ...] = tuple(f"<{name}>" for name in _OPEN_TAG_NAMES)
     _CLOSE_TAGS: Tuple[str, ...] = tuple(f"</{name}>" for name in _OPEN_TAG_NAMES)
 
+    # Plain-text thinking/planning markers that, when they appear at a
+    # block boundary (start of stream or after a newline), indicate the
+    # model is outputting reasoning/thinking text without XML tags.
+    # Everything from the marker to the next blank line or end-of-stream
+    # is suppressed as reasoning content.
+    _THINK_TEXT_MARKERS: Tuple[str, ...] = (
+        "let me",
+        "actually,",
+        "actually ",
+        "i should",
+        "i'll first",
+        "i need to",
+        "first, let",
+        "first let",
+        "let's first",
+        "let's think",
+        "i'm thinking",
+        "okay, so",
+        "okay so",
+        "so let me",
+        "let's check",
+        "let's look",
+        "let me look",
+        "let me check",
+        "let me see",
+        "let me think",
+        "let me consider",
+        "let me try",
+        "i will first",
+    )
+
     # Pre-compute the longest tag (for partial-tag hold-back bound).
     _MAX_TAG_LEN: int = max(len(tag) for tag in _OPEN_TAGS + _CLOSE_TAGS)
 
     def __init__(self) -> None:
         self._in_block: bool = False
+        self._in_text_think: bool = False  # True when block entered via text marker
         self._buf: str = ""
         self._last_emitted_ended_newline: bool = True
 
     def reset(self) -> None:
         """Reset all state.  Call at the top of every new turn."""
         self._in_block = False
+        self._in_text_think = False
         self._buf = ""
         self._last_emitted_ended_newline = True
 
@@ -118,19 +168,41 @@ class StreamingThinkScrubber:
 
         while buf:
             if self._in_block:
-                # Hunt for the earliest close tag.
-                close_idx, close_len = self._find_first_tag(
-                    buf, self._CLOSE_TAGS,
-                )
-                if close_idx == -1:
-                    # No close yet — hold back a potential partial
-                    # close-tag prefix; discard everything else.
-                    held = self._max_partial_suffix(buf, self._CLOSE_TAGS)
-                    self._buf = buf[-held:] if held else ""
-                    return "".join(out)
-                # Found close: discard block content + tag, continue.
-                buf = buf[close_idx + close_len:]
-                self._in_block = False
+                if self._in_text_think:
+                    # Text-think mode: look for a double newline (blank
+                    # line) as the close marker.  This separates reasoning
+                    # from the actual response.
+                    dnl_idx = _find_double_newline(buf)
+                    if dnl_idx == -1:
+                        # No close yet — discard everything; thinking
+                        # is not finished.
+                        self._buf = ""
+                        return "".join(out)
+                    # Found blank-line close: discard thinking content
+                    # up to and including the blank line, then emit the
+                    # remaining text as the real response.
+                    # Skip past the double newline (2 chars for \n\n).
+                    buf = buf[dnl_idx + 2:]
+                    self._in_block = False
+                    self._in_text_think = False
+                    # If remaining text is all whitespace, continue
+                    if not buf.strip():
+                        break
+                    # Fall through to process buf as normal content
+                else:
+                    # Tag-based think mode: Hunt for the earliest close tag.
+                    close_idx, close_len = self._find_first_tag(
+                        buf, self._CLOSE_TAGS,
+                    )
+                    if close_idx == -1:
+                        # No close yet — hold back a potential partial
+                        # close-tag prefix; discard everything else.
+                        held = self._max_partial_suffix(buf, self._CLOSE_TAGS)
+                        self._buf = buf[-held:] if held else ""
+                        return "".join(out)
+                    # Found close: discard block content + tag, continue.
+                    buf = buf[close_idx + close_len:]
+                    self._in_block = False
             else:
                 # Priority 1 — closed <tag>X</tag> pair anywhere in
                 # buf.  Closed pairs are always an intentional,
@@ -174,6 +246,29 @@ class StreamingThinkScrubber:
                             )
                     self._in_block = True
                     buf = buf[open_idx + open_len:]
+                    continue
+
+                # Priority 3 — plain-text thinking marker at a block
+                # boundary.  Some models (DeepSeek v4-flash, etc.)
+                # output reasoning like "Let me check the URL..."
+                # as plain text outside any XML tag.  Treat these
+                # as reasoning blocks: suppress everything from the
+                # marker to the next blank line or end of stream.
+                text_mark_idx = self._find_text_think_at_boundary(buf, out)
+                if text_mark_idx != -1:
+                    preceding = buf[:text_mark_idx]
+                    if preceding:
+                        preceding = self._strip_orphan_close_tags(preceding)
+                        # Only emit if there's non-whitespace content
+                        # before the thinking marker.
+                        if preceding.strip():
+                            out.append(preceding)
+                            self._last_emitted_ended_newline = (
+                                preceding.endswith("\n")
+                            )
+                    self._in_block = True
+                    self._in_text_think = True
+                    buf = buf[text_mark_idx:]
                     continue
 
                 # No resolvable tag structure in buf.  Hold back any
@@ -294,6 +389,32 @@ class StreamingThinkScrubber:
                     break  # first boundary hit for this tag is enough
                 search_start = idx + 1
         return best_idx, best_len
+
+    def _find_text_think_at_boundary(
+        self, buf: str, already_emitted: list[str],
+    ) -> int:
+        """Return the index of the earliest text-think marker at a block boundary.
+
+        Returns -1 if no text-think marker is found at a boundary.
+
+        Case-insensitive: matches ``_THINK_TEXT_MARKERS`` when they appear
+        at a block boundary (start of stream, or after a newline, with only
+        optional whitespace on the line).
+        """
+        buf_lower = buf.lower().lstrip()
+        # Work out where the meaningful text starts (after leading
+        # whitespace that may precede the marker).
+        leading_ws = len(buf) - len(buf_lower) if buf_lower else len(buf)
+        if not buf_lower:
+            return -1
+        best_idx = -1
+        for marker in self._THINK_TEXT_MARKERS:
+            if buf_lower.startswith(marker):
+                mark_idx = leading_ws
+                if self._is_block_boundary(buf, mark_idx, already_emitted):
+                    if best_idx == -1 or mark_idx < best_idx:
+                        best_idx = mark_idx
+        return best_idx
 
     def _is_block_boundary(
         self, buf: str, idx: int, already_emitted: list[str],

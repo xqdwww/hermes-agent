@@ -59,6 +59,9 @@ _HERMES_CORE_TOOLS = [
     # off every CLI/messaging/cron schema (narrow waist).
     # Session history search
     "session_search",
+    # Strict heavy task engine entry for RESEARCH / DECISION /
+    # RESEARCH_DECISION. Legacy research runners remain outside core.
+    "task_engine_runner",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -77,6 +80,8 @@ _HERMES_CORE_TOOLS = [
     "kanban_unblock",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
+    # Deterministic video-summary report passthrough (bypasses model re-summary)
+    "video_report_passthrough",
 ]
 
 # Webhook events may originate from untrusted third-party content (for example,
@@ -126,6 +131,18 @@ TOOLSETS = {
     "video": {
         "description": "Video analysis and understanding tools (opt-in, not in default toolset)",
         "tools": ["video_analyze"],
+        "includes": []
+    },
+
+    "video_report": {
+        "description": (
+            "Deterministic video-summary report delivery.  "
+            "The ``video_report_passthrough`` tool reads a cached "
+            "video_summary_*.md report and returns it verbatim, bypassing "
+            "the model's secondary summarisation.  Always available in "
+            "the core toolset."
+        ),
+        "tools": ["video_report_passthrough"],
         "includes": []
     },
     
