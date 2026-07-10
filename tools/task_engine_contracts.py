@@ -300,6 +300,137 @@ _ERROR_CONTEXT_PATTERNS = (
     r"(most recent call last|Traceback)",
 )
 
+# Known mode field names appearing in log/diagnostic output.
+# When one of these fields is assigned a mode-token value via "=" or ":",
+# the value is a log artifact, not a user declaration.
+_KNOWN_MODE_FIELDS = (
+    "mode", "task_mode", "detected_mode", "selected_mode", "route_mode"
+)
+
+# Lead-in phrases that introduce a plaintext log or code section.
+# Content following these phrases that exhibits log/code structure is
+# excluded from explicit-declaration detection.
+_LEADIN_PHRASES = (
+    "下面是一段错误日志",
+    "以下是错误日志",
+    "下面是一段日志",
+    "以下是日志",
+    "下面是一段代码",
+    "以下是代码",
+    "错误输出",
+    "诊断信息",
+    "error log",
+    "error logs",
+    "traceback",
+    "diagnostic output",
+)
+
+
+def _check_key_value_context(original: str) -> set[str]:
+    """Check the *original* text for known field=value / field: value
+    assignments whose value side contains one of the mode tokens.
+
+    Returns a set of lowercased token texts that should be filtered.
+    """
+    filtered: set[str] = set()
+    if not original:
+        return filtered
+    for field in _KNOWN_MODE_FIELDS:
+        for token in _RESEARCH_TOKENS + _DECISION_TOKENS:
+            token_lower = token.lower()
+            # Pattern: field ⟦spaces⟧ = or : ⟦spaces⟧ … token (case-insensitive)
+            pattern = re.compile(
+                rf'{re.escape(field)}\s*[=:]\s*[^\n]*{re.escape(token_lower)}',
+                re.IGNORECASE,
+            )
+            if pattern.search(original):
+                filtered.add(token_lower)
+    return filtered
+
+
+def _looks_like_log_or_code_line(line: str) -> bool:
+    """Heuristic: does *line* look like log output or code source?"""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # key=value (ASCII identifier key)
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_.-]*\s*=\s*\S', stripped):
+        return True
+    # key: value (ASCII identifier key, colon, space, then value)
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_.-]*\s*:\s+\S', stripped):
+        return True
+    # Method/function call (identifier dotted chain with parens)
+    if re.match(r'^[a-zA-Z_][\w.]*(?:\.\w+)*\(', stripped):
+        return True
+    # Indented line (2+ leading spaces – code body, config, data)
+    leading_spaces = len(line) - len(line.lstrip())
+    if leading_spaces >= 2:
+        return True
+    # Function / class / method definition
+    if re.match(r'^(?:def |class |async def |sub |func )', stripped):
+        return True
+    # Status / all-caps constant
+    if re.match(r'^[A-Z][A-Z0-9_]{2,}(?:\s|:|$)', stripped):
+        return True
+    # File path (contains /)
+    if '/' in stripped and re.match(r'^[^\s]*/', stripped):
+        return True
+    # Stack-trace indicator
+    if re.match(r'^File ".*", line \d+', stripped):
+        return True
+    if 'Traceback' in stripped:
+        return True
+    # Command / shell prompt
+    if re.match(r'^[\$#>]\s', stripped) or re.match(r'^[\w@]+:.*\$', stripped):
+        return True
+    return False
+
+
+def _check_plaintext_log_or_code_context(original: str) -> set[str]:
+    """Check the *original* text for lead-in phrases followed by log/code
+    content, and collect any mode tokens appearing inside that content.
+
+    Returns a set of lowercased token texts that should be filtered.
+    """
+    filtered: set[str] = set()
+    if not original:
+        return filtered
+    lines = original.split('\n')
+
+    for i, line in enumerate(lines):
+        line_lower = line.strip().lower()
+        # Check for any lead-in phrase in this line
+        has_leadin = False
+        for phrase in _LEADIN_PHRASES:
+            phrase_lower = phrase.lower()
+            if phrase_lower in line_lower:
+                has_leadin = True
+                break
+        if not has_leadin:
+            continue
+
+        # Scan forward from the NEXT line for log/code content.
+        j = i + 1
+        while j < len(lines):
+            curr = lines[j]
+            if not curr.strip():
+                # Blank line — stay in context per requirement.
+                j += 1
+                continue
+            if _looks_like_log_or_code_line(curr):
+                # Still in log/code context — check for mode tokens.
+                curr_lower = curr.lower()
+                for token in _RESEARCH_TOKENS + _DECISION_TOKENS:
+                    token_lower = token.lower()
+                    if token_lower in curr_lower:
+                        filtered.add(token_lower)
+                j += 1
+            else:
+                # A non-blank, non-log line = natural language → exit.
+                break
+
+    return filtered
+
 
 def _strip_markdown_fences(text: str) -> tuple[str, list[dict]]:
     """Strip Markdown fenced code blocks, inline code, and block quotes.
@@ -523,6 +654,8 @@ def check_explicit_heavy_mode_declaration(
         "filtered_by_fence": [],
         "filtered_by_blockquote": [],
         "filtered_by_inline_code": [],
+        "filtered_by_key_value_context": [],
+        "filtered_by_plaintext_log_or_code_context": [],
         "non_negated_research": False,
         "non_negated_decision": False,
     }
@@ -591,16 +724,91 @@ def check_explicit_heavy_mode_declaration(
             diagnostic["meta_discussion_pattern"] = pattern
             return None, diagnostic
 
-    # Phase 4.6: Error-context filter — if a mode keyword appears near
+    # Phase 4.6: Key-value context filter — log/diagnostic field assignments
+    # like "mode=RESEARCH" or "task_mode: DECISION" are not declarations.
+    # Runs BEFORE the error-context filter so that legitimate log-field
+    # values are caught before Phase 4.8 can short-circuit on "error log".
+    diagnostic["filtered_by_key_value_context"] = []
+    kv_filtered_set = _check_key_value_context(original)
+    if kv_filtered_set:
+        for m in all_matches:
+            if m["token"].lower() in kv_filtered_set and not m["negated"]:
+                diagnostic["filtered_by_key_value_context"].append(m)
+        if diagnostic["filtered_by_key_value_context"]:
+            kv_filtered_tokens = {
+                m["token"].lower()
+                for m in diagnostic["filtered_by_key_value_context"]
+            }
+            active_research = any(
+                not m["negated"] and m["token"].lower() not in kv_filtered_tokens
+                for m in research_matches
+            )
+            active_decision = any(
+                not m["negated"] and m["token"].lower() not in kv_filtered_tokens
+                for m in decision_matches
+            )
+            active_matches = [
+                m for m in all_matches
+                if not m["negated"]
+                and m not in diagnostic["filtered_by_key_value_context"]
+            ]
+            diagnostic["active_matches"] = active_matches
+            diagnostic["non_negated_research"] = active_research
+            diagnostic["non_negated_decision"] = active_decision
+
+    if not active_research and not active_decision:
+        return None, diagnostic
+
+    # Phase 4.7: Plaintext log/code context filter — content following
+    # lead-in phrases (e.g. "error log", "以下是错误日志") that exhibits
+    # log or code structure is not a user declaration.
+    diagnostic["filtered_by_plaintext_log_or_code_context"] = []
+    lc_filtered_set = _check_plaintext_log_or_code_context(original)
+    if lc_filtered_set:
+        for m in all_matches:
+            if m["token"].lower() in lc_filtered_set and not m["negated"]:
+                if m not in diagnostic["filtered_by_key_value_context"]:
+                    diagnostic["filtered_by_plaintext_log_or_code_context"].append(m)
+        if diagnostic["filtered_by_plaintext_log_or_code_context"]:
+            lc_filtered_tokens = {
+                m["token"].lower()
+                for m in diagnostic["filtered_by_plaintext_log_or_code_context"]
+            }
+            all_context_filtered_tokens = kv_filtered_set | lc_filtered_set
+            active_research = any(
+                not m["negated"] and m["token"].lower() not in all_context_filtered_tokens
+                for m in research_matches
+            )
+            active_decision = any(
+                not m["negated"] and m["token"].lower() not in all_context_filtered_tokens
+                for m in decision_matches
+            )
+            active_matches = [
+                m for m in all_matches
+                if not m["negated"]
+                and m not in diagnostic["filtered_by_key_value_context"]
+                and m not in diagnostic["filtered_by_plaintext_log_or_code_context"]
+            ]
+            diagnostic["active_matches"] = active_matches
+            diagnostic["non_negated_research"] = active_research
+            diagnostic["non_negated_decision"] = active_decision
+
+    if not active_research and not active_decision:
+        return None, diagnostic
+
+    # Phase 4.8: Error-context filter — if a mode keyword appears near
     # an error/crash indicator, the text is likely copied output rather
-    # than a declaration.  Check the original text directly.
+    # than a declaration.  Check only remaining active matches so that
+    # lead-in phrases like "error log" do not short-circuit Phase 4.6/4.7.
     diagnostic["error_context_matched"] = False
     orig_lower = original.lower()
     has_error_keyword_near_research = False
-    # Check if any error keyword appears near "research" or "decision"
-    # within the original text (sentence-level proximity)
     for token in _RESEARCH_TOKENS + _DECISION_TOKENS:
         tl = token.lower()
+        kv_covered = tl in kv_filtered_set
+        lc_covered = tl in lc_filtered_set
+        if kv_covered or lc_covered:
+            continue
         tidx = orig_lower.find(tl)
         if tidx == -1:
             continue
