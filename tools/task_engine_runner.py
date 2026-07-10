@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -412,6 +413,161 @@ def _local_mechanism_check(*, mode: str, base_dir: str | None, metadata: dict[st
     )
 
 
+def _local_omlx_preflight() -> str:
+    from tools.task_engine_executors import run_omlx_preflight
+
+    return json.dumps(run_omlx_preflight(), ensure_ascii=False, indent=2)
+
+
+def _archived_full_block(*, mode: str, base_dir: str | None, sidecar_requested: bool, sidecar_stage: str, metadata: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "status": "blocked",
+            "BLOCKED_STATUS": "PIPELINE_BLOCKED",
+            "pipeline_status": "PIPELINE_BLOCKED",
+            "blocked_stage": "research_decision_archived",
+            "blocked_reason": DIRECT_LEGACY_RESEARCH_DECISION_FULL,
+            "entrypoint_guard": DIRECT_LEGACY_RESEARCH_DECISION_FULL,
+            "selected_entrypoint": TASK_ENGINE_RUNNER_ENTRYPOINT,
+            "artifact_dir": str(Path(base_dir).resolve()) if base_dir else "",
+            "mode": mode,
+            "two_step_recommendation": [
+                "RESEARCH full -> research_evidence_packet.md",
+                "DECISION full with research_packet_path=<path to research_evidence_packet.md>",
+            ],
+            "allow_override": {
+                "function_arg": "allow_archived_research_decision=True",
+                "execution_intent": "archived_test",
+            },
+            "sidecar_policy": {
+                "evidence_backed_sidecar_default": False,
+                "evidence_backed_sidecar_requested": sidecar_requested,
+                "evidence_backed_sidecar_stage": sidecar_stage,
+                "main_result_contract_changed_by_sidecar": False,
+            },
+            "loaded_source": metadata,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _query_requests_latest_research_packet(query: str) -> bool:
+    text = (query or "").lower()
+    patterns = (
+        "最新研究成果包",
+        "最新的研究成果包",
+        "基于最新研究成果包",
+        "使用最新研究成果包",
+        "研究成果包=最新",
+        "研究成果包 = 最新",
+        "研究成果包=latest",
+        "研究成果包 = latest",
+        "latest research packet",
+        "research_packet=latest",
+        "research packet=latest",
+    )
+    return any(pattern in text for pattern in patterns)
+
+
+def _extract_research_packet_path(query: str) -> str | None:
+    match = re.search(r"研究成果包[：:]\s*([^\s，。；;]+)", query or "")
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _candidate_research_roots(base_dir: str | Path | None) -> list[Path]:
+    roots: list[Path] = []
+    env_root = os.getenv("HERMES_TASK_ENGINE_ARTIFACT_DIR", "").strip()
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+    if base_dir:
+        base = Path(base_dir).expanduser()
+        roots.extend([base, base.parent])
+    roots.append(Path.cwd())
+    deduped: list[Path] = []
+    for root in roots:
+        resolved = root.resolve()
+        if resolved not in deduped:
+            deduped.append(resolved)
+    return deduped
+
+
+def _is_valid_latest_research_packet(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    required = (
+        "verdict: accepted",
+        "accepted: true",
+        "evidence_packet_ready_for_decision: true",
+        "## evidence_strength",
+        "## controversy",
+        "## evidence_gap",
+        "## evidence_supported",
+        "## reasonable_inference",
+        "## foresight_hypothesis",
+    )
+    return all(token in text for token in required)
+
+
+def _find_latest_research_packet(base_dir: str | Path | None) -> Path | None:
+    candidates: list[Path] = []
+    for root in _candidate_research_roots(base_dir):
+        if not root.exists():
+            continue
+        candidates.extend(path for path in root.rglob("research_evidence_packet.md") if _is_valid_latest_research_packet(path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: (path.stat().st_mtime_ns, str(path.resolve())), reverse=True)
+    return candidates[0].resolve()
+
+
+def run_decision_final_smoke(
+    query: str,
+    *,
+    base_dir: str | Path,
+    research_packet_path: str | Path | None = None,
+) -> dict[str, Any]:
+    from tools.task_engine_executors import run_decision_final_smoke as _run_decision_final_smoke
+
+    return _run_decision_final_smoke(query, base_dir=base_dir, research_packet_path=research_packet_path)
+
+
+def _local_decision_final_smoke(kwargs: dict[str, Any]) -> str:
+    query = str(kwargs.get("query") or "")
+    base_dir = kwargs.get("base_dir") or kwargs.get("artifact_dir") or "outputs/task_engine_runner"
+    research_packet_path = kwargs.get("research_packet_path") or _extract_research_packet_path(query)
+    if not research_packet_path and _query_requests_latest_research_packet(query):
+        latest = _find_latest_research_packet(base_dir)
+        if latest is None:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "pipeline_status": "PIPELINE_BLOCKED",
+                    "blocked_stage": "research_packet_discovery",
+                    "blocked_reason": "no_valid_new_research_packet_found",
+                    "artifact_dir": str(Path(base_dir).resolve()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        research_packet_path = str(latest)
+    if research_packet_path:
+        result = run_decision_final_smoke(query, base_dir=base_dir, research_packet_path=research_packet_path)
+    else:
+        result = run_decision_final_smoke(query, base_dir=base_dir)
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        result.setdefault("artifact_dir", str(Path(base_dir).resolve()))
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _inject_passive_guard_debug(json_str: str, query: str, passive_guard_debug: bool) -> str:
     """Inject passive-guard diagnostic fields when debug is opt-in.
 
@@ -451,6 +607,22 @@ def task_engine_runner(**kwargs: Any) -> str:
         return _inject_passive_guard_debug(_local_status(mode=mode, metadata=metadata), kwargs.get("query", ""), passive_guard_debug)
     if action == "mechanism-check":
         return _inject_passive_guard_debug(_local_mechanism_check(mode=mode, base_dir=kwargs.get("base_dir"), metadata=metadata), kwargs.get("query", ""), passive_guard_debug)
+    if action == "omlx-preflight":
+        return _inject_passive_guard_debug(_local_omlx_preflight(), kwargs.get("query", ""), passive_guard_debug)
+    if action == "full" and mode == "RESEARCH_DECISION" and not _coerce_task_engine_bool(kwargs.get("allow_archived_research_decision"), default=False):
+        return _inject_passive_guard_debug(
+            _archived_full_block(
+                mode=mode,
+                base_dir=kwargs.get("base_dir"),
+                sidecar_requested=_coerce_task_engine_bool(kwargs.get("emit_evidence_backed_sidecar"), default=False),
+                sidecar_stage=str(kwargs.get("evidence_backed_sidecar_stage") or "status_only"),
+                metadata=metadata,
+            ),
+            kwargs.get("query", ""),
+            passive_guard_debug,
+        )
+    if action == "smoke-decision-final":
+        return _inject_passive_guard_debug(_local_decision_final_smoke(kwargs), kwargs.get("query", ""), passive_guard_debug)
     if not verified:
         return _inject_passive_guard_debug(_blocked(str(reason), metadata=metadata), kwargs.get("query", ""), passive_guard_debug)
 
@@ -538,5 +710,6 @@ __all__ = [
     "TERMINOLOGY_LEAKAGE",
     "apply_legacy_research_decision_term_guard",
     "audit_legacy_research_decision_terms",
+    "run_decision_final_smoke",
     "task_engine_runner",
 ]
