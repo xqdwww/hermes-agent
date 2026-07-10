@@ -173,6 +173,65 @@ SESSION_SEARCH_GUIDANCE = (
     "asking them to repeat themselves."
 )
 
+VIDEO_SUMMARY_DIRECT_ROUTE_GUIDANCE = (
+    "## Video summary direct route\n"
+    "When the user shares a video link AND asks you to summarize/watch/analyze it, "
+    "route the request to the summarizer video pipeline immediately.\n"
+    "Do NOT call web_extract, web_search, or research_pipeline_runner first.\n"
+    "\n"
+    "Video link patterns (route immediately):\n"
+    "- b23.tv/* (Bilibili short links)\n"
+    "- bilibili.com/video/*\n"
+    "- youtu.be/*, youtube.com/watch*\n"
+    "- BV[a-zA-Z0-9]+ (Bilibili video IDs)\n"
+    "- av[0-9]+ (Bilibili alternate IDs)\n"
+    "\n"
+    "Summary intent patterns (trigger summarizer when present near a video link):\n"
+    "- Chinese: 总结, 总结下, 总结这个, 总结视频, 看看这个, 讲讲这个, 提炼观点, 摘要, 帮我看, 分析这个视频\n"
+    "- English: summarize, tl;dr, break down, give me a summary\n"
+    "\n"
+    "## Metadata-only responses are PROHIBITED for video summary requests\n"
+    "If a video has no description or no subtitles, these are NOT stop conditions:\n"
+    "- No description (empty 简介) \u2192 continue with the summarizer pipeline; description absence does not block summarization\n"
+    "- No subtitles (no 字幕/CC) \u2192 the summarizer triggers ASR (speech-to-text) automatically\n"
+    "- Live replay / livestream recording \u2192 continue via audio extraction + ASR; these are not stop conditions\n"
+    "- Comments and danmaku (弹幕/评论) are NOT substitutes for video content\n"
+    "  Do NOT offer to fetch comments or danmaku as a primary summary source.\n"
+    "  Do NOT present metadata-only as a video summary.\n"
+    "\n"
+    "## If a summarizer report already exists\n"
+    "Check ~/OS_Core/output/video_summary_*.md for a matching report. If found, "
+    "read the report file directly instead of re-running the pipeline.\n"
+    "\n"
+    "## Response sufficiency rule\n"
+    "A valid video summary response MUST be grounded in one of:\n"
+    "1. summarizer pipeline report file (video_summary_*.md)\n"
+    "2. transcript / ASR output extracted by the summarizer\n"
+    "3. extracted video content artifact from the pipeline\n"
+    "Metadata alone (title, author, duration, view count, publish date) is INSUFFICIENT for a summary response.\n"
+    "\n"
+    "Wrong: calling web_extract on a b23.tv link \u2192 it will be blocked by the research gate.\n"
+    "Wrong: calling web_search to find more information \u2192 you already have the link.\n"
+    "Wrong: asking the user for a BV number or subtitles \u2192 the summarizer handles link resolution.\n"
+    "Wrong: replying with only metadata (play count, duration, author) when the user asked for a summary.\n"
+    "Wrong: offering to fetch comments/danmaku as the primary analysis.\n"
+    "Correct: run the summarizer video pipeline with the original URL the user provided.\n"
+    "\n"
+    "The summarizer pipeline can be invoked via:\n"
+    '  cd ~/Workspace/AI_Core/Projects && PYTHONPATH=/Users/xqdwww/Workspace/AI_Core/Projects python3.13 -u -m summarizer video "<URL>"\n'
+    "\n"
+    "Only ask the user for alternative input after the summarizer pipeline explicitly fails "
+    "with one of: short_link_unresolvable, video_unavailable, login_required, download_failed, asr_failed.\n"
+    "\n"
+    "Forbidden responses (when user asks to summarize a video):\n"
+    '- "I can only see metadata" \u2192 this is never acceptable\n'
+    '- "No subtitles so I cannot summarize" \u2192 use ASR\n'
+    '- "Please provide the BV number" \u2192 you already have the URL\n'
+    '- "Please provide subtitles/audio" \u2192 the pipeline handles this\n'
+    '- "I can fetch comments/danmaku" \u2192 these are not substitutes\n'
+    "- Any response that stops at metadata when the request was a summary"
+)
+
 TASK_ENGINE_RUNNER_GUIDANCE = (
     "Heavy task engine entry discipline: when `task_engine_runner` is available "
     "and the user explicitly asks for `task_engine_runner dry-run`, "

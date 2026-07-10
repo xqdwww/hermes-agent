@@ -45,6 +45,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     URL_ROUTING_GUIDANCE,
+    VIDEO_SUMMARY_DIRECT_ROUTE_GUIDANCE,
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
@@ -200,6 +201,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(TASK_ENGINE_RUNNER_GUIDANCE)
     if "skill_manage" in agent.valid_tool_names:
         tool_guidance.append(SKILLS_GUIDANCE)
+    # Video summary direct route: steer model away from web_extract for
+    # video links. Injected when web tools are available — this is the
+    # primary pre-filter covering b23.tv, bilibili.com/video, and youtube
+    # URLs with summary intents.
+    if "web_extract" in agent.valid_tool_names or "web_search" in agent.valid_tool_names:
+        tool_guidance.append(VIDEO_SUMMARY_DIRECT_ROUTE_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
