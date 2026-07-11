@@ -184,6 +184,53 @@ def test_catalog_line_is_not_section_heading():
     assert any(r["reason"] == "possible_catalog_or_book_list" for r in prepared.review_records)
 
 
+def test_catalog_like_line_inside_resolved_section_is_owned_excerpt_not_review():
+    text = (
+        "《Synthetic Book》\n"
+        "Artificial excerpt before list.\n"
+        "《Synthetic Mention A》 《Synthetic Mention B》 《Synthetic Mention C》\n"
+        "Artificial excerpt after list.\n"
+    )
+    prepared = _prepared(text)
+    assert len(prepared.manifest_records) == 1
+    assert prepared.review_records == []
+    record = prepared.manifest_records[0]
+    sliced = text[record["section_start_offset"] : record["section_end_offset"]]
+    assert "Synthetic Mention B" in sliced
+    assert record["content_type"] == CONTENT_TYPE
+
+
+def test_catalog_like_line_between_resolved_sections_stays_with_previous_excerpt():
+    text = (
+        "《Synthetic Book One》\n"
+        "Artificial excerpt before list.\n"
+        "《Synthetic Mention A》 《Synthetic Mention B》 《Synthetic Mention C》\n"
+        "《Synthetic Book Two》\n"
+        "Artificial excerpt two.\n"
+    )
+    prepared = _prepared(text)
+    assert len(prepared.manifest_records) == 2
+    assert not any(r["reason"] == "possible_catalog_or_book_list" for r in prepared.review_records)
+    first = prepared.manifest_records[0]
+    sliced = text[first["section_start_offset"] : first["section_end_offset"]]
+    assert "Synthetic Mention C" in sliced
+
+
+def test_catalog_like_line_inside_note_title_fallback_section_is_not_review():
+    text = (
+        "# Synthetic Note Title Book\n"
+        "标签: synthetic\n"
+        "\n"
+        "Artificial excerpt before list.\n"
+        "《Synthetic Mention A》 《Synthetic Mention B》 《Synthetic Mention C》\n"
+        "Artificial excerpt after list.\n"
+    )
+    prepared = _prepared(text)
+    assert len(prepared.manifest_records) == 1
+    assert prepared.manifest_records[0]["heading_detection_method"] == "note_title_header"
+    assert prepared.review_records == []
+
+
 def test_checksum_changes_when_source_changes():
     first = _prepared("《Checksum Synthetic Book》\nExcerpt A.\n").manifest_records[0]
     second = _prepared("《Checksum Synthetic Book》\nExcerpt B.\n").manifest_records[0]

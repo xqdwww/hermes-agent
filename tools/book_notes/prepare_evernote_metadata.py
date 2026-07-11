@@ -424,6 +424,22 @@ def build_review_record(
     }
 
 
+def review_is_within_section(review: dict[str, Any], section: BookSection) -> bool:
+    return (
+        section.text_start
+        <= int(review["candidate_start_offset"])
+        <= int(review["candidate_end_offset"])
+        <= section.text_end
+    )
+
+
+def should_keep_review_record(review: dict[str, Any], sections: list[BookSection]) -> bool:
+    """Keep only review records that are not safely owned by a resolved section."""
+    if review.get("reason") not in {"ambiguous_heading", "possible_catalog_or_book_list"}:
+        return True
+    return not any(review_is_within_section(review, section) for section in sections)
+
+
 def book_id_for(title_normalized: str, author_normalized: str | None) -> str:
     author_part = author_normalized or NO_AUTHOR_TOKEN
     return "book_" + stable_hash(["book-v1", title_normalized, author_part], length=16)
@@ -616,6 +632,7 @@ def segment_book_sections(
                 section_text=text[start:end],
             )
         )
+    reviews = [review for review in reviews if should_keep_review_record(review, sections)]
     return sections, reviews
 
 
@@ -674,6 +691,7 @@ def prepare_source_text(
                 for review in reviews
                 if review.get("reason") not in {"unassigned_text", "malformed_structure"}
             ]
+    reviews = [review for review in reviews if should_keep_review_record(review, sections)]
     source_sha = sha256_bytes(source_bytes)
     notebook = infer_notebook_from_relative_path(source_path)
     language = infer_language(text)

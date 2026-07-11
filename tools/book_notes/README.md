@@ -31,6 +31,12 @@ Inline mentions inside prose are not section headings. Catalog-like lines,
 numbered lists, ambiguous short lines, and malformed structures are routed to
 the review queue instead of being guessed.
 
+Unresolved heading candidates, such as catalog-like lines or ambiguous short
+lines, that fall fully inside a resolved section range are retained as part of
+that section's `book_excerpt` text and are not duplicated into the review queue.
+Those candidates are only reviewed when they are not safely owned by a resolved
+book section.
+
 ## Offsets
 
 Offsets use Python decoded string indexes and are recorded as:
@@ -75,4 +81,3 @@ python tools/book_notes/prepare_evernote_metadata.py \
 Without `--dry-run`, the CLI writes `manifest.jsonl` and `review_queue.jsonl`.
 Neither file contains section text; they contain metadata, offsets, and
 checksums only.
-
