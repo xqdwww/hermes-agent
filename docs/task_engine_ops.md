@@ -262,6 +262,7 @@ The stage is valid only when these files are created in the current run and pass
 - wrapper: `/Users/Shared/OpenClaw/chatgpt_app_bridge_http_cli.py`
 - health: `http://127.0.0.1:18890/health`
 - LaunchAgent: `/Users/xqdwww/Library/LaunchAgents/com.hermes.chatgpt-app-main-worker.plist`
+- target app: `ChatGPT Classic.app`, bundle id `com.openai.chat`; never route this bridge to the newer `ChatGPT.app` / `com.openai.codex` Codex surface.
 
 Health check:
 
