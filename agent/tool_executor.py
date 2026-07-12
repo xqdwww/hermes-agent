@@ -51,6 +51,52 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
+def _safe_tool_callback_args(function_name: str, function_args: dict, tool_call_id: str = "") -> dict:
+    from tools.registry import registry
+    if not registry.is_sensitive(function_name):
+        return _redact_tool_args_for_display(function_name, function_args) or function_args
+    return {
+        "_hermes_sensitive_tool": {
+            "schema_version": 1,
+            "protocol_version": 1,
+            "tool_call_id": tool_call_id,
+            "tool_name": function_name,
+            "action": function_args.get("action") if isinstance(function_args, dict) else None,
+            "privacy_class": "sensitive_personal_data",
+            "redaction_applied": True,
+            "status": "started",
+            "argument_character_or_byte_count": len(json.dumps(function_args, ensure_ascii=False)),
+            "raw_arguments_persisted": False,
+            "raw_result_persisted": False,
+            "raw_error_payload_persisted": False,
+        }
+    }
+
+
+def _safe_tool_callback_result(function_name: str, function_result: Any, tool_call_id: str = "") -> Any:
+    from tools.registry import registry
+    if not registry.is_sensitive(function_name):
+        return function_result
+    is_error, _ = _detect_tool_failure(function_name, function_result)
+    return json.dumps({
+        "sensitive_tool_result": "redacted",
+        "audit": {
+            "schema_version": 1,
+            "protocol_version": 1,
+            "tool_call_id": tool_call_id,
+            "tool_name": function_name,
+            "privacy_class": "sensitive_personal_data",
+            "redaction_applied": True,
+            "status": "error" if is_error else "completed",
+            "result_byte_count": len(str(function_result).encode("utf-8")),
+            "result_text_delivered_live": not is_error,
+            "raw_arguments_persisted": False,
+            "raw_result_persisted": False,
+            "raw_error_payload_persisted": False,
+        },
+    }, ensure_ascii=False)
+
+
 def _budget_for_agent(agent) -> BudgetConfig:
     """Resolve a tool-result BudgetConfig scaled to the agent's context window.
 
@@ -500,7 +546,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off":
         print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
         for i, (tc, name, args, middleware_trace, block_result, blocked_by_guardrail) in enumerate(parsed_calls, 1):
-            display_args = _redact_tool_args_for_display(name, args) or args
+            display_args = _safe_tool_callback_args(name, args, tc.id)
             args_str = json.dumps(display_args, ensure_ascii=False)
             if agent.verbose_logging:
                 print(f"  📞 Tool {i}: {name}({list(display_args.keys())})")
@@ -514,7 +560,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             continue
         if agent.tool_progress_callback:
             try:
-                display_args = _redact_tool_args_for_display(name, args) or args
+                display_args = _safe_tool_callback_args(name, args, tc.id)
                 preview = _build_tool_preview(name, display_args)
                 agent.tool_progress_callback("tool.started", name, preview, display_args)
             except Exception as cb_err:
@@ -525,7 +571,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             continue
         if agent.tool_start_callback:
             try:
-                display_args = _redact_tool_args_for_display(name, args) or args
+                display_args = _safe_tool_callback_args(name, args, tc.id)
                 agent.tool_start_callback(tc.id, name, display_args)
             except Exception as cb_err:
                 logging.debug(f"Tool start callback error: {cb_err}")
@@ -866,7 +912,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
             if is_error:
                 _err_text = _multimodal_text_summary(function_result)
-                result_preview = _err_text[:200] if len(_err_text) > 200 else _err_text
+                safe_error = _safe_tool_callback_result(function_name, _err_text, tc.id)
+                result_preview = safe_error[:200] if len(safe_error) > 200 else safe_error
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
             # Track file-mutation outcome for the turn-end verifier.
@@ -885,14 +932,15 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     agent.tool_progress_callback(
                         "tool.completed", function_name, None, None,
                         duration=tool_duration, is_error=is_error,
-                        result=function_result,
+                        result=_safe_tool_callback_result(function_name, function_result, tc.id),
                     )
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
 
             if agent.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+                safe_log_result = _safe_tool_callback_result(function_name, function_result, tc.id)
+                logging.debug(f"Tool result ({len(str(safe_log_result))} chars): {safe_log_result}")
 
         # Print cute message per tool
         if agent._should_emit_quiet_tool_messages():
@@ -902,7 +950,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             _preview_str = _multimodal_text_summary(function_result)
             if agent.verbose_logging:
                 print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s")
-                print(agent._wrap_verbose("Result: ", _preview_str))
+                safe_preview = _safe_tool_callback_result(name, _preview_str, tc.id)
+                print(agent._wrap_verbose("Result: ", str(safe_preview)))
             else:
                 response_preview = _preview_str[:agent.log_prefix_chars] + "..." if len(_preview_str) > agent.log_prefix_chars else _preview_str
                 print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
@@ -912,8 +961,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
         if not blocked and agent.tool_complete_callback:
             try:
-                display_args = _redact_tool_args_for_display(name, args) or args
-                agent.tool_complete_callback(tc.id, name, display_args, function_result)
+                display_args = _safe_tool_callback_args(name, args, tc.id)
+                safe_result = _safe_tool_callback_result(name, function_result, tc.id)
+                agent.tool_complete_callback(tc.id, name, display_args, safe_result)
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 
@@ -1076,7 +1126,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._iters_since_skill = 0
 
         if not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off":
-            display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
+            display_args = _safe_tool_callback_args(function_name, function_args, tool_call.id)
             args_str = json.dumps(display_args, ensure_ascii=False)
             if agent.verbose_logging:
                 print(f"  📞 Tool {i}: {function_name}({list(display_args.keys())})")
@@ -1101,7 +1151,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         if not _execution_blocked and agent.tool_progress_callback:
             try:
-                display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
+                display_args = _safe_tool_callback_args(function_name, function_args, tool_call.id)
                 preview = _build_tool_preview(function_name, display_args)
                 agent.tool_progress_callback("tool.started", function_name, preview, display_args)
             except Exception as cb_err:
@@ -1109,7 +1159,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         if not _execution_blocked and agent.tool_start_callback:
             try:
-                display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
+                display_args = _safe_tool_callback_args(function_name, function_args, tool_call.id)
                 agent.tool_start_callback(tool_call.id, function_name, display_args)
             except Exception as cb_err:
                 logging.debug(f"Tool start callback error: {cb_err}")
@@ -1423,6 +1473,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     skip_tool_request_middleware=True,
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                    runtime_capabilities=list(getattr(agent, "runtime_capabilities", [])),
                     tool_request_middleware_trace=list(middleware_trace),
                 )
                 _spinner_result = function_result
@@ -1465,6 +1516,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     skip_tool_request_middleware=True,
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                    runtime_capabilities=list(getattr(agent, "runtime_capabilities", [])),
                     tool_request_middleware_trace=list(middleware_trace),
                 )
             except KeyboardInterrupt:
@@ -1488,8 +1540,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_duration = time.time() - tool_start_time
 
         if isinstance(function_result, str):
-            result_preview = function_result if agent.verbose_logging else (
-                function_result[:200] if len(function_result) > 200 else function_result
+            safe_result_preview = _safe_tool_callback_result(function_name, function_result, tool_call.id)
+            result_preview = safe_result_preview if agent.verbose_logging else (
+                safe_result_preview[:200] if len(safe_result_preview) > 200 else safe_result_preview
             )
             _result_len = len(function_result)
         else:
@@ -1554,7 +1607,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent.tool_progress_callback(
                     "tool.completed", function_name, None, None,
                     duration=tool_duration, is_error=_is_error_result,
-                    result=function_result,
+                    result=_safe_tool_callback_result(function_name, function_result, tool_call.id),
                 )
             except Exception as cb_err:
                 logging.debug(f"Tool progress callback error: {cb_err}")
@@ -1564,13 +1617,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         if agent.verbose_logging:
             logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-            _log_result = _multimodal_text_summary(function_result)
+            _log_result = str(_safe_tool_callback_result(
+                function_name, _multimodal_text_summary(function_result), tool_call.id,
+            ))
             logging.debug(f"Tool result ({len(_log_result)} chars): {_log_result}")
 
         if not _execution_blocked and agent.tool_complete_callback:
             try:
-                display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
-                agent.tool_complete_callback(tool_call.id, function_name, display_args, function_result)
+                display_args = _safe_tool_callback_args(function_name, function_args, tool_call.id)
+                safe_result = _safe_tool_callback_result(function_name, function_result, tool_call.id)
+                agent.tool_complete_callback(tool_call.id, function_name, display_args, safe_result)
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 

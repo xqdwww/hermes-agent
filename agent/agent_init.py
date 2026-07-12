@@ -329,6 +329,7 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    runtime_capabilities: List[str] = None,
 ):
     """
     Initialize the AI Agent.
@@ -588,6 +589,7 @@ def init_agent(
     # Store toolset filtering options
     agent.enabled_toolsets = enabled_toolsets
     agent.disabled_toolsets = disabled_toolsets
+    agent.runtime_capabilities = frozenset(runtime_capabilities or [])
     
     # Model response configuration
     agent.max_tokens = max_tokens  # None = use model default

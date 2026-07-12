@@ -1031,6 +1031,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    runtime_capabilities: Optional[List[str]] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1056,6 +1057,20 @@ def handle_function_call(
     Returns:
         Function result as a JSON string.
     """
+    privacy_policy = registry.get_privacy_policy(function_name)
+    required_capability = (
+        privacy_policy.get("required_runtime_capability")
+        if privacy_policy and privacy_policy.get("class") == "sensitive_personal_data"
+        else None
+    )
+    is_sensitive = bool(required_capability)
+    if required_capability and required_capability not in set(runtime_capabilities or []):
+        return json.dumps({
+            "status": "unavailable",
+            "error_code": "sensitive_persistence_capability_missing",
+            "handler_executed": False,
+        }, ensure_ascii=False)
+
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
@@ -1135,10 +1150,11 @@ def handle_function_call(
                 tool_request_middleware_trace=list(_tool_middleware_trace),
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
+                runtime_capabilities=runtime_capabilities,
             )
 
     _tool_original_args = dict(function_args)
-    if not skip_tool_request_middleware:
+    if not skip_tool_request_middleware and not is_sensitive:
         try:
             from hermes_cli.middleware import apply_tool_request_middleware
 
@@ -1172,7 +1188,7 @@ def handle_function_call(
         # gate denied/timed-out/errored (fail-closed). Observer plugins see
         # the hook on that same pass. When skip=True, the caller already
         # fired it — do nothing here.
-        if not skip_pre_tool_call_hook:
+        if not skip_pre_tool_call_hook and not is_sensitive:
             block_message: Optional[str] = None
             try:
                 from hermes_cli.plugins import resolve_pre_tool_block
@@ -1270,19 +1286,22 @@ def handle_function_call(
                         session_id=session_id,
                         user_task=user_task,
                     )
-            from hermes_cli.middleware import run_tool_execution_middleware
+            if is_sensitive:
+                result = _dispatch(function_args)
+            else:
+                from hermes_cli.middleware import run_tool_execution_middleware
 
-            result = run_tool_execution_middleware(
-                function_name,
-                function_args,
-                _dispatch,
-                original_args=_tool_original_args,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=turn_id or "",
-                api_request_id=api_request_id or "",
-            )
+                result = run_tool_execution_middleware(
+                    function_name,
+                    function_args,
+                    _dispatch,
+                    original_args=_tool_original_args,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                    turn_id=turn_id or "",
+                    api_request_id=api_request_id or "",
+                )
         finally:
             if _approval_tokens is not None and reset_current_observability_context is not None:
                 try:
@@ -1291,18 +1310,19 @@ def handle_function_call(
                     pass
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
-        _emit_post_tool_call_hook(
-            function_name=function_name,
-            function_args=function_args,
-            result=result,
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            duration_ms=duration_ms,
-            middleware_trace=list(_tool_middleware_trace),
-        )
+        if not is_sensitive:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=result,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                duration_ms=duration_ms,
+                middleware_trace=list(_tool_middleware_trace),
+            )
 
         # Generic tool-result canonicalization seam: plugins receive the
         # final result string (JSON, usually) and may replace it by
@@ -1314,7 +1334,7 @@ def handle_function_call(
         # field derivation and the payload dispatch.
         try:
             from hermes_cli.plugins import has_hook, invoke_hook
-            if has_hook("transform_tool_result"):
+            if not is_sensitive and has_hook("transform_tool_result"):
                 status, error_type, error_message = _tool_result_observer_fields(result)
                 hook_results = invoke_hook(
                     "transform_tool_result",
@@ -1344,6 +1364,93 @@ def handle_function_call(
         error_msg = f"Error executing {function_name}: {str(e)}"
         logger.exception(error_msg)
         return json.dumps({"error": _sanitize_tool_error(error_msg)}, ensure_ascii=False)
+
+
+def dispatch_tool_call_envelope(
+    function_name: str,
+    function_args: Dict[str, Any],
+    *,
+    tool_call_id: str,
+    runtime_capabilities: Optional[List[str]] = None,
+    enabled_tools: Optional[List[str]] = None,
+    enabled_toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Dispatch through the formal path and return a V1 in-memory envelope."""
+    entry = registry.get_entry(function_name)
+    policy = registry.get_privacy_policy(function_name) or {"class": "standard"}
+    if entry is None:
+        result = json.dumps({
+            "status": "unavailable",
+            "error_code": "tool_not_registered",
+        }, ensure_ascii=False)
+    elif enabled_tools is not None and function_name not in enabled_tools:
+        result = json.dumps({
+            "status": "unavailable",
+            "error_code": "tool_not_enabled",
+        }, ensure_ascii=False)
+    else:
+        try:
+            from jsonschema import Draft202012Validator
+            Draft202012Validator(entry.schema.get("parameters", {})).validate(function_args)
+        except Exception:
+            result = json.dumps({
+                "status": "invalid_arguments",
+                "error_code": "tool_schema_validation_failed",
+            }, ensure_ascii=False)
+        else:
+            result = handle_function_call(
+                function_name,
+                function_args,
+                task_id=task_id,
+                tool_call_id=tool_call_id,
+                session_id=session_id,
+                enabled_tools=enabled_tools,
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+                runtime_capabilities=runtime_capabilities,
+            )
+    parsed = None
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except Exception:
+        parsed = None
+    status = "ok"
+    error_code = None
+    if isinstance(parsed, dict):
+        error_code = parsed.get("error_code")
+        if parsed.get("status") in {"unavailable", "invalid_arguments"} or parsed.get("error"):
+            status = str(parsed.get("status") or "error")
+    handler_not_run_codes = {
+        "sensitive_persistence_capability_missing",
+        "tool_not_registered",
+        "tool_not_enabled",
+        "tool_schema_validation_failed",
+    }
+    return {
+        "protocol_version": 1,
+        "tool_call_id": tool_call_id,
+        "tool_name": function_name,
+        "action": function_args.get("action") if isinstance(function_args, dict) else None,
+        "privacy_class": policy.get("class", "standard"),
+        "required_runtime_capability": policy.get("required_runtime_capability"),
+        "arguments": function_args,
+        "status": status,
+        "error_code": error_code,
+        "handler_executed": error_code not in handler_not_run_codes,
+        "ephemeral_result": result,
+        "safe_audit": {
+            "protocol_version": 1,
+            "tool_call_id": tool_call_id,
+            "tool_name": function_name,
+            "action": function_args.get("action") if isinstance(function_args, dict) else None,
+            "privacy_class": policy.get("class", "standard"),
+            "status": status,
+            "error_code": error_code,
+        },
+    }
 
 
 # =============================================================================

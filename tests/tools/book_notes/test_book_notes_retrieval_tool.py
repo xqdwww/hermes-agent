@@ -80,6 +80,16 @@ def test_registered_once_and_discovery_schema():
     assert registry.get_all_tool_names().count("book_notes_retrieval") == 1
     assert entry.is_async is True and entry.toolset == "book-notes"
     assert entry.schema is BOOK_NOTES_RETRIEVAL_SCHEMA
+    assert entry.privacy_policy == {
+        "class": "sensitive_personal_data",
+        "required_runtime_capability": "sensitive_tool_persistence_v1",
+        "persistence": {
+            "arguments": "redacted",
+            "result": "redacted",
+            "errors": "redacted",
+        },
+        "live_result_delivery": "ephemeral",
+    }
 
 
 def test_schema_actions_limits_and_readonly_description():

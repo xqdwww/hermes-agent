@@ -455,4 +455,14 @@ registry.register(
     is_async=True,
     description=BOOK_NOTES_RETRIEVAL_SCHEMA["description"],
     max_result_size_chars=20_000,
+    privacy_policy={
+        "class": "sensitive_personal_data",
+        "required_runtime_capability": "sensitive_tool_persistence_v1",
+        "persistence": {
+            "arguments": "redacted",
+            "result": "redacted",
+            "errors": "redacted",
+        },
+        "live_result_delivery": "ephemeral",
+    },
 )

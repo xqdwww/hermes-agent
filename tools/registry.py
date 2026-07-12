@@ -15,6 +15,7 @@ Import chain (circular-import safe):
 """
 
 import ast
+import copy
 import importlib
 import json
 import logging
@@ -25,6 +26,38 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+SENSITIVE_PERSISTENCE_PROTOCOL = "sensitive_tool_persistence_v1"
+STANDARD_PRIVACY_POLICY = {"class": "standard"}
+_SENSITIVE_PRIVACY_CLASS = "sensitive_personal_data"
+
+
+def normalize_privacy_policy(policy: Optional[dict]) -> dict:
+    """Validate and return a detached V1 tool privacy policy."""
+    if policy is None:
+        return dict(STANDARD_PRIVACY_POLICY)
+    if not isinstance(policy, dict):
+        raise ValueError("privacy_policy must be a mapping")
+    privacy_class = policy.get("class")
+    if privacy_class == "standard":
+        if set(policy) != {"class"}:
+            raise ValueError("standard privacy_policy only accepts class")
+        return dict(STANDARD_PRIVACY_POLICY)
+    if privacy_class != _SENSITIVE_PRIVACY_CLASS:
+        raise ValueError(f"unsupported privacy class: {privacy_class!r}")
+    expected = {
+        "class": _SENSITIVE_PRIVACY_CLASS,
+        "required_runtime_capability": SENSITIVE_PERSISTENCE_PROTOCOL,
+        "persistence": {
+            "arguments": "redacted",
+            "result": "redacted",
+            "errors": "redacted",
+        },
+        "live_result_delivery": "ephemeral",
+    }
+    if policy != expected:
+        raise ValueError("sensitive privacy_policy does not satisfy protocol V1")
+    return copy.deepcopy(expected)
 
 
 def _is_registry_register_call(node: ast.AST) -> bool:
@@ -82,11 +115,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "privacy_policy",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 privacy_policy=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -105,6 +140,7 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        self.privacy_policy = normalize_privacy_policy(privacy_policy)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +402,7 @@ class ToolRegistry:
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
+        privacy_policy: dict = None,
         override: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
@@ -436,6 +473,7 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                privacy_policy=privacy_policy,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by
@@ -607,6 +645,9 @@ class ToolRegistry:
                 return _run_async(entry.handler(args, **kwargs))
             return entry.handler(args, **kwargs)
         except Exception as e:
+            if entry.privacy_policy.get("class") == _SENSITIVE_PRIVACY_CLASS:
+                logger.error("Sensitive tool %s dispatch failed; payload redacted", name)
+                return json.dumps({"error": "Sensitive tool execution failed; payload redacted"})
             logger.exception("Tool %s dispatch error: %s", name, e)
             # Route through the sanitizer so framing tokens / CDATA / fences
             # in exception strings don't reach the model as structural noise.
@@ -645,6 +686,15 @@ class ToolRegistry:
         """
         entry = self.get_entry(name)
         return entry.schema if entry else None
+
+    def get_privacy_policy(self, name: str) -> Optional[dict]:
+        """Return detached effective privacy metadata without invoking a handler."""
+        entry = self.get_entry(name)
+        return copy.deepcopy(entry.privacy_policy) if entry else None
+
+    def is_sensitive(self, name: str) -> bool:
+        policy = self.get_privacy_policy(name)
+        return bool(policy and policy.get("class") == _SENSITIVE_PRIVACY_CLASS)
 
     def get_toolset_for_tool(self, name: str) -> Optional[str]:
         """Return the toolset a tool belongs to, or None."""
