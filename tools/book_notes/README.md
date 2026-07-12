@@ -211,3 +211,34 @@ python tools/book_notes/retrieve_book_notes.py other-books \
 C1 is a helper/CLI, not a registered Hermes tool or book skill. A future tool
 must call this public helper instead of copying its filtering, capping, metric,
 or provenance logic.
+
+## Hermes Read-Only Tool Registration
+
+Slice C2 registers one native tool, `book_notes_retrieval`, with exactly three
+actions: `resolve_book`, `current_book`, and `other_books`. It is strictly
+read-only. Local database, metadata, source, model, and table settings come only
+from controlled configuration and are not model-callable parameters. The model
+cannot provide arbitrary paths.
+
+`resolve_book` applies the metadata parser's deterministic title and author
+normalization, then requires an exact catalog match that is present in the
+formal index. It never uses fuzzy matching, semantic title search, author
+guessing, an LLM, or the network. Ambiguous titles return at most five candidates
+and do not proceed to search.
+
+`current_book` retains C1's LanceDB-level include filter and parent cap.
+`other_books` retains its DB-level exclusion filter plus per-book and per-parent
+caps. Tool excerpts default to 500 characters and cannot exceed 800. Every hit
+uses source label `MY_BOOK_EXCERPT` and guard
+`saved_excerpt_not_user_endorsement`: saved source material is not the user's own
+view and does not imply endorsement. L2 distance is not a probability, and a
+relationship intent is only context for later dialogue, not a finding.
+
+Discovery imports only the schema and registration. Configuration, catalog,
+LanceDB, and BGE-M3 are initialized lazily on the first relevant direct call;
+`resolve_book` does not load the embedding model. Search initialization is
+thread-safe and the synchronous local embedding/search work runs through the
+framework's async tool bridge on a controlled thread. C2 registers source code
+only: runtime restart and real Hermes invocation are reserved for C2.1. A future
+Book Skill must call this tool and must not copy its resolution or retrieval
+logic.
