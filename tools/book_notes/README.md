@@ -248,3 +248,9 @@ The static declaration owns enabled-toolset resolution and lists only
 `book_notes_retrieval`; the native registry continues to own its schema and
 lazy handler. This preserves normal allowlisting: enabling `book-notes` exposes
 the tool, while registry presence alone does not bypass toolset filtering.
+
+Runtime profiles use top-level `toolsets` as the canonical global selection.
+The shared platform resolver normalizes that field for Bridge workers;
+`platform_toolsets.<platform>` remains an explicit platform override and a
+conflicting non-default global selection is rejected instead of silently
+discarded. Both cold-start and restarted workers use this same resolver path.

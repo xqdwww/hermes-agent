@@ -1641,10 +1641,21 @@ def _get_platform_tools(
     include_default_mcp_servers: bool = True,
 ) -> Set[str]:
     """Resolve which individual toolset names are enabled for a platform."""
-    from toolsets import resolve_toolset, TOOLSETS
+    from toolsets import resolve_toolset, validate_toolset, TOOLSETS
+    from hermes_cli.toolset_validation import normalize_runtime_toolsets
 
     platform_toolsets = config.get("platform_toolsets") or {}
-    toolset_names = platform_toolsets.get(platform)
+    plugin_ts_keys = _get_plugin_toolset_keys()
+    enabled_mcp_servers = enabled_mcp_server_names(config)
+    normalized_selection = normalize_runtime_toolsets(
+        config,
+        platform,
+        lambda name: validate_toolset(name) or name in plugin_ts_keys,
+        external_toolsets=enabled_mcp_servers,
+    )
+    toolset_names = (
+        list(normalized_selection) if normalized_selection is not None else None
+    )
     # Track whether the user explicitly saved a toolset list for this platform
     # (vs. falling back to the platform default). An explicit composite (e.g.
     # ``hermes-discord``) is an opt-in to the platform's native default-off
@@ -1665,7 +1676,6 @@ def _get_platform_tools(
     toolset_names = [str(ts) for ts in toolset_names]
 
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
-    plugin_ts_keys = _get_plugin_toolset_keys()
     platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
 
     # If the saved list contains any configurable keys directly, the user
@@ -1876,7 +1886,6 @@ def _get_platform_tools(
     # If the platform explicitly lists one or more MCP server names, treat that
     # as an allowlist. Otherwise include every globally enabled MCP server.
     # Special sentinel: "no_mcp" in the toolset list disables all MCP servers.
-    enabled_mcp_servers = enabled_mcp_server_names(config)
     # Allow "no_mcp" sentinel to opt out of all MCP servers for this platform
     if "no_mcp" in toolset_names:
         explicit_mcp_servers = set()

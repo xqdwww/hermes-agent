@@ -5182,6 +5182,30 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
 
     issues: List[ConfigIssue] = []
 
+    # Toolset selection has two supported layers: canonical global `toolsets`
+    # and an optional per-platform override. Validate their shared runtime
+    # contract here so malformed or conflicting selections cannot look enabled
+    # in config while disappearing from workers.
+    try:
+        from hermes_cli.toolset_validation import normalize_runtime_toolsets
+        from toolsets import validate_toolset
+
+        mcp_servers = config.get("mcp_servers")
+        external = mcp_servers.keys() if isinstance(mcp_servers, dict) else ()
+        normalize_runtime_toolsets(
+            config,
+            "cli",
+            validate_toolset,
+            external_toolsets=external,
+        )
+    except ValueError as exc:
+        issues.append(ConfigIssue(
+            "error",
+            str(exc),
+            "Use top-level toolsets for the global runtime selection; only use "
+            "platform_toolsets.cli as an explicit platform override.",
+        ))
+
     # ── custom_providers must be a list, not a dict ──────────────────────
     cp = config.get("custom_providers")
     if cp is not None:
