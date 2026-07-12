@@ -242,3 +242,9 @@ framework's async tool bridge on a controlled thread. C2 registers source code
 only: runtime restart and real Hermes invocation are reserved for C2.1. A future
 Book Skill must call this tool and must not copy its resolution or retrieval
 logic.
+
+`book-notes` is also declared in the canonical built-in `TOOLSETS` catalog.
+The static declaration owns enabled-toolset resolution and lists only
+`book_notes_retrieval`; the native registry continues to own its schema and
+lazy handler. This preserves normal allowlisting: enabling `book-notes` exposes
+the tool, while registry presence alone does not bypass toolset filtering.

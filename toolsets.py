@@ -241,6 +241,14 @@ TOOLSETS = {
         "includes": []
     },
 
+    "book-notes": {
+        "description": "Read-only retrieval over personal Evernote book excerpts",
+        "tools": ["book_notes_retrieval"],
+        "includes": [],
+        "built_in": True,
+        "read_only": True,
+    },
+
     "project": {
         "description": "Desktop Projects — create/switch named workspaces (GUI sessions only)",
         "tools": ["project_list", "project_create", "project_switch"],
