@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Offline builder for the private Evernote book-notes embedding index.
 
-The builder is explicit and local-only. It validates metadata eligibility,
-loads section text through provenance offsets, embeds eligible sections, writes a
-LanceDB table, and emits an index manifest. It never stores full section text in
+The builder validates canonical Slice A metadata, derives deterministic
+embedding chunks, writes chunk-level LanceDB rows, and emits progress/checkpoint
+state for observable and resumable local builds. It never stores excerpt text in
 the vector table.
 """
 
@@ -15,19 +15,57 @@ import hashlib
 import json
 import math
 import os
+import platform
+import resource
 import shutil
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+try:
+    from tools.book_notes.embedding_chunker import (
+        BatchPlan,
+        ChunkPlanItem,
+        ChunkingConfig,
+        SimpleTokenCounter,
+        TokenCounter,
+        chunk_section,
+        plan_batches,
+        sha256_text,
+        summarize_plan,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct script execution
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.book_notes.embedding_chunker import (
+        BatchPlan,
+        ChunkPlanItem,
+        ChunkingConfig,
+        SimpleTokenCounter,
+        TokenCounter,
+        chunk_section,
+        plan_batches,
+        sha256_text,
+        summarize_plan,
+    )
 
-INDEX_SCHEMA_VERSION = "book_notes_lancedb_index_v1"
-INDEX_MANIFEST_SCHEMA_VERSION = "book_notes_index_manifest_v1"
+
+INDEX_SCHEMA_VERSION = "book_notes_lancedb_chunk_index_v1"
+INDEX_MANIFEST_SCHEMA_VERSION = "book_notes_index_manifest_v2"
+PROGRESS_SCHEMA_VERSION = "book_notes_index_progress_v1"
+CHECKPOINT_SCHEMA_VERSION = "book_notes_index_checkpoint_v1"
+BUILDER_SCHEMA_VERSION = "book_notes_chunked_builder_v1"
 DEFAULT_TABLE_NAME = "evernote_book_notes_v1"
 DEFAULT_EXPECTED_DIMENSION = 1024
+DEFAULT_CHUNK_MAX_TOKENS = 768
+DEFAULT_CHUNK_OVERLAP_TOKENS = 64
+DEFAULT_MIN_CHUNK_TOKENS = 64
+DEFAULT_MAX_BATCH_TOKENS = 3072
+DEFAULT_MAX_BATCH_ITEMS = 8
 
-TEXT_FIELD_NAMES = {"section_text", "excerpt_text", "body_text", "full_text", "content"}
+TEXT_FIELD_NAMES = {"section_text", "excerpt_text", "body_text", "full_text", "content", "chunk_text", "preview"}
 STANCE_FIELD_NAMES = {"personal_reflection", "user_opinion", "user_stance", "belief", "endorsement"}
 
 
@@ -70,12 +108,18 @@ class EligibilityResult:
         }
 
 
+@dataclass(frozen=True)
+class PlanResult:
+    eligibility: EligibilityResult
+    chunks: list[ChunkPlanItem]
+    stats: dict[str, Any]
+    config: ChunkingConfig
+    tokenizer_info: dict[str, Any]
+    metadata_hashes: dict[str, str]
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -83,8 +127,30 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    write_json(tmp_path, payload)
+    os.replace(tmp_path, path)
+
+
+def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
     )
 
@@ -107,6 +173,11 @@ def require_metadata_files(metadata_dir: Path) -> dict[str, Path]:
     if missing:
         raise IndexBuildError(f"metadata_files_missing: {missing}")
     return expected
+
+
+def metadata_hashes(metadata_dir: Path) -> dict[str, str]:
+    files = require_metadata_files(metadata_dir)
+    return {f"{name}_sha256": path_sha256(path) for name, path in files.items()}
 
 
 def resolve_source_path(source_root: Path, source_path: str, record_id: str) -> Path:
@@ -277,6 +348,77 @@ def model_fingerprint(model_path: Path) -> dict[str, Any]:
     return {"fingerprint": digest, **identity_payload}
 
 
+def _read_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _usable_limit(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 < number < 1_000_000:
+        return number
+    return None
+
+
+class HFTokenCounter:
+    def __init__(self, model_path: Path, *, local_files_only: bool = True) -> None:
+        if not model_path.is_dir():
+            raise IndexBuildError(f"embedding_model_path_missing path={model_path}")
+        from transformers import AutoConfig, AutoTokenizer
+
+        self.model_path = model_path
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(model_path),
+            local_files_only=local_files_only,
+            trust_remote_code=False,
+            use_fast=True,
+        )
+        config = AutoConfig.from_pretrained(
+            str(model_path),
+            local_files_only=local_files_only,
+            trust_remote_code=False,
+        )
+        st_config = _read_json_if_exists(model_path / "sentence_bert_config.json")
+        limits = {
+            "tokenizer_model_max_length": _usable_limit(getattr(self.tokenizer, "model_max_length", None)),
+            "model_max_position_embeddings": _usable_limit(getattr(config, "max_position_embeddings", None)),
+            "sentence_transformers_max_seq_length": _usable_limit(st_config.get("max_seq_length")),
+        }
+        valid_limits = [value for value in limits.values() if value]
+        if not valid_limits:
+            raise IndexBuildError("model_token_limit_unresolved")
+        self.effective_model_token_limit = min(valid_limits)
+        self.special_token_reserve = int(self.tokenizer.num_special_tokens_to_add(pair=False))
+        self.info = {
+            **limits,
+            "effective_model_token_limit": self.effective_model_token_limit,
+            "special_token_reserve": self.special_token_reserve,
+            "tokenizer_class": self.tokenizer.__class__.__name__,
+            "tokenizer_is_fast": bool(getattr(self.tokenizer, "is_fast", False)),
+            "silent_truncation_allowed": False,
+        }
+
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False, truncation=False))
+
+    def token_spans(self, text: str) -> list[tuple[int, int]]:
+        encoded = self.tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+            truncation=False,
+        )
+        offsets = encoded.get("offset_mapping") or []
+        return [(int(start), int(end)) for start, end in offsets if int(end) > int(start)]
+
+
 class LocalSentenceTransformerEmbedder:
     def __init__(
         self,
@@ -320,30 +462,106 @@ class LocalSentenceTransformerEmbedder:
         return [validate_vector(vector, self.expected_dimension, f"batch_{idx}") for idx, vector in enumerate(rows)]
 
 
-def make_lancedb_row(record: dict[str, Any], vector: list[float], embedder: Embedder) -> dict[str, Any]:
-    return {
-        "schema_version": INDEX_SCHEMA_VERSION,
-        "record_id": record["record_id"],
-        "book_id": record["book_id"],
-        "book_title_normalized": record.get("book_title_normalized"),
-        "author_normalized": record.get("author_normalized"),
-        "source_type": record.get("source_type"),
-        "content_type": record.get("content_type"),
-        "source_root_id": record.get("source_root_id"),
-        "source_path": record.get("source_path"),
-        "source_sha256": record.get("source_sha256"),
-        "source_file_id": record.get("source_file_id"),
-        "section_id": record.get("section_id"),
-        "section_index": int(record.get("section_index")),
-        "section_start_offset": int(record.get("section_start_offset")),
-        "section_end_offset": int(record.get("section_end_offset")),
-        "offset_unit": record.get("offset_unit"),
-        "section_text_sha256": record.get("section_text_sha256"),
-        "resolution_status": record.get("resolution_status"),
-        "embedding_model_id": embedder.embedding_model_id,
-        "embedding_dimension": embedder.embedding_dimension,
-        "vector": vector,
-    }
+def make_chunking_config(
+    *,
+    chunk_max_tokens: int,
+    chunk_overlap_tokens: int,
+    min_chunk_tokens: int,
+    token_info: dict[str, Any],
+    special_token_reserve: int | None = None,
+) -> ChunkingConfig:
+    reserve = int(token_info.get("special_token_reserve", 0) if special_token_reserve is None else special_token_reserve)
+    config = ChunkingConfig(
+        chunk_max_tokens=chunk_max_tokens,
+        chunk_overlap_tokens=chunk_overlap_tokens,
+        min_chunk_tokens=min_chunk_tokens,
+        special_token_reserve=reserve,
+        effective_model_token_limit=int(token_info["effective_model_token_limit"]),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise IndexBuildError(str(exc)) from exc
+    return config
+
+
+def build_chunk_plan(
+    *,
+    metadata_dir: Path,
+    source_root: Path,
+    tokenizer: TokenCounter,
+    token_info: dict[str, Any],
+    chunk_max_tokens: int,
+    chunk_overlap_tokens: int,
+    min_chunk_tokens: int = DEFAULT_MIN_CHUNK_TOKENS,
+    max_records: int | None = None,
+) -> PlanResult:
+    eligibility = validate_metadata_eligibility(metadata_dir, source_root)
+    config = make_chunking_config(
+        chunk_max_tokens=chunk_max_tokens,
+        chunk_overlap_tokens=chunk_overlap_tokens,
+        min_chunk_tokens=min_chunk_tokens,
+        token_info=token_info,
+    )
+    records = eligibility.eligible_records[:max_records] if max_records is not None else eligibility.eligible_records
+    chunks: list[ChunkPlanItem] = []
+    oversized_before = 0
+    for record in records:
+        section = load_section_text(record, source_root)
+        if tokenizer.count_tokens(section) > config.chunk_max_tokens:
+            oversized_before += 1
+        chunks.extend(chunk_section(record, section, tokenizer, config))
+    stats = summarize_plan(
+        eligible_parent_records=len(records),
+        quarantined_parent_records=len(eligibility.quarantined_records),
+        chunks=chunks,
+    )
+    stats.update(
+        {
+            "schema_version": "book_notes_chunk_plan_stats_v1",
+            "chunking_config_fingerprint": config.fingerprint(),
+            "configured_chunk_token_limit": config.chunk_max_tokens,
+            "chunk_overlap_tokens": config.chunk_overlap_tokens,
+            "special_token_reserve": config.special_token_reserve,
+            "effective_model_token_limit": config.effective_model_token_limit,
+            "oversized_chunks_before_split": oversized_before,
+            "oversized_chunks_after_split": 0,
+            "silent_truncation_allowed": False,
+        }
+    )
+    return PlanResult(
+        eligibility=eligibility,
+        chunks=chunks,
+        stats=stats,
+        config=config,
+        tokenizer_info=token_info,
+        metadata_hashes=metadata_hashes(metadata_dir),
+    )
+
+
+def write_chunk_plan(output_dir: Path, plan: PlanResult) -> None:
+    write_jsonl(output_dir / "chunk_plan.jsonl", [chunk.public_row() for chunk in plan.chunks])
+    write_json(output_dir / "chunk_plan_stats.json", plan.stats)
+
+
+def make_lancedb_row(chunk: ChunkPlanItem, vector: list[float], embedder: Embedder) -> dict[str, Any]:
+    row = chunk.public_row()
+    row.update(
+        {
+            "record_schema_version": INDEX_SCHEMA_VERSION,
+            "schema_version": INDEX_SCHEMA_VERSION,
+            "record_id": chunk.index_record_id,
+            "embedding_model_identity": embedder.embedding_model_id,
+            "embedding_model_id": embedder.embedding_model_id,
+            "embedding_provider": embedder.embedding_provider,
+            "embedding_dimension": embedder.embedding_dimension,
+            "normalize_embeddings": embedder.normalize_embeddings,
+            "device": embedder.device,
+            "dtype": embedder.dtype,
+            "vector": vector,
+        }
+    )
+    return row
 
 
 def build_index_manifest(
@@ -351,40 +569,48 @@ def build_index_manifest(
     metadata_dir: Path,
     builder_commit: str | None,
     builder_path: Path,
-    eligibility: EligibilityResult,
+    plan: PlanResult,
     embedder: Embedder,
     model_path: Path,
     db_path: Path,
     table_name: str,
     build_mode: str,
+    batches: Sequence[BatchPlan],
 ) -> dict[str, Any]:
-    files = require_metadata_files(metadata_dir)
+    hashes = metadata_hashes(metadata_dir)
     return {
         "schema_version": INDEX_MANIFEST_SCHEMA_VERSION,
-        "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "generated_at": utc_now(),
         "builder_commit": builder_commit,
         "builder_path": str(builder_path),
-        "metadata_manifest_sha256": path_sha256(files["manifest"]),
-        "books_catalog_sha256": path_sha256(files["catalog"]),
-        "manifest_record_count": eligibility.manifest_records,
-        "eligible_record_count": len(eligibility.eligible_records),
-        "quarantined_record_count": len(eligibility.quarantined_records),
+        "builder_schema_version": BUILDER_SCHEMA_VERSION,
+        "metadata_manifest_sha256": hashes["manifest_sha256"],
+        "books_catalog_sha256": hashes["catalog_sha256"],
+        "manifest_record_count": plan.eligibility.manifest_records,
+        "eligible_parent_record_count": len(plan.eligibility.eligible_records),
+        "quarantined_parent_record_count": len(plan.eligibility.quarantined_records),
+        "embedding_chunk_count": len(plan.chunks),
         "embedding_provider": embedder.embedding_provider,
         "embedding_model_path": str(model_path),
         "embedding_model_identity": embedder.embedding_model_id,
         "embedding_dimension": embedder.embedding_dimension,
         "normalize_embeddings": embedder.normalize_embeddings,
         "batch_size": embedder.batch_size,
+        "max_batch_tokens": max((batch.token_count for batch in batches), default=0),
         "device": embedder.device,
         "dtype": embedder.dtype,
         "vector_store_type": "lancedb",
         "db_path": str(db_path),
         "table_name": table_name,
         "record_schema_version": INDEX_SCHEMA_VERSION,
+        "chunking_config_fingerprint": plan.config.fingerprint(),
+        "chunk_max_tokens": plan.config.chunk_max_tokens,
+        "chunk_overlap_tokens": plan.config.chunk_overlap_tokens,
         "source_text_stored": False,
         "build_mode": build_mode,
         "build_complete": True,
         "validation_complete": True,
+        "silent_truncation_allowed": False,
     }
 
 
@@ -394,11 +620,19 @@ def connect_lancedb(path: Path):
     return lancedb.connect(str(path))
 
 
+def _table_names(db: Any) -> set[str]:
+    return set(db.table_names())
+
+
+def _table_rows(table: Any) -> list[dict[str, Any]]:
+    return table.to_lance().to_table().to_pylist()
+
+
 def validate_lancedb_table(db_path: Path, table_name: str, expected_rows: int) -> dict[str, Any]:
     db = connect_lancedb(db_path)
     table = db.open_table(table_name)
     schema_names = set(table.schema.names)
-    missing = {"record_id", "book_id", "source_type", "resolution_status", "vector"} - schema_names
+    missing = {"index_record_id", "parent_record_id", "book_id", "source_type", "resolution_status", "vector"} - schema_names
     if missing:
         raise IndexBuildError(f"lancedb_schema_missing fields={sorted(missing)}")
     if TEXT_FIELD_NAMES & schema_names:
@@ -406,7 +640,156 @@ def validate_lancedb_table(db_path: Path, table_name: str, expected_rows: int) -
     rows = table.count_rows()
     if rows != expected_rows:
         raise IndexBuildError(f"lancedb_row_count_mismatch expected={expected_rows} actual={rows}")
-    return {"rows": rows, "schema_fields": sorted(schema_names)}
+    records = _table_rows(table)
+    ids = [row["index_record_id"] for row in records]
+    duplicate_ids = len(ids) - len(set(ids))
+    if duplicate_ids:
+        raise IndexBuildError(f"duplicate_index_record_id count={duplicate_ids}")
+    return {"rows": rows, "schema_fields": sorted(schema_names), "duplicate_index_record_ids": 0}
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def current_rss_bytes() -> int:
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if platform.system() == "Darwin":
+        return int(usage)
+    return int(usage) * 1024
+
+
+class ProgressLedger:
+    def __init__(
+        self,
+        *,
+        progress_path: Path,
+        events_path: Path,
+        build_id: str,
+        chunks_total: int,
+        tokens_total: int,
+        batches_total: int,
+        parent_records_total: int,
+    ) -> None:
+        self.progress_path = progress_path
+        self.events_path = events_path
+        self.build_id = build_id
+        self.started_monotonic = time.monotonic()
+        self.started_at = utc_now()
+        self.chunks_total = chunks_total
+        self.tokens_total = tokens_total
+        self.batches_total = batches_total
+        self.parent_records_total = parent_records_total
+        self.last_payload: dict[str, Any] = {}
+
+    def event(self, event_type: str, **payload: Any) -> None:
+        append_jsonl(self.events_path, {"ts": utc_now(), "build_id": self.build_id, "event_type": event_type, **payload})
+
+    def update(
+        self,
+        *,
+        status: str,
+        chunks_completed: int,
+        tokens_completed: int,
+        batches_completed: int,
+        current_batch_index: int | None,
+        last_completed_index_record_id: str | None,
+        stop_requested: bool = False,
+        resumable: bool = True,
+        error_type: str | None = None,
+        current_batch_started_at: str | None = None,
+    ) -> None:
+        elapsed = max(0.001, time.monotonic() - self.started_monotonic)
+        now = utc_now()
+        payload = {
+            "schema_version": PROGRESS_SCHEMA_VERSION,
+            "build_id": self.build_id,
+            "status": status,
+            "started_at": self.started_at,
+            "updated_at": now,
+            "parent_records_total": self.parent_records_total,
+            "parent_records_planned": self.parent_records_total,
+            "chunks_total": self.chunks_total,
+            "chunks_completed": chunks_completed,
+            "chunks_remaining": max(0, self.chunks_total - chunks_completed),
+            "tokens_total": self.tokens_total,
+            "tokens_completed": tokens_completed,
+            "tokens_remaining": max(0, self.tokens_total - tokens_completed),
+            "batches_total": self.batches_total,
+            "batches_completed": batches_completed,
+            "current_batch_index": current_batch_index,
+            "last_completed_index_record_id": last_completed_index_record_id,
+            "last_progress_at": now,
+            "last_heartbeat_at": now,
+            "current_batch_started_at": current_batch_started_at,
+            "elapsed_seconds": elapsed,
+            "records_per_second": chunks_completed / elapsed,
+            "tokens_per_second": tokens_completed / elapsed,
+            "peak_rss_bytes": current_rss_bytes(),
+            "current_rss_bytes": current_rss_bytes(),
+            "stop_requested": stop_requested,
+            "resumable": resumable,
+            "error_type": error_type,
+        }
+        write_json_atomic(self.progress_path, payload)
+        self.last_payload = payload
+
+
+def checkpoint_payload(
+    *,
+    metadata_dir: Path,
+    model_path: Path,
+    plan: PlanResult,
+    table_name: str,
+    expected_dimension: int,
+) -> dict[str, Any]:
+    hashes = metadata_hashes(metadata_dir)
+    model = model_fingerprint(model_path)
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "builder_schema_version": BUILDER_SCHEMA_VERSION,
+        "metadata_manifest_sha256": hashes["manifest_sha256"],
+        "books_catalog_sha256": hashes["catalog_sha256"],
+        "embedding_model_identity": model["fingerprint"],
+        "chunking_config_fingerprint": plan.config.fingerprint(),
+        "table_name": table_name,
+        "expected_dimension": expected_dimension,
+        "chunks_total": len(plan.chunks),
+        "chunk_plan_sha256": sha256_text(
+            "\n".join(json.dumps(chunk.public_row(), ensure_ascii=False, sort_keys=True) for chunk in plan.chunks)
+        ),
+    }
+
+
+def validate_resume_checkpoint(checkpoint_path: Path, expected: dict[str, Any]) -> None:
+    if not checkpoint_path.is_file():
+        raise IndexBuildError("resume_checkpoint_missing")
+    actual = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    keys = [
+        "schema_version",
+        "builder_schema_version",
+        "metadata_manifest_sha256",
+        "books_catalog_sha256",
+        "embedding_model_identity",
+        "chunking_config_fingerprint",
+        "table_name",
+        "expected_dimension",
+        "chunks_total",
+        "chunk_plan_sha256",
+    ]
+    for key in keys:
+        if actual.get(key) != expected.get(key):
+            raise IndexBuildError(f"resume_checkpoint_mismatch field={key}")
+
+
+def completed_ids_from_tmp(tmp_path: Path, table_name: str) -> set[str]:
+    if not tmp_path.exists():
+        return set()
+    db = connect_lancedb(tmp_path)
+    if table_name not in _table_names(db):
+        return set()
+    table = db.open_table(table_name)
+    return {str(row["index_record_id"]) for row in _table_rows(table)}
 
 
 def create_lancedb_index(
@@ -422,45 +805,208 @@ def create_lancedb_index(
     rebuild: bool = False,
     builder_commit: str | None = None,
     builder_path: Path | None = None,
+    tokenizer: TokenCounter | None = None,
+    token_info: dict[str, Any] | None = None,
+    chunk_max_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
+    chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+    min_chunk_tokens: int = DEFAULT_MIN_CHUNK_TOKENS,
+    max_batch_tokens: int = DEFAULT_MAX_BATCH_TOKENS,
+    max_batch_items: int = DEFAULT_MAX_BATCH_ITEMS,
+    heartbeat_seconds: float = 10.0,
+    progress_path: Path | None = None,
+    events_path: Path | None = None,
+    stop_after_seconds: float | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
-    if db_path.exists() and not rebuild:
+    if db_path.exists() and not rebuild and not resume:
         raise IndexBuildError(f"db_path_exists_without_rebuild path={db_path}")
-    eligibility = validate_metadata_eligibility(metadata_dir, source_root)
-    records = eligibility.eligible_records[:max_records] if max_records is not None else eligibility.eligible_records
-    texts = [load_section_text(record, source_root) for record in records]
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), embedder.batch_size):
-        batch_texts = texts[start : start + embedder.batch_size]
-        batch_records = records[start : start + embedder.batch_size]
-        batch_vectors = embedder.embed_documents(batch_texts)
-        if len(batch_vectors) != len(batch_texts):
-            raise IndexBuildError("embedding_count_mismatch")
-        for record, vector in zip(batch_records, batch_vectors):
-            vectors.append(validate_vector(vector, expected_dimension, str(record["record_id"])))
-
-    rows = [make_lancedb_row(record, vector, embedder) for record, vector in zip(records, vectors)]
     tmp_path = db_path.with_name(f".{db_path.name}.tmp_build")
     rollback_path = db_path.with_name(f".{db_path.name}.rollback")
-    for path in (tmp_path, rollback_path):
-        if path.exists():
-            shutil.rmtree(path)
-    try:
+    if tokenizer is None:
+        tokenizer = HFTokenCounter(model_path)
+    if token_info is None:
+        token_info = getattr(tokenizer, "info", None) or {
+            "effective_model_token_limit": chunk_max_tokens + 2,
+            "special_token_reserve": 2,
+            "silent_truncation_allowed": False,
+        }
+    plan = build_chunk_plan(
+        metadata_dir=metadata_dir,
+        source_root=source_root,
+        tokenizer=tokenizer,
+        token_info=token_info,
+        chunk_max_tokens=chunk_max_tokens,
+        chunk_overlap_tokens=chunk_overlap_tokens,
+        min_chunk_tokens=min_chunk_tokens,
+        max_records=max_records,
+    )
+    batches = plan_batches(plan.chunks, max_batch_tokens=max_batch_tokens, max_batch_items=max_batch_items)
+    expected_checkpoint = checkpoint_payload(
+        metadata_dir=metadata_dir,
+        model_path=model_path,
+        plan=plan,
+        table_name=table_name,
+        expected_dimension=expected_dimension,
+    )
+    checkpoint_path = tmp_path / "build_checkpoint.json"
+    if resume:
+        validate_resume_checkpoint(checkpoint_path, expected_checkpoint)
+    else:
+        for path in (tmp_path, rollback_path):
+            if path.exists():
+                shutil.rmtree(path)
         tmp_path.mkdir(parents=True)
-        db = connect_lancedb(tmp_path)
-        db.create_table(table_name, data=rows, mode="overwrite")
+        write_chunk_plan(tmp_path, plan)
+        write_json(checkpoint_path, expected_checkpoint)
+    progress_path = progress_path or (tmp_path / "build_progress.json")
+    events_path = events_path or (tmp_path / "build_events.jsonl")
+    build_id = sha256_text(f"{db_path}\0{table_name}\0{time.time()}")[:16]
+    ledger = ProgressLedger(
+        progress_path=progress_path,
+        events_path=events_path,
+        build_id=build_id,
+        chunks_total=len(plan.chunks),
+        tokens_total=int(plan.stats["total_tokens"]),
+        batches_total=len(batches),
+        parent_records_total=int(plan.stats["eligible_parent_records"]),
+    )
+    completed_ids = completed_ids_from_tmp(tmp_path, table_name) if resume else set()
+    chunk_by_id = {chunk.index_record_id: chunk for chunk in plan.chunks}
+    if len(completed_ids - set(chunk_by_id)) > 0:
+        raise IndexBuildError("resume_completed_id_not_in_plan")
+    completed_chunks = [chunk_by_id[item] for item in completed_ids]
+    chunks_completed = len(completed_chunks)
+    tokens_completed = sum(chunk.chunk_token_count for chunk in completed_chunks)
+    batches_completed = 0
+    last_completed = sorted(completed_ids)[-1] if completed_ids else None
+    ledger.event("build_started", resume=resume, chunks_total=len(plan.chunks), batches_total=len(batches))
+    ledger.update(
+        status="running",
+        chunks_completed=chunks_completed,
+        tokens_completed=tokens_completed,
+        batches_completed=batches_completed,
+        current_batch_index=None,
+        last_completed_index_record_id=last_completed,
+    )
+    db = connect_lancedb(tmp_path)
+    table = db.open_table(table_name) if table_name in _table_names(db) else None
+    start_time = time.monotonic()
+    try:
+        for batch in batches:
+            batch_chunks = [chunk for chunk in plan.chunks[batch.start : batch.end] if chunk.index_record_id not in completed_ids]
+            if not batch_chunks:
+                batches_completed += 1
+                continue
+            batch_started_at = utc_now()
+            batch_started_monotonic = time.monotonic()
+            heartbeat_stop = threading.Event()
+
+            def heartbeat_loop() -> None:
+                while not heartbeat_stop.wait(max(0.1, heartbeat_seconds)):
+                    ledger.update(
+                        status="running",
+                        chunks_completed=chunks_completed,
+                        tokens_completed=tokens_completed,
+                        batches_completed=batches_completed,
+                        current_batch_index=batch.batch_index,
+                        last_completed_index_record_id=last_completed,
+                        current_batch_started_at=batch_started_at,
+                    )
+
+            ledger.update(
+                status="running",
+                chunks_completed=chunks_completed,
+                tokens_completed=tokens_completed,
+                batches_completed=batches_completed,
+                current_batch_index=batch.batch_index,
+                last_completed_index_record_id=last_completed,
+                current_batch_started_at=batch_started_at,
+            )
+            heartbeat_thread: threading.Thread | None = None
+            if heartbeat_seconds > 0:
+                heartbeat_thread = threading.Thread(target=heartbeat_loop, name="book-notes-build-heartbeat", daemon=True)
+                heartbeat_thread.start()
+            try:
+                vectors = embedder.embed_documents([chunk.text for chunk in batch_chunks])
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=1.0)
+            if len(vectors) != len(batch_chunks):
+                raise IndexBuildError("embedding_count_mismatch")
+            rows = [
+                make_lancedb_row(chunk, validate_vector(vector, expected_dimension, chunk.index_record_id), embedder)
+                for chunk, vector in zip(batch_chunks, vectors)
+            ]
+            if table is None:
+                table = db.create_table(table_name, data=rows, mode="overwrite")
+            else:
+                table.add(rows)
+            for chunk in batch_chunks:
+                completed_ids.add(chunk.index_record_id)
+                chunks_completed += 1
+                tokens_completed += chunk.chunk_token_count
+                last_completed = chunk.index_record_id
+            batches_completed += 1
+            ledger.event("batch_completed", batch_elapsed_seconds=time.monotonic() - batch_started_monotonic, **batch.public_row())
+            ledger.update(
+                status="running",
+                chunks_completed=chunks_completed,
+                tokens_completed=tokens_completed,
+                batches_completed=batches_completed,
+                current_batch_index=batch.batch_index,
+                last_completed_index_record_id=last_completed,
+                current_batch_started_at=batch_started_at,
+            )
+            if stop_after_seconds is not None and time.monotonic() - start_time >= stop_after_seconds:
+                ledger.event("build_stopped", stop_after_seconds=stop_after_seconds)
+                ledger.update(
+                    status="stopped",
+                    chunks_completed=chunks_completed,
+                    tokens_completed=tokens_completed,
+                    batches_completed=batches_completed,
+                    current_batch_index=batch.batch_index,
+                    last_completed_index_record_id=last_completed,
+                    stop_requested=True,
+                    resumable=True,
+                    current_batch_started_at=batch_started_at,
+                )
+                return {
+                    "build_complete": False,
+                    "stopped": True,
+                    "resumable": True,
+                    "temporary_db_path": str(tmp_path),
+                    "rows": chunks_completed,
+                    "chunks_total": len(plan.chunks),
+                    "eligible_parent_records": int(plan.stats["eligible_parent_records"]),
+                    "quarantined_parent_records": int(plan.stats["quarantined_parent_records"]),
+                    "progress_path": str(progress_path),
+                    "events_path": str(events_path),
+                }
         manifest = build_index_manifest(
             metadata_dir=metadata_dir,
             builder_commit=builder_commit,
             builder_path=builder_path or Path(__file__),
-            eligibility=eligibility,
+            plan=plan,
             embedder=embedder,
             model_path=model_path,
             db_path=db_path,
             table_name=table_name,
-            build_mode="rebuild" if rebuild else "create",
+            build_mode="resume" if resume else ("rebuild" if rebuild else "create"),
+            batches=batches,
         )
         write_json(tmp_path / "index_manifest.json", manifest)
-        validation = validate_lancedb_table(tmp_path, table_name, len(rows))
+        validation = validate_lancedb_table(tmp_path, table_name, len(plan.chunks))
+        ledger.event("build_completed", rows=len(plan.chunks))
+        ledger.update(
+            status="completed",
+            chunks_completed=len(plan.chunks),
+            tokens_completed=int(plan.stats["total_tokens"]),
+            batches_completed=len(batches),
+            current_batch_index=None,
+            last_completed_index_record_id=last_completed,
+            resumable=False,
+        )
         if db_path.exists():
             os.replace(db_path, rollback_path)
         os.replace(tmp_path, db_path)
@@ -469,13 +1015,29 @@ def create_lancedb_index(
         return {
             "build_complete": True,
             "table_name": table_name,
-            "rows": len(rows),
-            "eligible_records": len(eligibility.eligible_records),
-            "quarantined_records": len(eligibility.quarantined_records),
+            "rows": len(plan.chunks),
+            "eligible_parent_records": int(plan.stats["eligible_parent_records"]),
+            "quarantined_parent_records": int(plan.stats["quarantined_parent_records"]),
+            "embedding_chunks": len(plan.chunks),
+            "total_tokens": int(plan.stats["total_tokens"]),
+            "chunking_config_fingerprint": plan.config.fingerprint(),
             "validation": validation,
+            "progress_path": str(progress_path),
+            "events_path": str(events_path),
         }
-    except Exception:
-        if tmp_path.exists():
+    except Exception as exc:
+        ledger.event("build_failed", error_type=exc.__class__.__name__)
+        ledger.update(
+            status="failed",
+            chunks_completed=chunks_completed,
+            tokens_completed=tokens_completed,
+            batches_completed=batches_completed,
+            current_batch_index=None,
+            last_completed_index_record_id=last_completed,
+            resumable=tmp_path.exists(),
+            error_type=exc.__class__.__name__,
+        )
+        if not resume and tmp_path.exists() and not completed_ids:
             shutil.rmtree(tmp_path)
         if rollback_path.exists() and not db_path.exists():
             os.replace(rollback_path, db_path)
@@ -491,6 +1053,49 @@ def git_head(cwd: Path) -> str | None:
         return None
 
 
+def compare_chunk_configs(
+    *,
+    metadata_dir: Path,
+    source_root: Path,
+    tokenizer: TokenCounter,
+    token_info: dict[str, Any],
+    limits: Sequence[int],
+    overlap_tokens: int,
+    min_chunk_tokens: int,
+    max_records: int | None,
+) -> list[dict[str, Any]]:
+    comparisons: list[dict[str, Any]] = []
+    for limit in limits:
+        overlap = min(overlap_tokens, max(0, limit // 4))
+        plan = build_chunk_plan(
+            metadata_dir=metadata_dir,
+            source_root=source_root,
+            tokenizer=tokenizer,
+            token_info=token_info,
+            chunk_max_tokens=limit,
+            chunk_overlap_tokens=overlap,
+            min_chunk_tokens=min_chunk_tokens,
+            max_records=max_records,
+        )
+        comparisons.append(
+            {
+                "chunk_max_tokens": limit,
+                "overlap_tokens": overlap,
+                "embedding_chunks": plan.stats["embedding_chunks"],
+                "total_tokens": plan.stats["total_tokens"],
+                "avg_tokens": plan.stats["average_tokens_per_chunk"],
+                "median_tokens": plan.stats["median_tokens_per_chunk"],
+                "p95_tokens": plan.stats["p95_tokens_per_chunk"],
+                "max_tokens": plan.stats["maximum_tokens_per_chunk"],
+                "max_chunks_per_section": plan.stats["maximum_chunks_per_section"],
+                "oversized_chunks_after_split": plan.stats["oversized_chunks_after_split"],
+                "estimated_vector_storage_bytes": plan.stats["embedding_chunks"] * DEFAULT_EXPECTED_DIMENSION * 4,
+                "chunking_config_fingerprint": plan.config.fingerprint(),
+            }
+        )
+    return comparisons
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build or validate the offline Evernote book-notes LanceDB index.")
     parser.add_argument("--metadata-dir", required=True, type=Path)
@@ -499,15 +1104,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--table-name", default=DEFAULT_TABLE_NAME)
     parser.add_argument("--model-path", required=True, type=Path)
     parser.add_argument("--expected-dimension", type=int, default=DEFAULT_EXPECTED_DIMENSION)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_MAX_BATCH_ITEMS)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--plan-output-dir", type=Path, default=None)
+    parser.add_argument("--compare-chunk-token-limits", default=None)
     parser.add_argument("--max-records", type=int, default=None)
+    parser.add_argument("--max-chunks", type=int, default=None, help="Synthetic/benchmark guard: embed at most this many chunks.")
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--local-files-only", action="store_true", default=True)
     parser.add_argument("--normalize-embeddings", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--model-smoke", action="store_true")
     parser.add_argument("--json-summary", action="store_true")
+    parser.add_argument("--chunk-max-tokens", type=int, default=DEFAULT_CHUNK_MAX_TOKENS)
+    parser.add_argument("--chunk-overlap-tokens", type=int, default=DEFAULT_CHUNK_OVERLAP_TOKENS)
+    parser.add_argument("--min-chunk-tokens", type=int, default=DEFAULT_MIN_CHUNK_TOKENS)
+    parser.add_argument("--max-batch-tokens", type=int, default=DEFAULT_MAX_BATCH_TOKENS)
+    parser.add_argument("--max-batch-items", type=int, default=DEFAULT_MAX_BATCH_ITEMS)
+    parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
+    parser.add_argument("--progress-path", type=Path, default=None)
+    parser.add_argument("--events-path", type=Path, default=None)
+    parser.add_argument("--stop-after-seconds", type=float, default=None)
+    parser.add_argument("--synthetic-tokenizer", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -515,20 +1135,73 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     try:
-        eligibility = validate_metadata_eligibility(args.metadata_dir, args.source_root)
         fingerprint = model_fingerprint(args.model_path)
-        if args.dry_run and not args.model_smoke:
+        if args.synthetic_tokenizer:
+            tokenizer: TokenCounter = SimpleTokenCounter()
+            token_info = {
+                "effective_model_token_limit": 8192,
+                "special_token_reserve": 2,
+                "tokenizer_class": "SimpleTokenCounter",
+                "tokenizer_is_fast": True,
+                "silent_truncation_allowed": False,
+            }
+        else:
+            tokenizer = HFTokenCounter(args.model_path, local_files_only=args.local_files_only)
+            token_info = tokenizer.info
+        if args.dry_run and not args.plan_only and not args.model_smoke:
+            eligibility = validate_metadata_eligibility(args.metadata_dir, args.source_root)
             summary = {
                 "dry_run": True,
                 "model_loaded": False,
                 "embedding_model_identity": fingerprint["fingerprint"],
+                **token_info,
                 **eligibility.summary(),
             }
+        elif args.plan_only:
+            if args.compare_chunk_token_limits:
+                limits = [int(item) for item in args.compare_chunk_token_limits.split(",") if item.strip()]
+                comparisons = compare_chunk_configs(
+                    metadata_dir=args.metadata_dir,
+                    source_root=args.source_root,
+                    tokenizer=tokenizer,
+                    token_info=token_info,
+                    limits=limits,
+                    overlap_tokens=args.chunk_overlap_tokens,
+                    min_chunk_tokens=args.min_chunk_tokens,
+                    max_records=args.max_records,
+                )
+                summary = {
+                    "plan_only": True,
+                    "model_loaded": False,
+                    "embedding_model_identity": fingerprint["fingerprint"],
+                    "candidate_chunk_configs": comparisons,
+                    **token_info,
+                }
+            else:
+                plan = build_chunk_plan(
+                    metadata_dir=args.metadata_dir,
+                    source_root=args.source_root,
+                    tokenizer=tokenizer,
+                    token_info=token_info,
+                    chunk_max_tokens=args.chunk_max_tokens,
+                    chunk_overlap_tokens=args.chunk_overlap_tokens,
+                    min_chunk_tokens=args.min_chunk_tokens,
+                    max_records=args.max_records,
+                )
+                if args.plan_output_dir:
+                    write_chunk_plan(args.plan_output_dir, plan)
+                summary = {
+                    "plan_only": True,
+                    "model_loaded": False,
+                    "embedding_model_identity": fingerprint["fingerprint"],
+                    **token_info,
+                    **plan.stats,
+                }
         else:
             embedder = LocalSentenceTransformerEmbedder(
                 model_path=args.model_path,
                 expected_dimension=args.expected_dimension,
-                batch_size=args.batch_size,
+                batch_size=args.max_batch_items,
                 normalize_embeddings=args.normalize_embeddings,
                 device=args.device,
                 local_files_only=args.local_files_only,
@@ -541,14 +1214,17 @@ def main(argv: list[str] | None = None) -> int:
                         "Synthetic bilingual retrieval smoke test.",
                     ]
                 )
+                eligibility = validate_metadata_eligibility(args.metadata_dir, args.source_root)
                 summary = {
                     "dry_run": True,
                     "model_loaded": True,
                     "model_smoke_vectors": len(smoke_vectors),
                     "embedding_dimension": len(smoke_vectors[0]) if smoke_vectors else 0,
+                    **token_info,
                     **eligibility.summary(),
                 }
             else:
+                max_records = args.max_records
                 summary = create_lancedb_index(
                     metadata_dir=args.metadata_dir,
                     source_root=args.source_root,
@@ -557,14 +1233,26 @@ def main(argv: list[str] | None = None) -> int:
                     model_path=args.model_path,
                     embedder=embedder,
                     expected_dimension=args.expected_dimension,
-                    max_records=args.max_records,
+                    max_records=max_records,
                     rebuild=args.rebuild,
                     builder_commit=git_head(Path.cwd()),
                     builder_path=Path(__file__).resolve(),
+                    tokenizer=tokenizer,
+                    token_info=token_info,
+                    chunk_max_tokens=args.chunk_max_tokens,
+                    chunk_overlap_tokens=args.chunk_overlap_tokens,
+                    min_chunk_tokens=args.min_chunk_tokens,
+                    max_batch_tokens=args.max_batch_tokens,
+                    max_batch_items=args.max_batch_items,
+                    heartbeat_seconds=args.heartbeat_seconds,
+                    progress_path=args.progress_path,
+                    events_path=args.events_path,
+                    stop_after_seconds=args.stop_after_seconds,
+                    resume=args.resume,
                 )
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2 if args.json_summary else None))
         return 0
-    except IndexBuildError as exc:
+    except (IndexBuildError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 2
 

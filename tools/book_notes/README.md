@@ -86,6 +86,10 @@ checksums only.
 
 `build_book_notes_index.py` is an explicit offline step for a private local
 LanceDB index. It is not a Hermes runtime tool and it never runs automatically.
+Slice A metadata remains section-level: one manifest record is one resolved
+book section. The embedding index is chunk-level: one manifest record produces
+one or more deterministic embedding chunks and each chunk becomes one LanceDB
+row.
 
 Dry-run eligibility validation:
 
@@ -103,10 +107,65 @@ python tools/book_notes/build_book_notes_index.py \
 The builder only indexes records that are resolved `book_excerpt` sections with
 valid provenance and no catalog identity conflict. Conflicted records are
 quarantined. The LanceDB rows store metadata, checksums, offsets, and vectors;
-they do not store full section text. Future retrieval must use provenance
-offsets to read source text from the private Evernote chunks.
+they do not store full section text, chunk text, or previews.
+
+Chunking is deterministic and does not use an LLM. It packs paragraphs first,
+splits oversized paragraphs on sentence boundaries, and uses token-window
+fallback only when a single sentence still exceeds the configured chunk token
+limit. `--chunk-max-tokens` sets the per-chunk token ceiling and
+`--chunk-overlap-tokens` sets fixed overlap for fallback/continuation windows.
+The builder reads the local tokenizer/model limits, reserves special-token
+space, and verifies every chunk before embedding. Silent tokenizer/model
+truncation is not allowed.
+
+Plan-only mode validates provenance and writes private-free chunk metadata
+without loading the embedding model or creating LanceDB:
+
+```text
+python tools/book_notes/build_book_notes_index.py \
+  --metadata-dir <metadata_v1> \
+  --source-root <evernote_chunks> \
+  --db-path <target-lancedb-dir> \
+  --table-name evernote_book_notes_v1 \
+  --model-path <local-bge-m3> \
+  --plan-only \
+  --chunk-max-tokens 768 \
+  --chunk-overlap-tokens 64 \
+  --json-summary
+```
+
+Embedding batches are controlled by both token and item budgets:
+`--max-batch-tokens` caps the sum of chunk tokens in a batch and
+`--max-batch-items` caps the number of chunks. The builder must satisfy both
+limits; it no longer batches only by parent section count.
+
+Progress is observable through `build_progress.json` and `build_events.jsonl`.
+Use `--progress-path` and `--events-path` to put those ledgers in a stable
+location; otherwise they live in the temporary build workspace. The progress
+file is atomically replaced and includes total/completed chunks, tokens,
+batches, last progress time, heartbeat time, current batch start time, RSS, and
+resume status. If heartbeat timestamps keep updating while completed counts do
+not change, the current batch is still active. If heartbeat and progress both
+stop updating beyond an operational threshold, treat the build as a stale
+candidate. If the process exits with `resumable: true`, continue with
+`--resume`.
+
+`--stop-after-seconds` performs a graceful stop at a safe boundary, keeps the
+temporary workspace, and records a resumable checkpoint. `--resume` refuses to
+continue unless metadata hashes, model fingerprint, chunking config fingerprint,
+builder schema, expected dimension, table name, chunk plan, and completed row
+IDs still match. It does not silently rebuild or mix incompatible outputs.
 
 Normal builds write to a temporary directory and atomically publish the verified
-index. Existing index directories are not overwritten unless `--rebuild` is
-provided. Slice B1 tests this mechanism with synthetic data only; formal
-embedding of real eligible records belongs to a later explicit slice.
+index. Before publish, the builder writes final completed progress and
+`index_manifest.json`; after publish it must not recreate the temporary
+workspace. Existing index directories are not overwritten unless `--rebuild` is
+provided. Stopped or failed resumable builds keep their temporary workspace so a
+later `--resume` can verify and continue.
+
+Future retrieval must treat vector hits as embedding chunks, then deduplicate or
+limit by parent section and book. A retrieval adapter should read local text
+only through chunk offsets when needed, not return many adjacent chunks from
+one parent by default. Book Capsule aggregation can happen at parent section or
+book level; echo/tension/completion judgments remain model-level reasoning, not
+raw vector-store labels.
