@@ -81,3 +81,32 @@ python tools/book_notes/prepare_evernote_metadata.py \
 Without `--dry-run`, the CLI writes `manifest.jsonl` and `review_queue.jsonl`.
 Neither file contains section text; they contain metadata, offsets, and
 checksums only.
+
+## Offline Index Builder
+
+`build_book_notes_index.py` is an explicit offline step for a private local
+LanceDB index. It is not a Hermes runtime tool and it never runs automatically.
+
+Dry-run eligibility validation:
+
+```text
+python tools/book_notes/build_book_notes_index.py \
+  --metadata-dir <metadata_v1> \
+  --source-root <evernote_chunks> \
+  --db-path <target-lancedb-dir> \
+  --table-name evernote_book_notes_v1 \
+  --model-path <local-bge-m3> \
+  --dry-run \
+  --json-summary
+```
+
+The builder only indexes records that are resolved `book_excerpt` sections with
+valid provenance and no catalog identity conflict. Conflicted records are
+quarantined. The LanceDB rows store metadata, checksums, offsets, and vectors;
+they do not store full section text. Future retrieval must use provenance
+offsets to read source text from the private Evernote chunks.
+
+Normal builds write to a temporary directory and atomically publish the verified
+index. Existing index directories are not overwritten unless `--rebuild` is
+provided. Slice B1 tests this mechanism with synthetic data only; formal
+embedding of real eligible records belongs to a later explicit slice.
