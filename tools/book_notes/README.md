@@ -169,3 +169,45 @@ only through chunk offsets when needed, not return many adjacent chunks from
 one parent by default. Book Capsule aggregation can happen at parent section or
 book level; echo/tension/completion judgments remain model-level reasoning, not
 raw vector-store labels.
+
+## Bounded Local Retrieval
+
+`retrieve_book_notes.py` is the Slice C1 read-only helper and CLI. Canonical
+metadata remains one record per book section, while the formal index stores one
+row per embedding chunk. `current-book` applies a LanceDB-level `book_id`
+include filter. `other-books` applies a LanceDB-level exclusion filter, groups
+hits by book, and enforces both parent-section and per-book caps.
+
+The raw metric is LanceDB L2 distance (`l2_distance`): lower values rank first.
+It is not a probability, confidence, endorsement signal, or relationship
+classification. `relationship_intent` only carries a caller's requested future
+analysis mode. Vector retrieval finds semantically related material; a later
+dialogue model must determine whether material is echo, tension, or completion.
+
+The LanceDB table stores no source text. By default, the helper verifies source,
+section, and chunk checksums before reading only the matched chunk range. Context
+is clamped to the owning section and excerpts have a hard length cap. `--no-text`
+returns provenance metadata without opening source files. Paths are constrained
+to the approved source root, and empty or overlong queries are rejected rather
+than silently truncated.
+
+```text
+python tools/book_notes/retrieve_book_notes.py current-book \
+  --db-path <lancedb> --table-name evernote_book_notes_v1 \
+  --model-path <local-bge-m3> --source-root <evernote_chunks> \
+  --metadata-dir <metadata_v1> --book-id <book-id> \
+  --query <query> --top-k 5 --no-text --json
+```
+
+```text
+python tools/book_notes/retrieve_book_notes.py other-books \
+  --db-path <lancedb> --table-name evernote_book_notes_v1 \
+  --model-path <local-bge-m3> --source-root <evernote_chunks> \
+  --metadata-dir <metadata_v1> --exclude-book-id <book-id> \
+  --query <query> --top-k-books 5 --relationship-intent echo \
+  --no-text --json
+```
+
+C1 is a helper/CLI, not a registered Hermes tool or book skill. A future tool
+must call this public helper instead of copying its filtering, capping, metric,
+or provenance logic.
