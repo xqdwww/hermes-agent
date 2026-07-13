@@ -10,6 +10,8 @@ The transformation is deterministic and idempotent:
 - Each selectable node gets a "优先│<node>" fallback wrapper that
   automatically falls back to the corresponding auto group on health-check failure.
 - The final MATCH rule routes to the default manual group.
+- The `sync` subcommand is a one-shot end-to-end pipeline that accepts "更新 OpenClash 节点"
+  as its natural-language trigger.
 
 The script never prints proxy credentials or the full YAML body.
 """
@@ -18,10 +20,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
+import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -48,6 +53,8 @@ FALLBACK_URL = "https://www.gstatic.com/generate_204"
 FALLBACK_INTERVAL = 60
 FALLBACK_TIMEOUT = 5000
 FALLBACK_MAX_FAILED = 1
+
+SYNC_CONFIG_PATH = Path.home() / ".hermes/config/openclash-sync.yaml"
 
 # Skill-generated group names that must be removed on re-generation.
 SKILL_GROUP_NAMES: set[str] = {
@@ -81,6 +88,30 @@ REGION_KEYWORDS: dict[str, list[str]] = {
 _GLOBAL_REGION_ORDER = {"日本": 0, "台湾": 1}
 # Region display-name → sort key for Gemini.
 _GEMINI_REGION_ORDER = {"日本": 0, "台湾": 1, "香港": 2, "德国": 3}
+
+
+# ---------------------------------------------------------------------------
+# Sync config template
+# ---------------------------------------------------------------------------
+
+SYNC_CONFIG_TEMPLATE = {
+    "source": {
+        "mode": "clash_verge_effective",
+        "effective_config_path": None,
+    },
+    "router": {
+        "host": "root@192.168.10.1",
+        "core_path": "/etc/openclash/core/clash_meta",
+        "remote_temp_path": "/tmp/clash-verge-static-openclash.yaml",
+        "remote_target_path": "/etc/openclash/config/clash-verge-static-openclash.yaml",
+    },
+    "deployment": {
+        "activate_by_default": True,
+        "restart_service": True,
+        "backup_directory": "/etc/openclash/config/backups",
+        "health_wait_seconds": 12,
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +188,137 @@ def ordered_unique(values: Iterable[str]) -> list[str]:
             result.append(value)
             seen.add(value)
     return result
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Sync config
+# ---------------------------------------------------------------------------
+
+
+def load_sync_config() -> dict[str, Any]:
+    """Load the sync configuration file. Create a template if it does not exist."""
+    cfg_path = SYNC_CONFIG_PATH
+    if not cfg_path.is_file():
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(SYNC_CONFIG_TEMPLATE, f, allow_unicode=True, sort_keys=False, width=4096)
+        return dict(SYNC_CONFIG_TEMPLATE)  # deep enough copy for str/list nesting
+
+    try:
+        return load_yaml(cfg_path)
+    except (ConfigError, yaml.YAMLError) as exc:
+        raise ConfigError(f"Invalid sync config {cfg_path}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# SSH / remote helpers
+# ---------------------------------------------------------------------------
+
+
+def quote_remote(path: str) -> str:
+    return shlex.quote(path)
+
+
+def ssh_command(host: str, command: str, *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    return run(["ssh", host, command], capture=capture)
+
+
+def check_ssh_batchmode(host: str) -> bool:
+    """Return True if SSH BatchMode succeeds for *host*."""
+    try:
+        run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", host, "true"],
+            capture=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def remote_sha256(host: str, path: str) -> str | None:
+    """Return the SHA-256 hex digest of a remote file, or None if the file does not exist."""
+    try:
+        result = ssh_command(host, f"sha256sum {quote_remote(path)} 2>/dev/null || echo MISSING", capture=True)
+        stdout = result.stdout.strip()
+        if "MISSING" in stdout:
+            return None
+        return stdout.split()[0]
+    except subprocess.CalledProcessError:
+        return None
+
+
+def remote_file_exists(host: str, path: str) -> bool:
+    """Return True if a remote file exists."""
+    try:
+        ssh_command(host, f"test -f {quote_remote(path)}", capture=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def remote_check_file(host: str, path: str) -> None:
+    """Raise ConfigError if remote path does not exist."""
+    if not remote_file_exists(host, path):
+        raise ConfigError(f"Remote path {path} does not exist on {host}")
+
+
+# ---------------------------------------------------------------------------
+# Health check helpers
+# ---------------------------------------------------------------------------
+
+
+def run_health_checks(host: str, health_wait: int) -> dict[str, Any]:
+    """Run health checks after OpenClash restart. Returns a dict of check results."""
+    import time
+
+    time.sleep(health_wait)
+
+    results: dict[str, Any] = {}
+
+    # 1. Core process
+    try:
+        pgrep = ssh_command(host, "pgrep -x clash-meta || pgrep -x mihomo || pgrep -x clash || true", capture=True)
+        results["core_process"] = bool(pgrep.stdout.strip())
+    except subprocess.CalledProcessError:
+        results["core_process"] = False
+
+    # 2. Watchdog
+    try:
+        watchdog = ssh_command(host, "pgrep -f 'openclash.*watchdog' || true", capture=True)
+        results["watchdog"] = bool(watchdog.stdout.strip())
+    except subprocess.CalledProcessError:
+        results["watchdog"] = False
+
+    # 3. Listening port (clash default ports)
+    try:
+        ports = ssh_command(host, "ss -tlnp | grep -E ':(7890|9090|7891|7892)' || true", capture=True)
+        results["listening_ports"] = bool(ports.stdout.strip())
+    except subprocess.CalledProcessError:
+        results["listening_ports"] = False
+
+    # 4. Startup log
+    try:
+        logs = ssh_command(
+            host,
+            "logread -e openclash 2>/dev/null | tail -5 || "
+            "journalctl -u openclash -n 5 --no-pager 2>/dev/null || "
+            "echo NONE",
+            capture=True,
+        )
+        log_text = logs.stdout.strip()
+        results["recent_logs"] = log_text
+        results["fatal_error"] = any(
+            kw in log_text.lower()
+            for kw in ["fatal", "error:", "failed to start", "config error"]
+        )
+    except subprocess.CalledProcessError:
+        results["fatal_error"] = False
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +583,45 @@ def check_unique_group_names(groups: list[dict[str, Any]]) -> None:
         raise ConfigError(f"Duplicate group names: {', '.join(duplicates)}")
 
 
+def check_node_count(
+    data: dict[str, Any], *, min_nodes: int = 1
+) -> int:
+    """Validate that the config has a reasonable number of static nodes."""
+    names = static_node_names(data)
+    count = len(names)
+    if count < min_nodes:
+        raise ConfigError(
+            f"Only {count} static node(s) found (minimum required: {min_nodes}). "
+            "The Clash Verge effective configuration may not be the merged result."
+        )
+    return count
+
+
+def local_validate(data: dict[str, Any]) -> dict[str, Any]:
+    """Run all local validation checks and return re-parsed YAML as a round-trip check."""
+    node_names = static_node_names(data)
+    groups = data.get("proxy-groups", [])
+    validate_references(data, node_names)
+    check_cycles(groups)
+    check_unique_group_names(groups)
+
+    # YAML re-serialisation round-trip
+    text = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=4096,
+    )
+    reloaded = yaml.safe_load(text)
+    if not isinstance(reloaded, dict):
+        raise ConfigError("Output YAML re-serialisation produced a non-dict root.")
+    if "proxy-groups" not in reloaded:
+        raise ConfigError("Output YAML re-serialisation lost the proxy-groups key.")
+
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Main transform
 # ---------------------------------------------------------------------------
@@ -582,14 +783,6 @@ def export_source(source: Path | None, workdir: Path) -> Path:
     return destination
 
 
-def quote_remote(path: str) -> str:
-    return shlex.quote(path)
-
-
-def ssh_command(host: str, command: str, *, capture: bool = False) -> subprocess.CompletedProcess[str]:
-    return run(["ssh", host, command], capture=capture)
-
-
 def deploy(
     local_file: Path,
     *,
@@ -649,6 +842,269 @@ def deploy(
 
 
 # ---------------------------------------------------------------------------
+# Sync pipeline
+# ---------------------------------------------------------------------------
+
+
+def sync_pipeline(
+    config_path: Path | None,
+    source_path: Path | None,
+    no_activate: bool,
+    config_out: Path | None,
+) -> dict[str, Any]:
+    """Run the full sync pipeline: export → transform → validate → upload → deploy.
+
+    Returns a dict of result metadata suitable for printing.
+    """
+    result: dict[str, Any] = {
+        "input_path": None,
+        "input_mtime": None,
+        "static_nodes": 0,
+        "gpt_candidates": 0,
+        "gemini_candidates": 0,
+        "disney_candidates": 0,
+        "config_sha256": None,
+        "local_validated": False,
+        "remote_validated": False,
+        "replaced": False,
+        "restarted": False,
+        "rolled_back": False,
+        "final_running_config": None,
+        "backup_path": None,
+        "no_change": False,
+        "error": None,
+    }
+
+    # 1. Load sync config
+    cfg = load_sync_config()
+    host = cfg["router"]["host"]
+    core_path = cfg["router"]["core_path"]
+    remote_target = cfg["router"]["remote_target_path"]
+    remote_temp = cfg["router"]["remote_temp_path"]
+    backup_dir = cfg["deployment"]["backup_directory"]
+    health_wait = cfg["deployment"]["health_wait_seconds"]
+    activate = cfg["deployment"]["activate_by_default"] and not no_activate
+
+    # 2. Check SSH BatchMode
+    if not check_ssh_batchmode(host):
+        raise ConfigError(
+            f"BLOCKED_SSH_KEY_REQUIRED\n\n"
+            f"SSH BatchMode authentication failed for {host}.\n"
+            f"Please configure SSH public-key authentication first:\n\n"
+            f"  ssh-copy-id {host}\n\n"
+            "Then re-run the sync command. Hermes never prompts for passwords."
+        )
+
+    # 3. Find / load source
+    source = source_path or find_default_source()
+    if not source.is_file():
+        raise ConfigError(f"Source file not found: {source}")
+
+    mtime = dt.datetime.fromtimestamp(os.path.getmtime(source), tz=dt.timezone.utc)
+    result["input_path"] = str(source)
+    result["input_mtime"] = mtime.isoformat()
+
+    data = load_yaml(source)
+    node_count = check_node_count(data, min_nodes=1)
+    result["static_nodes"] = node_count
+
+    # 4. Transform
+    media_keywords = ["流媒体", "媒体流"]
+    manual_group = "手动选择"
+    auto_group = "自动选择"
+    disney_group = "迪士尼"
+
+    transformed = transform(
+        data,
+        manual_group=manual_group,
+        auto_group=auto_group,
+        disney_group=disney_group,
+        media_keywords=media_keywords,
+    )
+
+    # Count candidates
+    node_set = set(static_node_names(data))
+    groups = transformed.get("proxy-groups", [])
+    gpt = extract_gpt_candidates(groups, node_set)
+    gemini = extract_gemini_candidates(groups, node_set)
+    disney = extract_disney_candidates(groups, node_set, media_keywords)
+    result["gpt_candidates"] = len(gpt)
+    result["gemini_candidates"] = len(gemini)
+    result["disney_candidates"] = len(disney)
+
+    # 5. Local validation
+    local_validate(transformed)
+    result["local_validated"] = True
+
+    # Write to temp file for upload / SHA-256
+    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".yaml", prefix="oclash-sync-")
+    tmp_path = Path(tmp_path_str)
+    os.close(tmp_fd)
+    dump_yaml(transformed, tmp_path)
+    config_sha = file_sha256(tmp_path)
+    result["config_sha256"] = config_sha
+
+    # 6. SHA-256 dedup check
+    existing_sha = remote_sha256(host, remote_target)
+    if existing_sha == config_sha:
+        tmp_path.unlink(missing_ok=True)
+        result["no_change"] = True
+        result["final_running_config"] = remote_target
+        return result
+
+    # 7. Remote pre-checks
+    remote_check_file(host, core_path)
+    remote_check_file(host, "/etc/openclash/config")
+
+    # 8. Backup existing config
+    stamp = now_stamp()
+    backup_path = f"{backup_dir}/{Path(remote_target).name}.{stamp}.bak"
+    try:
+        ssh_command(
+            host,
+            "set -e; "
+            f"mkdir -p {quote_remote(backup_dir)}; "
+            f"if [ -f {quote_remote(remote_target)} ]; then "
+            f"  cp -p {quote_remote(remote_target)} {quote_remote(backup_path)}; "
+            f"fi",
+            capture=True,
+        )
+        result["backup_path"] = backup_path
+    except subprocess.CalledProcessError as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise ConfigError(
+            f"Failed to back up remote config: {exc}"
+        ) from exc
+
+    if no_activate:
+        # --no-activate mode: upload → validate → save (no switch, no restart)
+        try:
+            run(["scp", "-O", str(tmp_path), f"{host}:{quote_remote(remote_temp)}"])
+            ssh_command(
+                host,
+                "set -e; "
+                f"chmod 600 {quote_remote(remote_temp)}; "
+                f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_temp)}; "
+                f"mv -f {quote_remote(remote_temp)} {quote_remote(remote_target)}; "
+                f"chmod 600 {quote_remote(remote_target)}",
+            )
+            result["remote_validated"] = True
+            result["replaced"] = True
+            result["final_running_config"] = remote_target
+            result["restarted"] = False
+        except subprocess.CalledProcessError as exc:
+            ssh_command(host, f"rm -f {quote_remote(remote_temp)}", capture=True)
+            tmp_path.unlink(missing_ok=True)
+            raise ConfigError(f"No-activate sync failed during upload or validation: {exc}") from exc
+
+        tmp_path.unlink(missing_ok=True)
+        return result
+
+    # 9. Full sync: upload
+    try:
+        run(["scp", "-O", str(tmp_path), f"{host}:{quote_remote(remote_temp)}"])
+    except subprocess.CalledProcessError as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise ConfigError(f"SCP upload failed: {exc}") from exc
+
+    # 10. Remote core validation
+    try:
+        ssh_command(
+            host,
+            "set -e; "
+            f"chmod 600 {quote_remote(remote_temp)}; "
+            f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_temp)}",
+            capture=True,
+        )
+        result["remote_validated"] = True
+    except subprocess.CalledProcessError as exc:
+        ssh_command(host, f"rm -f {quote_remote(remote_temp)}", capture=True)
+        tmp_path.unlink(missing_ok=True)
+        raise ConfigError("Remote Mihomo validation failed; the active configuration was not changed.") from exc
+
+    # 11. Atomic replace
+    try:
+        ssh_command(
+            host,
+            "set -e; "
+            f"mv -f {quote_remote(remote_temp)} {quote_remote(remote_target)}; "
+            f"chmod 600 {quote_remote(remote_target)}",
+        )
+        result["replaced"] = True
+    except subprocess.CalledProcessError as exc:
+        ssh_command(host, f"rm -f {quote_remote(remote_temp)}", capture=True)
+        tmp_path.unlink(missing_ok=True)
+        raise ConfigError(f"Atomic replace failed: {exc}") from exc
+
+    # 12. Restart OpenClash
+    if activate:
+        try:
+            ssh_command(host, "/etc/init.d/openclash restart", capture=True)
+            result["restarted"] = True
+        except subprocess.CalledProcessError as exc:
+            # Restart itself failed — rollback
+            _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
+            tmp_path.unlink(missing_ok=True)
+            raise ConfigError(f"OpenClash restart failed: {exc}") from exc
+
+        # 13. Health check
+        health = run_health_checks(host, health_wait)
+
+        if not health.get("core_process"):
+            # Core not running — rollback
+            _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
+            tmp_path.unlink(missing_ok=True)
+            raise ConfigError("Health check failed: core process not running after restart. Rollback applied.")
+
+        if health.get("fatal_error"):
+            _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
+            tmp_path.unlink(missing_ok=True)
+            raise ConfigError("Health check failed: fatal error in OpenClash logs. Rollback applied.")
+
+    tmp_path.unlink(missing_ok=True)
+    result["final_running_config"] = remote_target
+    return result
+
+
+def _rollback_and_report(
+    host: str,
+    backup_path: str,
+    remote_target: str,
+    backup_dir: str,
+    health_wait: int,
+    result: dict[str, Any],
+) -> None:
+    """Restore the backup config and restart OpenClash."""
+    try:
+        # Check if backup exists
+        exists = remote_file_exists(host, backup_path)
+        if exists:
+            ssh_command(
+                host,
+                "set -e; "
+                f"cp -p {quote_remote(backup_path)} {quote_remote(remote_target)}; "
+                "/etc/init.d/openclash restart",
+                capture=True,
+            )
+            result["rolled_back"] = True
+            result["final_running_config"] = remote_target
+
+            # Brief health re-check after rollback
+            import time
+            time.sleep(health_wait)
+            rb_health = run_health_checks(host, health_wait)
+            if not rb_health.get("core_process"):
+                result["final_running_config"] = f"{remote_target} (rollback applied but core not verified)"
+        else:
+            result["rolled_back"] = False
+            result["final_running_config"] = f"{remote_target} (backup not found at {backup_path})"
+
+    except subprocess.CalledProcessError:
+        result["rolled_back"] = False
+        result["final_running_config"] = f"{remote_target} (rollback attempted but failed)"
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -682,6 +1138,29 @@ def build_parser() -> argparse.ArgumentParser:
     dry_run_p = sub.add_parser("dry-run", help="Transform without writing output, deploying, or SSH.")
     dry_run_p.add_argument("--input", type=Path, required=True)
     add_transform_args(dry_run_p)
+
+    sync_p = sub.add_parser(
+        "sync",
+        help=(
+            "End-to-end: export from Clash Verge, transform, locally validate, compute SHA-256, "
+            "upload (if changed), remote-validate, replace, restart, and health-check. "
+            "Natural-language trigger: 更新 OpenClash 节点."
+        ),
+    )
+    sync_p.add_argument("--source", type=Path, help="Override the Clash Verge effective YAML path.")
+    sync_p.add_argument(
+        "--config", type=Path, default=SYNC_CONFIG_PATH,
+        help=f"Sync configuration file (default: {SYNC_CONFIG_PATH}).",
+    )
+    sync_p.add_argument(
+        "--no-activate",
+        action="store_true",
+        help="Upload, validate, and save the config, but do NOT switch the active config or restart OpenClash.",
+    )
+    sync_p.add_argument(
+        "--config-out", type=Path,
+        help="Also write the transformed config to a local path for inspection.",
+    )
 
     return parser
 
@@ -748,11 +1227,84 @@ def print_summary(data: dict[str, Any], output: Path, args: argparse.Namespace) 
     print("secrets_printed=false")
 
 
+def print_sync_report(result: dict[str, Any]) -> None:
+    """Print the sync result as deterministic key=value lines (no secrets)."""
+    for key in (
+        "input_path",
+        "input_mtime",
+        "static_nodes",
+        "gpt_candidates",
+        "gemini_candidates",
+        "disney_candidates",
+        "config_sha256",
+        "local_validated",
+        "remote_validated",
+        "replaced",
+        "restarted",
+        "rolled_back",
+        "final_running_config",
+        "backup_path",
+        "no_change",
+    ):
+        val = result.get(key)
+        if val is None:
+            print(f"{key}=None")
+        elif isinstance(val, bool):
+            print(f"{key}={str(val).lower()}")
+        else:
+            print(f"{key}={val}")
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
     try:
+        if args.command == "sync":
+            result = sync_pipeline(
+                config_path=args.config,
+                source_path=args.source,
+                no_activate=args.no_activate,
+                config_out=args.config_out,
+            )
+
+            # Also write local copy if requested
+            if args.config_out and result.get("config_sha256"):
+                if result.get("no_change"):
+                    print(f"local_output=skipped (no change)")
+                else:
+                    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".yaml", prefix="oclash-sync-out-")
+                    os.close(tmp_fd)
+                    tmp_p = Path(tmp_path_str)
+                    data = load_yaml(Path(result["input_path"]))
+                    media_keywords = ["流媒体", "媒体流"]
+                    transformed = transform(
+                        data,
+                        manual_group="手动选择",
+                        auto_group="自动选择",
+                        disney_group="迪士尼",
+                        media_keywords=media_keywords,
+                    )
+                    dump_yaml(transformed, args.config_out.expanduser().resolve())
+                    print(f"local_output={args.config_out}")
+
+            print_sync_report(result)
+
+            if result.get("no_change"):
+                print("NO_CHANGE_OPENCLASH_CONFIG_CURRENT")
+                return 0
+
+            if result.get("rolled_back"):
+                print("STATUS=ROLLED_BACK")
+            elif result.get("restarted"):
+                print("STATUS=ACTIVATED")
+            elif result.get("replaced"):
+                print("STATUS=REPLACED_NO_ACTIVATE")
+            else:
+                print("STATUS=OK")
+
+            return 0
+
         if args.command == "export":
             exported = export_source(args.source, args.workdir.expanduser())
             print(f"exported={exported}")
@@ -828,8 +1380,14 @@ def main() -> int:
 
         parser.error("Unknown command")
         return 2
+
     except ConfigError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        msg = str(exc)
+        if msg.startswith("BLOCKED_SSH_KEY_REQUIRED"):
+            # Print the BLOCKED message to stderr for the caller to detect
+            print(msg, file=sys.stderr)
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as exc:
         print(f"ERROR: command failed with exit code {exc.returncode}", file=sys.stderr)
