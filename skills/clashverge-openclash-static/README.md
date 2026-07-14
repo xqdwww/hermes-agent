@@ -1,13 +1,13 @@
-# Hermes Clash Verge → OpenClash Static Skill — Regional Failover
+# Hermes Clash Verge → OpenClash Static Skill — Regional Fallback
 
 Export Clash Verge's effective Mihomo config, convert it into a static OpenClash
-configuration with per-node priority fallback wrappers for global, GPT, Gemini,
-and Disney+ traffic.  Also supports calibration overrides for Gemini.
+configuration with exactly **12 fixed policy groups** — no per-node priority
+wrappers.  Supports probe-based service filtering, manual calibration overrides
+for Gemini, and one-shot sync with SHA-based no-change detection.
 
-**Key design**: every select-able node gets a `fallback` wrapper that first tries
-the preferred node, then falls through to the corresponding automatic group when
-health checks fail.  The user's selection survives node failure; no manual
-panel intervention needed to switch.
+**Key design**: manual-select groups list direct static nodes.  Automatic groups
+use standard `fallback` for health-check-based failover.  The panel stays
+readable with a fixed, small number of groups.
 
 ## Contents
 
@@ -32,22 +32,24 @@ python3 scripts/clashverge_to_openclash.py all
 
 ## Key features
 
-- **Per-node priority wrappers**: every select-able node gets a `fallback`
-  wrapper (`全局优先│<节点名>`, `GPT优先│<节点名>`, etc.) whose second
-  member is the corresponding automatic group.  Preferred node recovers
-  automatically when health checks pass again.
+- **Fixed 12-group structure**: exactly 12 skill-managed groups — no per-node
+  wrappers.  Manual groups list direct static nodes; automatic groups use
+  standard `fallback` with health checks.
 - **Regional fallback priority**: Japan → Taiwan → other for global/GPT/Disney;
   Japan → Taiwan → Hong Kong → Germany for Gemini.
-- **Gemini US exclusion**: nodes containing `美国` or `🇺🇸` are excluded from
-  Gemini groups (legacy, no-probe mode).  When probes are used, all nodes are
-  considered and only PASS nodes enter the group.
 - **Gemini manual calibration overrides**: exact node-name overrides (`PASS` /
   `FAIL`) take precedence over probe results — for nodes where probe
   classification is unreliable.  Mismatches print `PROBE_OVERRIDE_MISMATCH`.
+- **Probe-based service filtering**: run an isolated Mihomo instance to test
+  each node for GPT, Gemini, and Disney+ reachability.  Only PASS nodes enter
+  the corresponding groups.
+- **Gemini US handling**: when probes are available, US nodes can enter Gemini
+  if they pass the probe and are not overridden.  In legacy (no-probe) mode,
+  US nodes are excluded via region-name filtering.
 - **Disney media detection**: nodes matching `流媒体` or `媒体流` are
   automatically added to Disney candidates.
 - **Idempotent**: running twice on the same input produces identical output.
-  Old wrappers are detected and removed.
+  Old skill-generated groups (including legacy wrappers) are detected and removed.
 - **Safe dry-run**: the `dry-run` subcommand never writes files, never calls
   SSH/SCP, and never contacts the router.
 - **One-shot sync**: end-to-end pipeline with SHA-based no-change detection,
@@ -56,67 +58,78 @@ python3 scripts/clashverge_to_openclash.py all
 
 ## Group structure
 
+**The skill manages exactly 12 groups** (when all specialist candidate sets
+exist).  No per-node wrapper groups are generated.
+
 ### Global (always generated)
 
-| Group | Type | Proxies |
+| Group | Type | Content |
 |---|---|---|
 | 默认代理 | select | 手动选择, 自动选择 |
-| 手动选择 | select | 自动选择, then 全局优先│<all nodes> wrappers |
-| 自动选择 | fallback | All static nodes (Japan → Taiwan → other) |
+| 手动选择 | select | 自动选择, then all static nodes (Japan → Taiwan → other) |
+| 自动选择 | fallback | All static nodes, sorted: Japan → Taiwan → other. Health check every 60 s. |
 
 ### GPT (only if GPT专用 exists in source)
 
-| Group | Type | Proxies |
+| Group | Type | Content |
 |---|---|---|
 | GPT专用 | select | GPT手动, GPT自动 |
-| GPT手动 | select | GPT自动, then GPT优先│<GPT nodes> wrappers |
-| GPT自动 | fallback | GPT candidates (Japan → Taiwan → other) |
+| GPT手动 | select | GPT自动, then GPT candidate nodes (Japan → Taiwan → other) |
+| GPT自动 | fallback | GPT candidate nodes, sorted: Japan → Taiwan → other. |
 
-### Gemini (only if Gemini专用 exists)
+GPT candidates come from the original GPT专用 group (intersected with static
+proxies).  When probes are used, only PASS nodes are included.
 
-| Group | Type | Proxies |
+### Gemini (only if Gemini专用 exists in source)
+
+| Group | Type | Content |
 |---|---|---|
 | Gemini专用 | select | Gemini手动, Gemini自动 |
-| Gemini手动 | select | Gemini自动, then Gemini优先│<Gemini nodes> wrappers |
-| Gemini自动 | fallback | Japan → Taiwan → Hong Kong → Germany nodes only |
+| Gemini手动 | select | Gemini自动, then Gemini candidate nodes (Japan → Taiwan → Hong Kong → Germany) |
+| Gemini自动 | fallback | Only Japan, Taiwan, Hong Kong, Germany nodes. Sorted: Japan → Taiwan → Hong Kong → Germany. |
 
-When probe mode is active, the region filter is bypassed — the probe results
-determine which nodes enter Gemini.  Manual calibration overrides can further
-force specific nodes in or out.
+When probes are active, all nodes are considered — only PASS nodes enter the
+group.  Manual calibration overrides can force specific nodes in or out.
 
 ### Disney (always generated when candidates exist)
 
-| Group | Type | Proxies |
+| Group | Type | Content |
 |---|---|---|
 | 迪士尼 | select | 迪士尼手动, 迪士尼自动 |
-| 迪士尼手动 | select | 迪士尼自动, then 迪士尼优先│<Disney nodes> wrappers |
-| 迪士尼自动 | fallback | Disney candidates (Japan → Taiwan → other) |
+| 迪士尼手动 | select | 迪士尼自动, then Disney candidate nodes (Japan → Taiwan → other) |
+| 迪士尼自动 | fallback | Disney candidates, sorted: Japan → Taiwan → other. |
 
-### Priority wrapper example
+Disney candidates = original 迪士尼 group static nodes + nodes matching
+`流媒体` or `媒体流`, then filtered by probe results (when available).
 
-```yaml
-- name: 全局优先│🇯🇵日本测试01
-  type: fallback
-  proxies:
-    - 🇯🇵日本测试01
-    - 自动选择
-  url: https://www.gstatic.com/generate_204
-  interval: 60
-  lazy: true
-  timeout: 5000
-  max-failed-times: 1
-```
+### Behaviour
 
-**Always select a `优先│` wrapper, not a bare node.**  This ensures automatic
-failover to the automatic group when your preferred node goes down, and
-automatic recovery when it comes back.
+**Automatic mode (recommended):**
+- Select an automatic group (e.g. `自动选择`, `GPT自动`, `Gemini自动`,
+  `迪士尼自动`).
+- Nodes within the automatic group are checked in order via standard `fallback`.
+  If a node fails health checks, the next node in the list is used automatically.
+- The order respects region priority: Japan first, then Taiwan, then other
+  regions (or Japan → Taiwan → Hong Kong → Germany for Gemini).
+
+**Manual mode:**
+- Select a manual group (e.g. `手动选择`, `GPT手动`, `Gemini手动`,
+  `迪士尼手动`).
+- Each manual group lists its auto group first, followed by direct static nodes.
+- Choose a specific static node to fix traffic to that node.
+- When using manual mode, **the selected node is used as-is** — it will NOT
+  automatically switch on failure.
+- Return to the first item (the auto group) to restore automatic failover.
+- **This is a deliberate simplification**: the panel stays readable with a
+  fixed number of groups, at the cost of no per-node automatic fallback in
+  manual mode.
 
 ## Manual selection guidance
 
-- **Global**: open `手动选择` → pick a `全局优先│<节点名>` item.
-- **GPT**: open `GPT手动` → pick a `GPT优先│<节点名>` item.
-- **Gemini**: open `Gemini手动` → pick a `Gemini优先│<节点名>` item.
-- **Disney**: open `迪士尼手动` → pick a `迪士尼优先│<节点名>` item.
+- **Global**: open `手动选择` → pick a specific node or `自动选择` for failover.
+- **GPT**: open `GPT手动` → pick a specific node or `GPT自动` for failover.
+- **Gemini**: open `Gemini手动` → pick a specific node or `Gemini自动` for failover.
+- **Disney**: open `迪士尼手动` → pick a specific node or `迪士尼自动` for failover.
 - **Full auto**: select `自动选择`, `GPT自动`, `Gemini自动`, or `迪士尼自动`
   directly — the fallback group handles failover.
 
@@ -142,14 +155,16 @@ python3 scripts/clashverge_to_openclash.py deploy \
 python3 -m pytest tests/ -v
 ```
 
-81 tests covering: group structure, region ordering, Gemini filtering, priority
-wrapper generation, calibration overrides, idempotency, cycle detection, secret
+81 tests covering: group structure, region ordering, zero-wrapper verification,
+Gemini filtering, calibration overrides, idempotency, cycle detection, secret
 safety, dry-run safety, and the end-to-end sync pipeline.
 
 ## Limitations
 
 - The `generate_204` health check only detects basic network connectivity.
   A node may pass health checks but still be blocked for specific platforms.
-- Gemini region filtering in legacy mode is based on node names, not IP
-  geolocation.
+- Gemini region filtering in legacy (no-probe) mode is based on node names,
+  not IP geolocation.
+- Manual mode does NOT provide per-node automatic failover — this is a
+  deliberate design trade-off for panel readability.
 - This skill is a static configuration generator, not a dynamic proxy manager.
