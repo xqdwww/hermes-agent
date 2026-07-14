@@ -4,11 +4,10 @@
 The transformation is deterministic and idempotent:
 
 - Preserve all static nodes (proxies), specialist groups, DNS, and rules.
-- Add global manual/automatic groups with regional failover via priority wrappers.
-- Add GPT, Gemini, and Disney specialist groups with regional failover.
+- Add global manual/automatic groups with regional fallback ordering.
+- Add GPT, Gemini, and Disney specialist groups with regional fallback.
 - Gemini explicitly excludes United States nodes.
-- Each selectable node gets a "优先│<node>" fallback wrapper that
-  automatically falls back to the corresponding auto group on health-check failure.
+- Manual-select groups list direct static nodes (no per-node priority wrappers).
 - The final MATCH rule routes to the default manual group.
 - The `sync` subcommand is a one-shot end-to-end pipeline that accepts "更新 OpenClash 节点"
   as its natural-language trigger.
@@ -482,21 +481,6 @@ def build_select_group(name: str, proxies: list[str]) -> dict[str, Any]:
     return {"name": name, "type": "select", "proxies": proxies}
 
 
-def build_priority_wrappers(
-    nodes: list[str],
-    prefix: str,
-    auto_group: str,
-) -> list[dict[str, Any]]:
-    """Build per-node fallback wrappers: ``{prefix}{node}`` → [node, auto_group]."""
-    wrappers: list[dict[str, Any]] = []
-    for node in nodes:
-        wrapper_name = f"{prefix}{node}"
-        wrappers.append(
-            build_fallback_group(wrapper_name, [node, auto_group])
-        )
-    return wrappers
-
-
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
@@ -674,10 +658,9 @@ def transform(
         url=fallback_url,
         interval=interval,
     )
-    global_wrappers = build_priority_wrappers(global_nodes_sorted, "全局优先│", auto_group)
     manual = build_select_group(
         manual_group,
-        [auto_group] + [w["name"] for w in global_wrappers],
+        [auto_group] + global_nodes_sorted,
     )
     default = build_select_group(
         "默认代理",
@@ -685,10 +668,8 @@ def transform(
     )
 
     new_groups: list[dict[str, Any]] = [default, manual, global_auto]
-    new_groups.extend(global_wrappers)
 
     # --- GPT groups (only if candidates exist) ---
-    gpt_wrappers: list[dict[str, Any]] = []
     if gpt_nodes_sorted:
         gpt_auto = build_fallback_group(
             "GPT自动",
@@ -696,20 +677,17 @@ def transform(
             url=fallback_url,
             interval=interval,
         )
-        gpt_wrappers = build_priority_wrappers(gpt_nodes_sorted, "GPT优先│", "GPT自动")
         gpt_manual = build_select_group(
             "GPT手动",
-            ["GPT自动"] + [w["name"] for w in gpt_wrappers],
+            ["GPT自动"] + gpt_nodes_sorted,
         )
         gpt_special = build_select_group(
             "GPT专用",
             ["GPT手动", "GPT自动"],
         )
         new_groups.extend([gpt_special, gpt_manual, gpt_auto])
-        new_groups.extend(gpt_wrappers)
 
     # --- Gemini groups (only if candidates exist) ---
-    gemini_wrappers: list[dict[str, Any]] = []
     if gemini_nodes_sorted:
         gemini_auto = build_fallback_group(
             "Gemini自动",
@@ -717,20 +695,17 @@ def transform(
             url=fallback_url,
             interval=interval,
         )
-        gemini_wrappers = build_priority_wrappers(gemini_nodes_sorted, "Gemini优先│", "Gemini自动")
         gemini_manual = build_select_group(
             "Gemini手动",
-            ["Gemini自动"] + [w["name"] for w in gemini_wrappers],
+            ["Gemini自动"] + gemini_nodes_sorted,
         )
         gemini_special = build_select_group(
             "Gemini专用",
             ["Gemini手动", "Gemini自动"],
         )
         new_groups.extend([gemini_special, gemini_manual, gemini_auto])
-        new_groups.extend(gemini_wrappers)
 
     # --- Disney groups (always generate if there are candidates) ---
-    disney_wrappers: list[dict[str, Any]] = []
     if disney_nodes_sorted:
         disney_auto = build_fallback_group(
             "迪士尼自动",
@@ -738,17 +713,15 @@ def transform(
             url=fallback_url,
             interval=interval,
         )
-        disney_wrappers = build_priority_wrappers(disney_nodes_sorted, "迪士尼优先│", "迪士尼自动")
         disney_manual = build_select_group(
             "迪士尼手动",
-            ["迪士尼自动"] + [w["name"] for w in disney_wrappers],
+            ["迪士尼自动"] + disney_nodes_sorted,
         )
         disney_special = build_select_group(
             "迪士尼",
             ["迪士尼手动", "迪士尼自动"],
         )
         new_groups.extend([disney_special, disney_manual, disney_auto])
-        new_groups.extend(disney_wrappers)
 
     # --- Replace groups ---
     data["proxy-groups"] = new_groups

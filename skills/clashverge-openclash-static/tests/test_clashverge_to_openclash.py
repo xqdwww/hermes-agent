@@ -26,10 +26,7 @@ spec.loader.exec_module(converter)
 
 
 def sample_basic():
-    """Nodes with mixed regions, GPT and Disney groups.
-
-    The wrapper prefix used by the script is U+2502 (BOX DRAWINGS LIGHT VERTICAL).
-    """
+    """Nodes with mixed regions, GPT and Disney groups."""
     return {
         "proxies": [
             {"name": "\U0001f1ef\U0001f1f5\u65e5\u672c\u6d4b\u8bd501", "type": "ss", "server": "example.invalid", "port": 1},   # 🇯🇵日本测试01
@@ -81,8 +78,67 @@ def _groups_by_name(data):
     return {g["name"]: g for g in data["proxy-groups"]}
 
 
-def _wrapper_groups(data, prefix):
-    return [g for g in data["proxy-groups"] if g["name"].startswith(prefix)]
+# ---------------------------------------------------------------------------
+# Test: No priority wrappers remain
+# ---------------------------------------------------------------------------
+
+
+class TestNoWrappers:
+    def test_no_global_priority_groups(self):
+        """Final output has zero 全局优先│ groups."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        wrappers = [g["name"] for g in data["proxy-groups"] if g["name"].startswith("\u5168\u5c40\u4f18\u5148\u2502")]
+        assert len(wrappers) == 0, f"Found {len(wrappers)} global wrapper groups: {wrappers}"
+
+    def test_no_gpt_priority_groups(self):
+        """Final output has zero GPT优先│ groups."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        wrappers = [g["name"] for g in data["proxy-groups"] if g["name"].startswith("GPT\u4f18\u5148\u2502")]
+        assert len(wrappers) == 0, f"Found {len(wrappers)} GPT wrapper groups: {wrappers}"
+
+    def test_no_gemini_priority_groups(self):
+        """Final output has zero Gemini优先│ groups."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        wrappers = [g["name"] for g in data["proxy-groups"] if g["name"].startswith("Gemini\u4f18\u5148\u2502")]
+        assert len(wrappers) == 0, f"Found {len(wrappers)} Gemini wrapper groups: {wrappers}"
+
+    def test_no_disney_priority_groups(self):
+        """Final output has zero 迪士尼优先│ groups."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        wrappers = [g["name"] for g in data["proxy-groups"] if g["name"].startswith("\u8fea\u58eb\u5c3c\u4f18\u5148\u2502")]
+        assert len(wrappers) == 0, f"Found {len(wrappers)} Disney wrapper groups: {wrappers}"
+
+    def test_old_wrapper_names_removed_on_reprocess(self):
+        """Input with old priority wrappers → zero wrapper groups in output."""
+        old_input = copy.deepcopy(sample_basic())
+        # Add fake old wrapper groups that the script should clean up
+        old_input["proxy-groups"].extend([
+            {"name": "\u5168\u5c40\u4f18\u5148\u2502\u65e5\u672c\u6d4b\u8bd501", "type": "fallback", "proxies": ["\U0001f1ef\U0001f1f5\u65e5\u672c\u6d4b\u8bd501", "\u81ea\u52a8\u9009\u62e9"]},
+            {"name": "GPT\u4f18\u5148\u2502\u65e5\u672c\u6d4b\u8bd501", "type": "fallback", "proxies": ["\U0001f1ef\U0001f1f5\u65e5\u672c\u6d4b\u8bd501", "GPT\u81ea\u52a8"]},
+        ])
+        data = _transform(old_input)
+        all_names = [g["name"] for g in data["proxy-groups"]]
+        for name in all_names:
+            assert not converter.is_priority_wrapper(name), f"Wrapper group '{name}' not removed"
+
+
+# ---------------------------------------------------------------------------
+# Test: Managed groups count
+# ---------------------------------------------------------------------------
+
+
+class TestManagedGroupCount:
+    def test_fixed_group_count(self):
+        """Skill-managed groups (excluding preserved original groups) are at most 12."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        known = {"\u9ed8\u8ba4\u4ee3\u7406", "\u624b\u52a8\u9009\u62e9", "\u81ea\u52a8\u9009\u62e9",
+                 "GPT\u4e13\u7528", "GPT\u624b\u52a8", "GPT\u81ea\u52a8",
+                 "Gemini\u4e13\u7528", "Gemini\u624b\u52a8", "Gemini\u81ea\u52a8",
+                 "\u8fea\u58eb\u5c3c", "\u8fea\u58eb\u5c3c\u624b\u52a8", "\u8fea\u58eb\u5c3c\u81ea\u52a8"}
+        generated = {g["name"] for g in data["proxy-groups"] if g["name"] in known}
+        assert len(generated) == 12, f"Expected 12 managed groups, got {len(generated)}: {generated}"
+        # Total groups = 12 known + any original preserved groups
+        assert len(data["proxy-groups"]) >= 12
 
 
 # ---------------------------------------------------------------------------
@@ -113,21 +169,15 @@ class TestGlobalGroups:
         manual = _groups_by_name(data)["\u624b\u52a8\u9009\u62e9"]
         assert manual["proxies"][0] == "\u81ea\u52a8\u9009\u62e9"
 
-    def test_manual_only_auto_and_global_wrappers(self):
+    def test_manual_items_are_direct_static_nodes(self):
+        """Manual select contains only auto + direct static nodes (no wrappers)."""
         data = _transform(copy.deepcopy(sample_basic()))
         manual = _groups_by_name(data)["\u624b\u52a8\u9009\u62e9"]
+        static_names = {p["name"] for p in sample_basic()["proxies"]}
         for proxy in manual["proxies"][1:]:
-            assert proxy.startswith("\u5168\u5c40\u4f18\u5148\u2502"), (     # 全局优先│
-                f"Unexpected non-wrapper proxy: {proxy}"
+            assert proxy in static_names, (
+                f"Manual select contains non-static proxy: {proxy}"
             )
-
-    def test_each_global_wrapper_first_node_second_auto(self):
-        data = _transform(copy.deepcopy(sample_basic()))
-        wrappers = _wrapper_groups(data, "\u5168\u5c40\u4f18\u5148\u2502")
-        for w in wrappers:
-            assert len(w["proxies"]) == 2
-            assert w["proxies"][0] in [p["name"] for p in sample_basic()["proxies"]]
-            assert w["proxies"][1] == "\u81ea\u52a8\u9009\u62e9"
 
 
 # ---------------------------------------------------------------------------
@@ -145,20 +195,25 @@ class TestGptGroups:
         assert jp_names and tw_names
         assert proxies.index(jp_names[0]) < proxies.index(tw_names[0])
 
-    def test_gpt_manual_only_auto_and_gpt_wrappers(self):
+    def test_gpt_manual_first_item_is_gpt_auto(self):
         data = _transform(copy.deepcopy(sample_basic()))
         manual = _groups_by_name(data)["GPT\u624b\u52a8"]
         assert manual["proxies"][0] == "GPT\u81ea\u52a8"
+
+    def test_gpt_manual_items_are_direct_nodes(self):
+        """GPT manual contains only GPT auto + direct static nodes (no wrappers)."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        manual = _groups_by_name(data)["GPT\u624b\u52a8"]
+        static_names = {p["name"] for p in sample_basic()["proxies"]}
         for proxy in manual["proxies"][1:]:
-            assert proxy.startswith("GPT\u4f18\u5148\u2502"), (              # GPT优先│
-                f"Unexpected non-wrapper proxy: {proxy}"
+            assert proxy in static_names, (
+                f"GPT manual contains non-static proxy: {proxy}"
             )
 
-    def test_gpt_wrapper_fallbacks_to_gpt_auto(self):
+    def test_gpt_auto_type_is_fallback(self):
         data = _transform(copy.deepcopy(sample_basic()))
-        wrappers = _wrapper_groups(data, "GPT\u4f18\u5148\u2502")
-        for w in wrappers:
-            assert w["proxies"][1] == "GPT\u81ea\u52a8"
+        auto = _groups_by_name(data)["GPT\u81ea\u52a8"]
+        assert auto["type"] == "fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -202,19 +257,22 @@ class TestGeminiGroups:
         assert indices.get("\u53f0\u6e7e", 9999) < indices.get("\u9999\u6e2f", 9999)
         assert indices.get("\u9999\u6e2f", 9999) < indices.get("\u5fb7\u56fd", 9999)
 
-    def test_gemini_manual_only_auto_and_gemini_wrappers(self):
+    def test_gemini_manual_first_item_is_gemini_auto(self):
         data = _transform(copy.deepcopy(sample_basic()))
         manual = _groups_by_name(data).get("Gemini\u624b\u52a8")
         assert manual is not None
         assert manual["proxies"][0] == "Gemini\u81ea\u52a8"
-        for proxy in manual["proxies"][1:]:
-            assert proxy.startswith("Gemini\u4f18\u5148\u2502")
 
-    def test_gemini_wrapper_fallbacks_to_gemini_auto(self):
+    def test_gemini_manual_items_are_direct_nodes(self):
+        """Gemini manual contains only Gemini auto + direct static nodes (no wrappers)."""
         data = _transform(copy.deepcopy(sample_basic()))
-        wrappers = _wrapper_groups(data, "Gemini\u4f18\u5148\u2502")
-        for w in wrappers:
-            assert w["proxies"][1] == "Gemini\u81ea\u52a8"
+        manual = _groups_by_name(data).get("Gemini\u624b\u52a8")
+        assert manual is not None
+        static_names = {p["name"] for p in sample_basic()["proxies"]}
+        for proxy in manual["proxies"][1:]:
+            assert proxy in static_names, (
+                f"Gemini manual contains non-static proxy: {proxy}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -243,30 +301,20 @@ class TestDisneyGroups:
         assert jp_names and tw_names
         assert proxies.index(jp_names[0]) < proxies.index(tw_names[0])
 
-
-# ---------------------------------------------------------------------------
-# Test: Wrapper structure
-# ---------------------------------------------------------------------------
-
-
-class TestWrapperStructure:
-    def test_all_wrappers_first_member_is_static_node(self):
+    def test_disney_manual_first_item_is_disney_auto(self):
         data = _transform(copy.deepcopy(sample_basic()))
+        manual = _groups_by_name(data)["\u8fea\u58eb\u5c3c\u624b\u52a8"]
+        assert manual["proxies"][0] == "\u8fea\u58eb\u5c3c\u81ea\u52a8"
+
+    def test_disney_manual_items_are_direct_nodes(self):
+        """Disney manual contains only Disney auto + direct static nodes (no wrappers)."""
+        data = _transform(copy.deepcopy(sample_basic()))
+        manual = _groups_by_name(data)["\u8fea\u58eb\u5c3c\u624b\u52a8"]
         static_names = {p["name"] for p in sample_basic()["proxies"]}
-        for g in data["proxy-groups"]:
-            if converter.is_priority_wrapper(g["name"]):
-                assert g["proxies"][0] in static_names, (
-                    f"Wrapper '{g['name']}' first proxy '{g['proxies'][0]}' is not a static node"
-                )
-
-    def test_all_wrappers_second_member_is_auto(self):
-        data = _transform(copy.deepcopy(sample_basic()))
-        auto_names = {"\u81ea\u52a8\u9009\u62e9", "GPT\u81ea\u52a8", "Gemini\u81ea\u52a8", "\u8fea\u58eb\u5c3c\u81ea\u52a8"}
-        for g in data["proxy-groups"]:
-            if converter.is_priority_wrapper(g["name"]):
-                assert g["proxies"][1] in auto_names, (
-                    f"Wrapper '{g['name']}' second proxy '{g['proxies'][1]}' is not an auto group"
-                )
+        for proxy in manual["proxies"][1:]:
+            assert proxy in static_names, (
+                f"Disney manual contains non-static proxy: {proxy}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -418,10 +466,10 @@ class TestDryRun:
         sample = sample_basic()
         result = converter.transform(
             copy.deepcopy(sample),
-            manual_group="手动选择",
-            auto_group="自动选择",
-            disney_group="迪士尼",
-            media_keywords=["流媒体", "媒体流"],
+            manual_group="\u624b\u52a8\u9009\u62e9",
+            auto_group="\u81ea\u52a8\u9009\u62e9",
+            disney_group="\u8fea\u58eb\u5c3c",
+            media_keywords=["\u6d41\u5a92\u4f53", "\u5a92\u4f53\u6d41"],
         )
         assert "proxy-groups" in result
 
@@ -950,10 +998,8 @@ class TestSyncPipeline:
         for secret_word in ["server", "password", "token", "uuid", "example.invalid"]:
             assert secret_word not in output.lower(), f"Secret leaked: {secret_word}"
 
-    def test_sync_preserves_existing_33_tests(self):
-        """Verify the existing 33 tests still pass (run via pytest, but at minimum run a quick smoke)."""
-        # This is a smoke check — the full 33 tests are run via pytest separately.
-        # Here we just verify the transform still works as before.
+    def test_sync_preserves_existing_tests(self):
+        """Verify the existing transform still works as before."""
         data = _transform(copy.deepcopy(sample_basic()))
         assert "proxy-groups" in data
         assert len(data["proxy-groups"]) > 3
