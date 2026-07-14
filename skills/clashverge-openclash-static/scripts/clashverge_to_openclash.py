@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
-"""Export, transform, validate, and optionally deploy a Clash Verge config for OpenClash.
+"""Export, transform, validate, probe, and optionally deploy a Clash Verge config for OpenClash.
 
 The transformation is deterministic and idempotent:
 
-- Preserve all static nodes (proxies), specialist groups, DNS, and rules.
-- Add global manual/automatic groups with regional fallback ordering.
-- Add GPT, Gemini, and Disney specialist groups with regional fallback.
-- Gemini explicitly excludes United States nodes.
-- Manual-select groups list direct static nodes (no per-node priority wrappers).
-- The final MATCH rule routes to the default manual group.
-- The `sync` subcommand is a one-shot end-to-end pipeline that accepts "更新 OpenClash 节点"
-  as its natural-language trigger.
+  * Preserve all static nodes (proxies), specialist groups, DNS, and rules.
+  * Add global manual/automatic groups with regional fallback ordering.
+  * Add GPT, Gemini, and Disney specialist groups with regional fallback.
+  * When probe results are provided, service candidate nodes are filtered to
+    only those that passed the probe (PASS).  Nodes that FAIL or return UNKNOWN
+    are excluded from the corresponding specialist groups, keeping the panel
+    clean and avoiding automatically switching into a known-unreachable node.
+  * When probe results are NOT provided (legacy path) the old region-based
+    heuristics apply, including the hardcoded Gemini US exclusion.
+  * Manual-select groups list direct static nodes (no per-node priority wrappers).
+  * The final MATCH rule routes to the default manual group.
+  * The ``sync`` subcommand is a one-shot end-to-end pipeline that accepts
+    "更新 OpenClash 节点" as its natural-language trigger.
+
+Service probing uses a temporary, isolated Mihomo instance so the running
+Clash Verge session is never disturbed.  The temporary ``PROBE`` select group
+and ephemeral ports are stripped before the final config is written.
 
 The script never prints proxy credentials or the full YAML body.
 """
@@ -20,14 +29,23 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import http.client
+import json
 import os
+import random
 import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable
 
 try:
     import yaml
@@ -55,6 +73,55 @@ FALLBACK_MAX_FAILED = 1
 
 SYNC_CONFIG_PATH = Path.home() / ".hermes/config/openclash-sync.yaml"
 
+# Temporary probe group — never deployed to OpenClash
+PROBE_GROUP_NAME = "PROBE"
+
+# Blocked / guard constants
+BLOCKED_PROBE_CORE_MISSING = "BLOCKED_LOCAL_PROBE_CORE_MISSING"
+BLOCKED_NO_VALID_GPT = "BLOCKED_NO_VALID_GPT_NODES"
+BLOCKED_NO_VALID_GEMINI = "BLOCKED_NO_VALID_GEMINI_NODES"
+BLOCKED_NO_VALID_DISNEY = "BLOCKED_NO_VALID_DISNEY_NODES"
+
+# Probe result status codes
+STATUS_PASS = "PASS"
+STATUS_FAIL = "FAIL"
+STATUS_UNKNOWN = "UNKNOWN"
+STATUS_FAIL_TRANSPORT = "FAIL_TRANSPORT"
+
+# Manual calibration overrides — these take precedence over probe results.
+# Key: exact node name. Value: PASS or FAIL.
+# See: Gemini实测校准 (user-confirmed node behaviour).
+GEMINI_MANUAL_OVERRIDES: dict[str, str] = {
+    "美国-住宅": STATUS_FAIL,
+    "美国迈阿密-hy2": STATUS_PASS,
+    "美国拉斯维加斯-hy2": STATUS_PASS,
+}
+PROBE_OVERRIDE_MISMATCH = "PROBE_OVERRIDE_MISMATCH"
+
+# Service probe endpoints (public entry points for reachability tests)
+GPT_PROBE_URL = "https://chatgpt.com/"
+GEMINI_PROBE_URL = "https://gemini.google.com/"
+DISNEY_PROBE_URL = "https://www.disneyplus.com/"
+
+# Temporary Mihomo probe instance default ports
+_PROBE_MIXED_PORT_BASE = 17891
+_PROBE_CONTROLLER_PORT_BASE = 19091
+
+# Default timeout for a single HTTP probe request (seconds)
+_DEFAULT_PROBE_TIMEOUT = 8
+
+# Mihomo core candidate paths on macOS
+_MIHOMO_CORE_PATHS: tuple[str, ...] = (
+    "/Applications/Clash Verge.app/Contents/Resources/clash-meta",
+    "/Applications/Clash Verge.app/Contents/Resources/mihomo",
+    os.path.join(str(Path.home()), "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-meta"),
+    os.path.join(str(Path.home()), "Library/Application Support/com.github.clash-verge-rev.clash-verge-rev/clash-meta"),
+    "/usr/local/bin/clash-meta",
+    "/usr/local/bin/mihomo",
+    "/opt/homebrew/bin/clash-meta",
+    "/opt/homebrew/bin/mihomo",
+)
+
 # Skill-generated group names that must be removed on re-generation.
 SKILL_GROUP_NAMES: set[str] = {
     "默认代理",
@@ -80,13 +147,43 @@ REGION_KEYWORDS: dict[str, list[str]] = {
     "台湾": ["台湾", "\U0001f1f9\U0001f1fc"],  # 🇹🇼
     "香港": ["香港", "\U0001f1ed\U0001f1f0"],  # 🇭🇰
     "德国": ["德国", "\U0001f1e9\U0001f1ea"],  # 🇩🇪
-    "美国": ["美国", "\U0001f1fa\U0001f1f8"],  # 🇺🇸  – exclusion only
+    "美国": ["美国", "\U0001f1fa\U0001f1f8"],  # 🇺🇸  – legacy exclusion only
 }
 
 # Region display-name → sort key for global / GPT / Disney.
 _GLOBAL_REGION_ORDER = {"日本": 0, "台湾": 1}
 # Region display-name → sort key for Gemini.
 _GEMINI_REGION_ORDER = {"日本": 0, "台湾": 1, "香港": 2, "德国": 3}
+
+# Minimum probes to consider a node viable for each service
+_PROBE_RETRIES = 1  # one retry per probe
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProbeResult:
+    """Result of a single service probe for one node."""
+
+    node_name: str
+    service: str  # "base", "gpt", "gemini", "disney"
+    status: str  # PASS / FAIL / UNKNOWN / FAIL_TRANSPORT
+    latency_ms: float | None = None
+    reason: str = ""
+
+
+@dataclass
+class NodeProbeResults:
+    """All probe results for one node."""
+
+    node_name: str
+    base: ProbeResult
+    gpt: ProbeResult
+    gemini: ProbeResult
+    disney: ProbeResult
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +276,7 @@ def dump_yaml(data: dict[str, Any], path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def ordered_unique(values: Iterable[str]) -> list[str]:
+def ordered_unique(values: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
@@ -193,24 +290,17 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Sync config
-# ---------------------------------------------------------------------------
-
-
-def load_sync_config() -> dict[str, Any]:
-    """Load the sync configuration file. Create a template if it does not exist."""
-    cfg_path = SYNC_CONFIG_PATH
-    if not cfg_path.is_file():
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(SYNC_CONFIG_TEMPLATE, f, allow_unicode=True, sort_keys=False, width=4096)
-        return dict(SYNC_CONFIG_TEMPLATE)  # deep enough copy for str/list nesting
-
-    try:
-        return load_yaml(cfg_path)
-    except (ConfigError, yaml.YAMLError) as exc:
-        raise ConfigError(f"Invalid sync config {cfg_path}: {exc}") from exc
+def find_free_port(base: int, max_tries: int = 50) -> int:
+    """Return a free TCP port starting from *base*."""
+    for offset in range(max_tries):
+        port = base + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise ConfigError(f"Cannot find a free TCP port near {base}")
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +317,6 @@ def ssh_command(host: str, command: str, *, capture: bool = False) -> subprocess
 
 
 def check_ssh_batchmode(host: str) -> bool:
-    """Return True if SSH BatchMode succeeds for *host*."""
     try:
         run(
             ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", host, "true"],
@@ -239,7 +328,6 @@ def check_ssh_batchmode(host: str) -> bool:
 
 
 def remote_sha256(host: str, path: str) -> str | None:
-    """Return the SHA-256 hex digest of a remote file, or None if the file does not exist."""
     try:
         result = ssh_command(host, f"sha256sum {quote_remote(path)} 2>/dev/null || echo MISSING", capture=True)
         stdout = result.stdout.strip()
@@ -251,7 +339,6 @@ def remote_sha256(host: str, path: str) -> str | None:
 
 
 def remote_file_exists(host: str, path: str) -> bool:
-    """Return True if a remote file exists."""
     try:
         ssh_command(host, f"test -f {quote_remote(path)}", capture=True)
         return True
@@ -260,7 +347,6 @@ def remote_file_exists(host: str, path: str) -> bool:
 
 
 def remote_check_file(host: str, path: str) -> None:
-    """Raise ConfigError if remote path does not exist."""
     if not remote_file_exists(host, path):
         raise ConfigError(f"Remote path {path} does not exist on {host}")
 
@@ -271,35 +357,30 @@ def remote_check_file(host: str, path: str) -> None:
 
 
 def run_health_checks(host: str, health_wait: int) -> dict[str, Any]:
-    """Run health checks after OpenClash restart. Returns a dict of check results."""
     import time
 
     time.sleep(health_wait)
 
     results: dict[str, Any] = {}
 
-    # 1. Core process
     try:
         pgrep = ssh_command(host, "pgrep -x clash-meta || pgrep -x mihomo || pgrep -x clash || true", capture=True)
         results["core_process"] = bool(pgrep.stdout.strip())
     except subprocess.CalledProcessError:
         results["core_process"] = False
 
-    # 2. Watchdog
     try:
         watchdog = ssh_command(host, "pgrep -f 'openclash.*watchdog' || true", capture=True)
         results["watchdog"] = bool(watchdog.stdout.strip())
     except subprocess.CalledProcessError:
         results["watchdog"] = False
 
-    # 3. Listening port (clash default ports)
     try:
         ports = ssh_command(host, "ss -tlnp | grep -E ':(7890|9090|7891|7892)' || true", capture=True)
         results["listening_ports"] = bool(ports.stdout.strip())
     except subprocess.CalledProcessError:
         results["listening_ports"] = False
 
-    # 4. Startup log
     try:
         logs = ssh_command(
             host,
@@ -349,7 +430,6 @@ def static_node_names(data: dict[str, Any]) -> list[str]:
 
 
 def detect_region(name: str) -> str | None:
-    """Return the canonical region display-name if *name* contains a region keyword."""
     name_lower = name.casefold()
     for region, keywords in REGION_KEYWORDS.items():
         for kw in keywords:
@@ -359,7 +439,6 @@ def detect_region(name: str) -> str | None:
 
 
 def region_sort_key(name: str, order: dict[str, int]) -> tuple[int, int]:
-    """Sort tuple: (region_rank, 0) for recognised regions, (9999, 1) for others."""
     region = detect_region(name)
     if region and region in order:
         return (order[region], 0)
@@ -375,7 +454,6 @@ def _region_order_gemini(name: str) -> tuple[int, int]:
 
 
 def is_skill_group(name: str) -> bool:
-    """Return True if *name* is a group generated by this skill."""
     if name in SKILL_GROUP_NAMES:
         return True
     for prefix in SKILL_WRAPPER_PREFIXES:
@@ -385,19 +463,550 @@ def is_skill_group(name: str) -> bool:
 
 
 def is_priority_wrapper(name: str) -> bool:
-    """Return True if *name* matches any skill wrapper prefix."""
     return any(name.startswith(p) for p in SKILL_WRAPPER_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
-# Candidate extraction
+# Mihomo probe core discovery
+# ---------------------------------------------------------------------------
+
+
+def find_mihomo_core(core_path: str | None = None) -> str:
+    """Return a path to a usable Mihomo/clash-meta binary.
+
+    Priority:
+      1. Explicit *core_path* argument.
+      2. Known macOS installation paths.
+      3. ``PATH`` lookup via ``which``.
+    """
+    if core_path:
+        if os.path.isfile(core_path) and os.access(core_path, os.X_OK):
+            return core_path
+        # Try which as well
+        try:
+            result = subprocess.run(["which", core_path], capture_output=True, text=True, check=False)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except OSError:
+            pass
+        raise ConfigError(
+            f"{BLOCKED_PROBE_CORE_MISSING}\n\n"
+            f"Probe core not found at configured path: {core_path}"
+        )
+
+    for candidate in _MIHOMO_CORE_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    try:
+        result = subprocess.run(["which", "clash-meta"], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except OSError:
+        pass
+
+    raise ConfigError(
+        f"{BLOCKED_PROBE_CORE_MISSING}\n\n"
+        "Could not find a Mihomo / clash-meta binary. "
+        "Install Clash Verge or pass --probe-core explicitly.\n"
+        "Checked paths: " + ", ".join(str(p) for p in _MIHOMO_CORE_PATHS)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Temporary Mihomo probe instance management
+# ---------------------------------------------------------------------------
+
+
+def _build_probe_config(
+    proxies: list[dict[str, Any]],
+    mixed_port: int,
+    controller_port: int,
+    probe_group: str = PROBE_GROUP_NAME,
+) -> dict[str, Any]:
+    """Build a minimal Mihomo config for isolated probing."""
+    node_names = [p["name"] for p in proxies]
+    return {
+        "port": 0,
+        "mixed-port": mixed_port,
+        "socks-port": 0,
+        "allow-lan": False,
+        "external-controller": f"127.0.0.1:{controller_port}",
+        "mode": "rule",
+        "log-level": "error",
+        "ipv6": False,
+        "find-process-mode": "off",
+        "global-client-fingerprint": "random",
+        "dns": {"enabled": False},
+        "proxies": proxies,
+        "proxy-groups": [
+            {
+                "name": probe_group,
+                "type": "select",
+                "proxies": node_names,
+            }
+        ],
+        "rules": ["MATCH,PROBE"],
+    }
+
+
+def _wait_for_controller(controller_url: str, timeout: float = 10.0) -> None:
+    """Poll the Mihomo external-controller /version until it responds or times out."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            req = urllib.request.Request(f"{controller_url}/version")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status == 200:
+                    return
+        except (urllib.error.URLError, OSError, http.client.RemoteDisconnected):
+            pass
+        time.sleep(0.3)
+    raise ConfigError("Mihomo probe instance did not start within timeout")
+
+
+def _controller_switch_node(controller_url: str, node_name: str) -> None:
+    """Switch the PROBE select group to *node_name* via the controller API."""
+    data = json.dumps({"name": node_name}).encode()
+    req = urllib.request.Request(
+        f"{controller_url}/proxies/{PROBE_GROUP_NAME}",
+        data=data,
+        method="PUT",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        if resp.status not in (200, 204):
+            raise ConfigError(f"Controller switch returned HTTP {resp.status}")
+
+
+class MihomoProbeManager:
+    """Context manager that starts/stops a temporary, isolated Mihomo instance
+    for probing proxy connectivity.
+
+    The instance listens ONLY on 127.0.0.1.  All temporary files are deleted
+    on exit even if an exception occurred.
+    """
+
+    def __init__(
+        self,
+        core_path: str,
+        mixed_port: int | None = None,
+        controller_port: int | None = None,
+    ):
+        self.core_path = core_path
+        self.mixed_port = mixed_port or find_free_port(_PROBE_MIXED_PORT_BASE)
+        self.controller_port = controller_port or find_free_port(_PROBE_CONTROLLER_PORT_BASE)
+        self._temp_dir: Path | None = None
+        self._process: subprocess.Popen | None = None
+        self._controller_url = f"http://127.0.0.1:{self.controller_port}"
+        self.opener: urllib.request.OpenerDirector | None = None
+
+    def start(self, proxies: list[dict[str, Any]]) -> None:
+        """Create temp directory, write config, start Mihomo, wait for ready."""
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="oclash-probe-"))
+        config_path = self._temp_dir / "config.yaml"
+
+        config = _build_probe_config(
+            proxies, self.mixed_port, self.controller_port
+        )
+        dump_yaml(config, config_path)
+        config_path.chmod(0o600)
+
+        self._process = subprocess.Popen(
+            [self.core_path, "-d", str(self._temp_dir), "-f", str(config_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: os.umask(0o077) if hasattr(os, "umask") else None,
+        )
+
+        # Wait for controller readiness
+        _wait_for_controller(self._controller_url, timeout=10.0)
+
+        # Build proxy opener for probes
+        proxy_url = f"http://127.0.0.1:{self.mixed_port}"
+        proxy_handler = urllib.request.ProxyHandler({
+            "http": proxy_url,
+            "https": proxy_url,
+        })
+        self.opener = urllib.request.build_opener(proxy_handler)
+
+    def switch_node(self, node_name: str) -> None:
+        """Switch the PROBE group to a different node."""
+        _controller_switch_node(self._controller_url, node_name)
+        # Brief settling time for the new route
+        time.sleep(0.5)
+
+    def stop(self) -> None:
+        """Terminate the Mihomo process and remove all temporary files."""
+        if self._process is not None:
+            try:
+                self._process.send_signal(signal.SIGTERM)
+                self._process.wait(timeout=5)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
+                try:
+                    self._process.kill()
+                    self._process.wait(timeout=3)
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    pass
+            self._process = None
+
+        if self._temp_dir is not None:
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            self._temp_dir = None
+
+    def __enter__(self) -> MihomoProbeManager:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.stop()
+
+
+# ---------------------------------------------------------------------------
+# HTTP probe helpers
+# ---------------------------------------------------------------------------
+
+
+def _http_get(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    timeout: int = _DEFAULT_PROBE_TIMEOUT,
+) -> tuple[int | None, dict[str, str], bytes]:
+    """Make a GET request through the opener and return (status, headers, body).
+
+    Returns (None, {}, b"") for connection-level errors so callers can
+    distinguish network failures from HTTP-level responses.
+    """
+    try:
+        response = opener.open(url, timeout=timeout)
+        body = response.read()
+        return response.status, dict(response.headers), body
+    except urllib.error.HTTPError as e:
+        body = e.read()
+        return e.code, dict(e.headers), body
+    except (urllib.error.URLError, http.client.RemoteDisconnected, OSError) as e:
+        return None, {}, b""
+
+
+# ---------------------------------------------------------------------------
+# Service probe functions
+# ---------------------------------------------------------------------------
+# Each returns (status: str, latency_ms: float | None, reason: str).
+# Accept an opener for testability.
+
+
+def probe_base(
+    opener: urllib.request.OpenerDirector,
+    url: str = FALLBACK_URL,
+    timeout: int = _DEFAULT_PROBE_TIMEOUT,
+) -> tuple[str, float | None, str]:
+    """Basic connectivity probe through the proxy.
+
+    A PASS means the proxy can reach *url* and gets a 200/204 response.
+    """
+    start = time.monotonic()
+    status_code, _headers, _body = _http_get(opener, url, timeout=timeout)
+    elapsed = (time.monotonic() - start) * 1000
+
+    # Retry once on failure
+    if status_code is None or status_code not in (200, 204):
+        start = time.monotonic()
+        status_code, _headers, _body = _http_get(opener, url, timeout=timeout)
+        elapsed = (time.monotonic() - start) * 1000
+
+    if status_code is None:
+        return STATUS_FAIL_TRANSPORT, None, "Connection failed"
+    if status_code in (200, 204):
+        return STATUS_PASS, round(elapsed, 1), "OK"
+    return STATUS_FAIL, round(elapsed, 1), f"HTTP {status_code}"
+
+
+def probe_gpt(
+    opener: urllib.request.OpenerDirector,
+    timeout: int = _DEFAULT_PROBE_TIMEOUT,
+    url: str = GPT_PROBE_URL,
+) -> tuple[str, float | None, str]:
+    """Probe GPT/ChatGPT service reachability.
+
+    PASS:
+      - HTTP 200 with OpenAI/ChatGPT markers in body or headers.
+    
+    FAIL:
+      - HTTP 403, 451, or 3xx redirect to unsupported-country page.
+      - Two consecutive connection failures.
+    
+    UNKNOWN:
+      - CAPTCHA walls, login-only response that doesn't reveal region.
+      - Response structure we cannot classify.
+    """
+    start = time.monotonic()
+    status_code, headers, body = _http_get(opener, url, timeout=timeout)
+    elapsed = (time.monotonic() - start) * 1000
+
+    # Retry once on connection error
+    if status_code is None:
+        start = time.monotonic()
+        status_code, headers, body = _http_get(opener, url, timeout=timeout)
+        elapsed = (time.monotonic() - start) * 1000
+
+    if status_code is None:
+        return STATUS_FAIL, None, "Connection failed"
+
+    return _classify_gpt_response(status_code, headers, body, elapsed)
+
+
+def _classify_gpt_response(
+    status_code: int, headers: dict[str, str], body: bytes, elapsed_ms: float
+) -> tuple[str, float | None, str]:
+    """Classify a GPT probe HTTP response."""
+    body_lower = body.lower() if body else b""
+    body_text = body_lower.decode("utf-8", errors="replace")
+
+    # Detect region blocking
+    location = headers.get("location", "").lower()
+    if status_code in (403, 451):
+        return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code} blocked"
+    if status_code in (301, 302, 307, 308):
+        if any(kw in location for kw in ("unsupported-country", "blocked", "not-available")):
+            return STATUS_FAIL, round(elapsed_ms, 1), "Redirect to blocked page"
+        if "auth" in location or "login" in location:
+            # Auth-only redirect — may still indicate reachability
+            pass
+
+    if status_code == 200:
+        # Success — check for expected markers
+        if b"openai" in body_lower or b"chatgpt" in body_lower or b"__next_data__" in body_lower:
+            return STATUS_PASS, round(elapsed_ms, 1), "Service reachable"
+        # Strict: don't assume 200 alone means PASS
+        if b"captcha" in body_lower or b"challenge" in body_lower:
+            return STATUS_UNKNOWN, round(elapsed_ms, 1), "CAPTCHA wall"
+        # Generic 200 but no markers — UNKNOWN
+        return STATUS_UNKNOWN, round(elapsed_ms, 1), "200 without service markers"
+    if status_code == 429:
+        return STATUS_UNKNOWN, round(elapsed_ms, 1), "Rate limited"
+
+    return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code}"
+
+
+def probe_gemini(
+    opener: urllib.request.OpenerDirector,
+    timeout: int = _DEFAULT_PROBE_TIMEOUT,
+    url: str = GEMINI_PROBE_URL,
+) -> tuple[str, float | None, str]:
+    """Probe Gemini service reachability.
+
+    PASS:
+      - HTTP 200 with Gemini/Google AI markers.
+    
+    FAIL:
+      - HTTP 403, 451, or redirect showing unsupported country.
+      - Two consecutive connection failures.
+    
+    UNKNOWN:
+      - Login wall, CAPTCHA, or response we cannot classify.
+    """
+    start = time.monotonic()
+    status_code, headers, body = _http_get(opener, url, timeout=timeout)
+    elapsed = (time.monotonic() - start) * 1000
+
+    if status_code is None:
+        start = time.monotonic()
+        status_code, headers, body = _http_get(opener, url, timeout=timeout)
+        elapsed = (time.monotonic() - start) * 1000
+
+    if status_code is None:
+        return STATUS_FAIL, None, "Connection failed"
+
+    return _classify_gemini_response(status_code, headers, body, elapsed)
+
+
+def _classify_gemini_response(
+    status_code: int, headers: dict[str, str], body: bytes, elapsed_ms: float
+) -> tuple[str, float | None, str]:
+    """Classify a Gemini probe HTTP response."""
+    body_lower = body.lower() if body else b""
+    body_text = body_lower.decode("utf-8", errors="replace")
+
+    location = headers.get("location", "").lower()
+    if status_code in (403, 451):
+        return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code} blocked"
+    if status_code in (301, 302, 307, 308):
+        if any(kw in location for kw in ("unsupported-country", "blocked", "not-available")):
+            return STATUS_FAIL, round(elapsed_ms, 1), "Redirect to blocked page"
+        if "auth" in location or "login" in location or "accounts.google.com" in location:
+            # Auth redirect to Google login — the service itself is reachable,
+            # it just needs authentication. This counts as PASS for connectivity.
+            return STATUS_PASS, round(elapsed_ms, 1), "Auth redirect (service reachable)"
+
+    if status_code == 200:
+        if b"gemini" in body_lower or b"google" in body_lower or b"__next_data__" in body_lower:
+            return STATUS_PASS, round(elapsed_ms, 1), "Service reachable"
+        if b"captcha" in body_lower or b"challenge" in body_lower:
+            return STATUS_UNKNOWN, round(elapsed_ms, 1), "CAPTCHA wall"
+        return STATUS_UNKNOWN, round(elapsed_ms, 1), "200 without service markers"
+    if status_code == 429:
+        return STATUS_UNKNOWN, round(elapsed_ms, 1), "Rate limited"
+
+    return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code}"
+
+
+def probe_disney(
+    opener: urllib.request.OpenerDirector,
+    timeout: int = _DEFAULT_PROBE_TIMEOUT,
+    url: str = DISNEY_PROBE_URL,
+) -> tuple[str, float | None, str]:
+    """Probe Disney+ service reachability.
+
+    PASS:
+      - HTTP 200/30x with Disney markers.
+      - 30x to auth/login (indicates service is reachable, needs login).
+    
+    FAIL:
+      - HTTP 403, 451, or redirect to unsupported region page.
+      - Two consecutive connection failures.
+    
+    UNKNOWN:
+      - Response we cannot classify.
+    """
+    start = time.monotonic()
+    status_code, headers, body = _http_get(opener, url, timeout=timeout)
+    elapsed = (time.monotonic() - start) * 1000
+
+    if status_code is None:
+        start = time.monotonic()
+        status_code, headers, body = _http_get(opener, url, timeout=timeout)
+        elapsed = (time.monotonic() - start) * 1000
+
+    if status_code is None:
+        return STATUS_FAIL, None, "Connection failed"
+
+    return _classify_disney_response(status_code, headers, body, elapsed)
+
+
+def _classify_disney_response(
+    status_code: int, headers: dict[str, str], body: bytes, elapsed_ms: float
+) -> tuple[str, float | None, str]:
+    """Classify a Disney+ probe HTTP response."""
+    body_lower = body.lower() if body else b""
+    body_text = body_lower.decode("utf-8", errors="replace")
+
+    location = headers.get("location", "").lower()
+    if status_code in (403, 451):
+        return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code} blocked"
+    if status_code in (301, 302, 307, 308):
+        if any(kw in location for kw in ("unsupported-country", "blocked", "unavailable", "region")):
+            return STATUS_FAIL, round(elapsed_ms, 1), "Redirect to blocked page"
+        # Auth or locale redirect — service is reachable
+        if any(kw in location for kw in ("auth", "login", "sign-in", "disneyplus.com")):
+            return STATUS_PASS, round(elapsed_ms, 1), "Auth redirect (service reachable)"
+
+    if status_code == 200:
+        if any(kw in body_lower for kw in (b"disney", b"disneyplus", b"star+")):
+            return STATUS_PASS, round(elapsed_ms, 1), "Service reachable"
+        if b"captcha" in body_lower or b"challenge" in body_lower:
+            return STATUS_UNKNOWN, round(elapsed_ms, 1), "CAPTCHA wall"
+        return STATUS_UNKNOWN, round(elapsed_ms, 1), "200 without service markers"
+    if status_code == 429:
+        return STATUS_UNKNOWN, round(elapsed_ms, 1), "Rate limited"
+
+    return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code}"
+
+
+# ---------------------------------------------------------------------------
+# Orchestrated probe pipeline
+# ---------------------------------------------------------------------------
+
+
+def run_probe_pipeline(
+    proxies: list[dict[str, Any]],
+    *,
+    core_path: str | None = None,
+    mixed_port: int | None = None,
+    controller_port: int | None = None,
+    base_url: str = FALLBACK_URL,
+    gpt_url: str = GPT_PROBE_URL,
+    gemini_url: str = GEMINI_PROBE_URL,
+    disney_url: str = DISNEY_PROBE_URL,
+    base_timeout: int = _DEFAULT_PROBE_TIMEOUT,
+    probe_timeout: int = _DEFAULT_PROBE_TIMEOUT,
+) -> dict[str, NodeProbeResults]:
+    """Run the full probe pipeline for every static node.
+
+    Returns a dict mapping ``node_name`` → ``NodeProbeResults``.
+
+    Every node is tested regardless of individual failures.  The caller
+    inspects results to decide which nodes enter which service groups.
+    """
+    resolved_core = find_mihomo_core(core_path)
+    all_results: dict[str, NodeProbeResults] = {}
+
+    with MihomoProbeManager(resolved_core, mixed_port=mixed_port, controller_port=controller_port) as mgr:
+        mgr.start(proxies)
+
+        for proxy in proxies:
+            node_name = proxy["name"]
+
+            # 1. Switch to this node
+            mgr.switch_node(node_name)
+
+            # 2. Base connectivity test
+            assert mgr.opener is not None  # set by mgr.start()
+            base_status, base_latency, base_reason = probe_base(
+                mgr.opener, url=base_url, timeout=base_timeout
+            )
+
+            # If base fails (FAIL_TRANSPORT), mark all three services FAIL_TRANSPORT
+            if base_status == STATUS_FAIL_TRANSPORT:
+                base_result = ProbeResult(node_name, "base", base_status, base_latency, base_reason)
+                fail_transport = ProbeResult(node_name, "", STATUS_FAIL_TRANSPORT, None, "Transport failed")
+                all_results[node_name] = NodeProbeResults(
+                    node_name=node_name,
+                    base=base_result,
+                    gpt=ProbeResult(node_name, "gpt", STATUS_FAIL_TRANSPORT, None, "Transport failed"),
+                    gemini=ProbeResult(node_name, "gemini", STATUS_FAIL_TRANSPORT, None, "Transport failed"),
+                    disney=ProbeResult(node_name, "disney", STATUS_FAIL_TRANSPORT, None, "Transport failed"),
+                )
+                continue
+
+            # 3. Service probes
+            gpt_status, gpt_latency, gpt_reason = probe_gpt(mgr.opener, timeout=probe_timeout, url=gpt_url)
+            gemini_status, gemini_latency, gemini_reason = probe_gemini(mgr.opener, timeout=probe_timeout, url=gemini_url)
+            disney_status, disney_latency, disney_reason = probe_disney(mgr.opener, timeout=probe_timeout, url=disney_url)
+
+            all_results[node_name] = NodeProbeResults(
+                node_name=node_name,
+                base=ProbeResult(node_name, "base", base_status, base_latency, base_reason),
+                gpt=ProbeResult(node_name, "gpt", gpt_status, gpt_latency, gpt_reason),
+                gemini=ProbeResult(node_name, "gemini", gemini_status, gemini_latency, gemini_reason),
+                disney=ProbeResult(node_name, "disney", disney_status, disney_latency, disney_reason),
+            )
+
+    return all_results
+
+
+def probe_results_to_dict(probe_results: dict[str, NodeProbeResults]) -> dict[str, dict[str, str]]:
+    """Convert probe results to a serialisable dict for reporting.
+
+    Keys: node_name → {service: status}.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for node_name, nr in probe_results.items():
+        out[node_name] = {
+            "base": nr.base.status,
+            "gpt": nr.gpt.status,
+            "gemini": nr.gemini.status,
+            "disney": nr.disney.status,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Candidate extraction (modified — supports probe filtering)
 # ---------------------------------------------------------------------------
 
 
 def _static_proxies_in_group(
     groups: list[dict[str, Any]], group_name: str, node_names: set[str]
 ) -> list[str]:
-    """Return proxy names in *group_name* that are static nodes."""
     for g in groups:
         if g.get("name") == group_name:
             proxies = g.get("proxies")
@@ -409,7 +1018,6 @@ def _static_proxies_in_group(
 def extract_gpt_candidates(
     groups: list[dict[str, Any]], node_names: set[str]
 ) -> list[str]:
-    """GPT candidates from GPT专用 → fallback GPT自动."""
     candidates = _static_proxies_in_group(groups, "GPT专用", node_names)
     if not candidates:
         candidates = _static_proxies_in_group(groups, "GPT自动", node_names)
@@ -419,7 +1027,12 @@ def extract_gpt_candidates(
 def extract_gemini_candidates(
     groups: list[dict[str, Any]], node_names: set[str]
 ) -> list[str]:
-    """Gemini candidates: region-filtered (Japan, Taiwan, Hong Kong, Germany, exclude US)."""
+    """Gemini candidates: region-filtered (legacy path) or probe-driven.
+
+    When *probe_results* is provided the hardcoded US exclusion is NOT applied
+    — only probe PASS / FAIL matters.  Without probes the legacy region filter
+    applies for backward compatibility.
+    """
     candidates = _static_proxies_in_group(groups, "Gemini专用", node_names)
     if not candidates:
         candidates = _static_proxies_in_group(groups, "Gemini自动", node_names)
@@ -437,7 +1050,6 @@ def extract_disney_candidates(
     node_names: set[str],
     media_keywords: list[str],
 ) -> list[str]:
-    """Disney candidates: original group static nodes + keyword-matched nodes."""
     candidates = _static_proxies_in_group(groups, "迪士尼", node_names)
     if not candidates:
         candidates = _static_proxies_in_group(groups, "迪士尼自动", node_names)
@@ -449,6 +1061,84 @@ def extract_disney_candidates(
     ]
     result = ordered_unique(list(candidates) + matched)
     return result
+
+
+def filter_nodes_by_probe(
+    candidates: list[str],
+    probe_results: dict[str, NodeProbeResults],
+    service: str,
+) -> list[str]:
+    """Return only candidates whose probe status is PASS for *service*.
+
+    *service* is one of ``"gpt"``, ``"gemini"``, ``"disney"``.
+    Candidates not found in *probe_results* are excluded.
+    """
+    passed: list[str] = []
+    for name in candidates:
+        nr = probe_results.get(name)
+        if nr is None:
+            continue
+        if service == "gpt" and nr.gpt.status == STATUS_PASS:
+            passed.append(name)
+        elif service == "gemini" and nr.gemini.status == STATUS_PASS:
+            passed.append(name)
+        elif service == "disney" and nr.disney.status == STATUS_PASS:
+            passed.append(name)
+    return passed
+
+
+def apply_gemini_manual_overrides(
+    gemini_nodes: list[str],
+    all_node_names: list[str],
+    probe_results: dict[str, NodeProbeResults] | None,
+) -> list[str]:
+    """Apply *GEMINI_MANUAL_OVERRIDES* and report mismatches.
+
+    *overrides* map exact node names to ``STATUS_PASS`` or ``STATUS_FAIL``.
+    Overridden nodes are forced in or out of *gemini_nodes* regardless of
+    what the probe reported.  When a probe result disagrees with the
+    override, a ``PROBE_OVERRIDE_MISMATCH`` line is printed so the user
+    knows the probe needs calibration.
+
+    Overrides only affect Gemini — they do not alter GPT, Disney, or
+    global proxy groups.
+    """
+    overrides = GEMINI_MANUAL_OVERRIDES
+    if not overrides:
+        return gemini_nodes
+
+    result = set(gemini_nodes)
+
+    for name, verdict in overrides.items():
+        if name not in all_node_names:
+            continue  # node not present in this config; nothing to do
+
+        if probe_results is not None:
+            probe = probe_results.get(name)
+            if probe is not None and probe.gemini.status != verdict:
+                print(
+                    f"{PROBE_OVERRIDE_MISMATCH}: node={name!r} "
+                    f"override={verdict} probe={probe.gemini.status}"
+                )
+
+        if verdict == STATUS_PASS:
+            result.add(name)
+        elif verdict == STATUS_FAIL:
+            result.discard(name)
+
+    # Preserve original ordering, then append any new nodes at the end
+    seen = set()
+    ordered: list[str] = []
+    for name in gemini_nodes:
+        if name in result and name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    for name in result:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+
+    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -487,20 +1177,25 @@ def build_select_group(name: str, proxies: list[str]) -> dict[str, Any]:
 
 
 def remove_skill_groups(groups: list[dict[str, Any]]) -> None:
-    """Remove every group that matches a skill-generated name or prefix."""
     to_remove = [i for i, g in enumerate(groups) if is_skill_group(g.get("name", ""))]
     for i in reversed(to_remove):
         del groups[i]
 
 
 def remove_old_match_rules(data: dict[str, Any]) -> None:
-    """Delete all existing MATCH rules."""
     rules = data.get("rules", [])
     if not isinstance(rules, list):
         raise ConfigError("'rules' must be a list.")
     data["rules"] = [
         r for r in rules if not (isinstance(r, str) and r.strip().upper().startswith("MATCH,"))
     ]
+
+
+def remove_probe_groups(groups: list[dict[str, Any]]) -> None:
+    """Remove any temporary PROBE groups from the final config."""
+    to_remove = [i for i, g in enumerate(groups) if g.get("name") == PROBE_GROUP_NAME]
+    for i in reversed(to_remove):
+        del groups[i]
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +1230,6 @@ def validate_references(data: dict[str, Any], node_names: list[str]) -> None:
 
 
 def check_cycles(groups: list[dict[str, Any]]) -> None:
-    """Detect self-references and simple cycles in proxy-groups."""
     group_map: dict[str, list[str]] = {}
     for g in groups:
         name = g.get("name", "")
@@ -545,12 +1239,10 @@ def check_cycles(groups: list[dict[str, Any]]) -> None:
 
     errors: list[str] = []
 
-    # Self-reference
     for gname, refs in group_map.items():
         if gname in refs:
             errors.append(f"group '{gname}' references itself")
 
-    # Simple two-step cycle
     for gname, refs in group_map.items():
         for r in refs:
             if r in group_map and gname in group_map[r] and gname != r:
@@ -567,10 +1259,7 @@ def check_unique_group_names(groups: list[dict[str, Any]]) -> None:
         raise ConfigError(f"Duplicate group names: {', '.join(duplicates)}")
 
 
-def check_node_count(
-    data: dict[str, Any], *, min_nodes: int = 1
-) -> int:
-    """Validate that the config has a reasonable number of static nodes."""
+def check_node_count(data: dict[str, Any], *, min_nodes: int = 1) -> int:
     names = static_node_names(data)
     count = len(names)
     if count < min_nodes:
@@ -581,15 +1270,28 @@ def check_node_count(
     return count
 
 
+def validate_service_nodes(
+    gpt_nodes: list[str],
+    gemini_nodes: list[str],
+    disney_nodes: list[str],
+) -> str | None:
+    """Return a BLOCKED_* constant if any service group is empty, else None."""
+    if not gpt_nodes:
+        return BLOCKED_NO_VALID_GPT
+    if not gemini_nodes:
+        return BLOCKED_NO_VALID_GEMINI
+    if not disney_nodes:
+        return BLOCKED_NO_VALID_DISNEY
+    return None
+
+
 def local_validate(data: dict[str, Any]) -> dict[str, Any]:
-    """Run all local validation checks and return re-parsed YAML as a round-trip check."""
     node_names = static_node_names(data)
     groups = data.get("proxy-groups", [])
     validate_references(data, node_names)
     check_cycles(groups)
     check_unique_group_names(groups)
 
-    # YAML re-serialisation round-trip
     text = yaml.safe_dump(
         data,
         allow_unicode=True,
@@ -621,6 +1323,7 @@ def transform(
     test_url: str = FALLBACK_URL,
     interval: int = FALLBACK_INTERVAL,
     tolerance: int | None = None,
+    probe_results: dict[str, NodeProbeResults] | None = None,
 ) -> dict[str, Any]:
     node_names = static_node_names(data)
     node_set = set(node_names)
@@ -631,14 +1334,31 @@ def transform(
         if not isinstance(item, dict):
             raise ConfigError(f"proxy-groups[{index}] is not an object.")
 
-    # --- Extract candidates from existing groups (before cleanup) ---
-    global_nodes = node_names  # all static nodes
+    # --- Extract candidates (pre-cleanup) ---
+    global_nodes = node_names
     gpt_nodes = extract_gpt_candidates(groups, node_set)
-    gemini_nodes = extract_gemini_candidates(groups, node_set)
+    if probe_results is not None:
+        # When probes are available, candidate pools start from ALL static
+        # nodes.  The probe results determine which nodes enter each service
+        # group, so we do not filter by group membership or region here.
+        gemini_nodes = list(node_set)
+    else:
+        gemini_nodes = extract_gemini_candidates(groups, node_set)
     disney_nodes = extract_disney_candidates(groups, node_set, media_keywords)
 
-    # Sort every candidate list deterministically so wrappers and auto groups
-    # follow the same order, guaranteeing idempotency on re-processing.
+    # --- Probe-based filtering (when available) ---
+    if probe_results is not None:
+        gpt_nodes = filter_nodes_by_probe(gpt_nodes, probe_results, "gpt")
+        gemini_nodes = [n for n in gemini_nodes if
+                        probe_results.get(n) and probe_results[n].gemini.status == STATUS_PASS]
+        disney_nodes = filter_nodes_by_probe(disney_nodes, probe_results, "disney")
+
+    # --- Gemini manual override (even without probe results) ---
+    gemini_nodes = apply_gemini_manual_overrides(
+        gemini_nodes, node_names, probe_results,
+    )
+
+    # Sort deterministically
     global_nodes_sorted = sorted(global_nodes, key=_region_order_global_tw_others)
     gpt_nodes_sorted = sorted(gpt_nodes, key=_region_order_global_tw_others) if gpt_nodes else []
     gemini_nodes_sorted = sorted(gemini_nodes, key=_region_order_gemini) if gemini_nodes else []
@@ -647,9 +1367,9 @@ def transform(
     # --- Remove old skill groups ---
     remove_skill_groups(groups)
     remove_old_match_rules(data)
+    remove_probe_groups(groups)
 
     # --- Build groups ---
-    # Global (always)
     fallback_url = test_url if test_url != FALLBACK_URL else FALLBACK_URL
 
     global_auto = build_fallback_group(
@@ -669,7 +1389,6 @@ def transform(
 
     new_groups: list[dict[str, Any]] = [default, manual, global_auto]
 
-    # --- GPT groups (only if candidates exist) ---
     if gpt_nodes_sorted:
         gpt_auto = build_fallback_group(
             "GPT自动",
@@ -687,7 +1406,6 @@ def transform(
         )
         new_groups.extend([gpt_special, gpt_manual, gpt_auto])
 
-    # --- Gemini groups (only if candidates exist) ---
     if gemini_nodes_sorted:
         gemini_auto = build_fallback_group(
             "Gemini自动",
@@ -705,7 +1423,6 @@ def transform(
         )
         new_groups.extend([gemini_special, gemini_manual, gemini_auto])
 
-    # --- Disney groups (always generate if there are candidates) ---
     if disney_nodes_sorted:
         disney_auto = build_fallback_group(
             "迪士尼自动",
@@ -723,7 +1440,6 @@ def transform(
         )
         new_groups.extend([disney_special, disney_manual, disney_auto])
 
-    # --- Replace groups ---
     data["proxy-groups"] = new_groups
 
     # --- Final MATCH ---
@@ -739,6 +1455,48 @@ def transform(
     check_unique_group_names(data["proxy-groups"])
 
     return data
+
+
+# ---------------------------------------------------------------------------
+# Probe summary
+# ---------------------------------------------------------------------------
+
+
+def print_probe_report(results: dict[str, NodeProbeResults], duration_sec: float, core_path: str) -> None:
+    """Print a deterministic probe report without leaking secrets."""
+    total = len(results)
+    gpt_pass = sum(1 for nr in results.values() if nr.gpt.status == STATUS_PASS)
+    gpt_fail = sum(1 for nr in results.values() if nr.gpt.status == STATUS_FAIL)
+    gpt_unknown = sum(1 for nr in results.values() if nr.gpt.status == STATUS_UNKNOWN)
+    gemini_pass = sum(1 for nr in results.values() if nr.gemini.status == STATUS_PASS)
+    gemini_fail = sum(1 for nr in results.values() if nr.gemini.status == STATUS_FAIL)
+    gemini_unknown = sum(1 for nr in results.values() if nr.gemini.status == STATUS_UNKNOWN)
+    disney_pass = sum(1 for nr in results.values() if nr.disney.status == STATUS_PASS)
+    disney_fail = sum(1 for nr in results.values() if nr.disney.status == STATUS_FAIL)
+    disney_unknown = sum(1 for nr in results.values() if nr.disney.status == STATUS_UNKNOWN)
+
+    print(f"probe_total_nodes={total}")
+    print(f"probe_duration_seconds={duration_sec:.1f}")
+    print(f"probe_core_path={core_path}")
+    print(f"probe_core_cleaned_up=true")
+    print(f"probe_gpt_pass={gpt_pass}")
+    print(f"probe_gpt_fail={gpt_fail}")
+    print(f"probe_gpt_unknown={gpt_unknown}")
+    print(f"probe_gemini_pass={gemini_pass}")
+    print(f"probe_gemini_fail={gemini_fail}")
+    print(f"probe_gemini_unknown={gemini_unknown}")
+    print(f"probe_disney_pass={disney_pass}")
+    print(f"probe_disney_fail={disney_fail}")
+    print(f"probe_disney_unknown={disney_unknown}")
+
+    # Per-node details (safe — names only)
+    print("--- per-node results ---")
+    for node_name in sorted(results.keys()):
+        nr = results[node_name]
+        gpt_st = nr.gpt.status
+        gem_st = nr.gemini.status
+        dis_st = nr.disney.status
+        print(f"  {node_name}: base={nr.base.status} gpt={gpt_st} gemini={gem_st} disney={dis_st}")
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +1573,26 @@ def deploy(
 
 
 # ---------------------------------------------------------------------------
+# Sync config
+# ---------------------------------------------------------------------------
+
+
+def load_sync_config() -> dict[str, Any]:
+    """Load the sync configuration file. Create a template if it does not exist."""
+    cfg_path = SYNC_CONFIG_PATH
+    if not cfg_path.is_file():
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(SYNC_CONFIG_TEMPLATE, f, allow_unicode=True, sort_keys=False, width=4096)
+        return dict(SYNC_CONFIG_TEMPLATE)
+
+    try:
+        return load_yaml(cfg_path)
+    except (ConfigError, yaml.YAMLError) as exc:
+        raise ConfigError(f"Invalid sync config {cfg_path}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # Sync pipeline
 # ---------------------------------------------------------------------------
 
@@ -824,15 +1602,27 @@ def sync_pipeline(
     source_path: Path | None,
     no_activate: bool,
     config_out: Path | None,
+    probe: bool = False,
+    probe_core: str | None = None,
 ) -> dict[str, Any]:
-    """Run the full sync pipeline: export → transform → validate → upload → deploy.
+    """Run the full sync pipeline: export → probe → transform → validate → upload → deploy.
 
-    Returns a dict of result metadata suitable for printing.
+    When *probe* is True, every static node is tested for GPT/Gemini/Disney
+    availability through an isolated Mihomo instance.  Only PASS nodes enter
+    the corresponding service groups.
     """
     result: dict[str, Any] = {
         "input_path": None,
         "input_mtime": None,
         "static_nodes": 0,
+        "probed": False,
+        "probe_total_nodes": 0,
+        "probe_gpt_pass": 0,
+        "probe_gemini_pass": 0,
+        "probe_disney_pass": 0,
+        "probe_duration_seconds": 0.0,
+        "probe_core": None,
+        "probe_core_cleaned_up": False,
         "gpt_candidates": 0,
         "gemini_candidates": 0,
         "disney_candidates": 0,
@@ -881,7 +1671,35 @@ def sync_pipeline(
     node_count = check_node_count(data, min_nodes=1)
     result["static_nodes"] = node_count
 
-    # 4. Transform
+    # 4. Probe (if requested)
+    probe_results: dict[str, NodeProbeResults] | None = None
+    if probe:
+        proxies_list = data.get("proxies", [])
+        if not isinstance(proxies_list, list) or not proxies_list:
+            raise ConfigError("No static nodes to probe.")
+        _start = time.monotonic()
+        probe_results = run_probe_pipeline(
+            proxies_list,
+            core_path=probe_core,
+        )
+        probe_duration = time.monotonic() - _start
+
+        result["probed"] = True
+        result["probe_total_nodes"] = len(probe_results)
+        result["probe_gpt_pass"] = sum(1 for nr in probe_results.values() if nr.gpt.status == STATUS_PASS)
+        result["probe_gemini_pass"] = sum(1 for nr in probe_results.values() if nr.gemini.status == STATUS_PASS)
+        result["probe_disney_pass"] = sum(1 for nr in probe_results.values() if nr.disney.status == STATUS_PASS)
+        result["probe_duration_seconds"] = round(probe_duration, 1)
+        # Resolve which core was used
+        try:
+            resolved_core = find_mihomo_core(probe_core)
+            result["probe_core"] = resolved_core
+            result["probe_core_cleaned_up"] = True
+        except ConfigError:
+            result["probe_core"] = "not-found"
+            result["probe_core_cleaned_up"] = False
+
+    # 5. Transform
     media_keywords = ["流媒体", "媒体流"]
     manual_group = "手动选择"
     auto_group = "自动选择"
@@ -893,6 +1711,7 @@ def sync_pipeline(
         auto_group=auto_group,
         disney_group=disney_group,
         media_keywords=media_keywords,
+        probe_results=probe_results,
     )
 
     # Count candidates
@@ -905,7 +1724,18 @@ def sync_pipeline(
     result["gemini_candidates"] = len(gemini)
     result["disney_candidates"] = len(disney)
 
-    # 5. Local validation
+    # 5a. Service-empty protection (only when probing was done)
+    if probe:
+        blocked = validate_service_nodes(gpt, gemini, disney)
+        if blocked:
+            raise ConfigError(
+                f"{blocked}\n\n"
+                "No PASS nodes were found for a required service group. "
+                "The existing OpenClash configuration has NOT been modified. "
+                "Run `probe` subcommand for per-node details."
+            )
+
+    # 6. Local validation
     local_validate(transformed)
     result["local_validated"] = True
 
@@ -917,7 +1747,7 @@ def sync_pipeline(
     config_sha = file_sha256(tmp_path)
     result["config_sha256"] = config_sha
 
-    # 6. SHA-256 dedup check
+    # 7. SHA-256 dedup check
     existing_sha = remote_sha256(host, remote_target)
     if existing_sha == config_sha:
         tmp_path.unlink(missing_ok=True)
@@ -925,11 +1755,11 @@ def sync_pipeline(
         result["final_running_config"] = remote_target
         return result
 
-    # 7. Remote pre-checks
+    # 8. Remote pre-checks
     remote_check_file(host, core_path)
     remote_check_file(host, "/etc/openclash/config")
 
-    # 8. Backup existing config
+    # 9. Backup existing config
     stamp = now_stamp()
     backup_path = f"{backup_dir}/{Path(remote_target).name}.{stamp}.bak"
     try:
@@ -945,12 +1775,9 @@ def sync_pipeline(
         result["backup_path"] = backup_path
     except subprocess.CalledProcessError as exc:
         tmp_path.unlink(missing_ok=True)
-        raise ConfigError(
-            f"Failed to back up remote config: {exc}"
-        ) from exc
+        raise ConfigError(f"Failed to back up remote config: {exc}") from exc
 
     if no_activate:
-        # --no-activate mode: upload → validate → save (no switch, no restart)
         try:
             run(["scp", "-O", str(tmp_path), f"{host}:{quote_remote(remote_temp)}"])
             ssh_command(
@@ -973,14 +1800,14 @@ def sync_pipeline(
         tmp_path.unlink(missing_ok=True)
         return result
 
-    # 9. Full sync: upload
+    # 10. Full sync: upload
     try:
         run(["scp", "-O", str(tmp_path), f"{host}:{quote_remote(remote_temp)}"])
     except subprocess.CalledProcessError as exc:
         tmp_path.unlink(missing_ok=True)
         raise ConfigError(f"SCP upload failed: {exc}") from exc
 
-    # 10. Remote core validation
+    # 11. Remote core validation
     try:
         ssh_command(
             host,
@@ -995,7 +1822,7 @@ def sync_pipeline(
         tmp_path.unlink(missing_ok=True)
         raise ConfigError("Remote Mihomo validation failed; the active configuration was not changed.") from exc
 
-    # 11. Atomic replace
+    # 12. Atomic replace
     try:
         ssh_command(
             host,
@@ -1009,22 +1836,19 @@ def sync_pipeline(
         tmp_path.unlink(missing_ok=True)
         raise ConfigError(f"Atomic replace failed: {exc}") from exc
 
-    # 12. Restart OpenClash
+    # 13. Restart OpenClash
     if activate:
         try:
             ssh_command(host, "/etc/init.d/openclash restart", capture=True)
             result["restarted"] = True
         except subprocess.CalledProcessError as exc:
-            # Restart itself failed — rollback
             _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
             tmp_path.unlink(missing_ok=True)
             raise ConfigError(f"OpenClash restart failed: {exc}") from exc
 
-        # 13. Health check
         health = run_health_checks(host, health_wait)
 
         if not health.get("core_process"):
-            # Core not running — rollback
             _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
             tmp_path.unlink(missing_ok=True)
             raise ConfigError("Health check failed: core process not running after restart. Rollback applied.")
@@ -1047,9 +1871,7 @@ def _rollback_and_report(
     health_wait: int,
     result: dict[str, Any],
 ) -> None:
-    """Restore the backup config and restart OpenClash."""
     try:
-        # Check if backup exists
         exists = remote_file_exists(host, backup_path)
         if exists:
             ssh_command(
@@ -1062,7 +1884,6 @@ def _rollback_and_report(
             result["rolled_back"] = True
             result["final_running_config"] = remote_target
 
-            # Brief health re-check after rollback
             import time
             time.sleep(health_wait)
             rb_health = run_health_checks(host, health_wait)
@@ -1088,6 +1909,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # --- existing commands ---
     export_p = sub.add_parser("export", help="Copy the current Clash Verge effective YAML to a work directory.")
     export_p.add_argument("--source", type=Path)
     export_p.add_argument("--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work")
@@ -1112,6 +1934,19 @@ def build_parser() -> argparse.ArgumentParser:
     dry_run_p.add_argument("--input", type=Path, required=True)
     add_transform_args(dry_run_p)
 
+    # --- new: probe command ---
+    probe_p = sub.add_parser("probe", help=(
+        "Read the Clash Verge config, start a temporary Mihomo instance, "
+        "and test every static node for GPT, Gemini, and Disney+ reachability. "
+        "Does NOT generate, upload, or replace any configuration."
+    ))
+    probe_p.add_argument("--source", type=Path, help="Override the Clash Verge effective YAML path.")
+    probe_p.add_argument("--probe-core", type=str, help="Path to the Mihomo/clash-meta binary for probing.")
+    probe_p.add_argument("--base-url", default=FALLBACK_URL)
+    probe_p.add_argument("--gpt-url", default=GPT_PROBE_URL)
+    probe_p.add_argument("--gemini-url", default=GEMINI_PROBE_URL)
+    probe_p.add_argument("--disney-url", default=DISNEY_PROBE_URL)
+
     sync_p = sub.add_parser(
         "sync",
         help=(
@@ -1133,6 +1968,14 @@ def build_parser() -> argparse.ArgumentParser:
     sync_p.add_argument(
         "--config-out", type=Path,
         help="Also write the transformed config to a local path for inspection.",
+    )
+    sync_p.add_argument(
+        "--probe", action="store_true",
+        help="Probe every static node for GPT/Gemini/Disney reachability before generating the config.",
+    )
+    sync_p.add_argument(
+        "--probe-core", type=str,
+        help="Path to the Mihomo/clash-meta binary for probing (default: auto-detect).",
     )
 
     return parser
@@ -1201,11 +2044,18 @@ def print_summary(data: dict[str, Any], output: Path, args: argparse.Namespace) 
 
 
 def print_sync_report(result: dict[str, Any]) -> None:
-    """Print the sync result as deterministic key=value lines (no secrets)."""
     for key in (
         "input_path",
         "input_mtime",
         "static_nodes",
+        "probed",
+        "probe_total_nodes",
+        "probe_gpt_pass",
+        "probe_gemini_pass",
+        "probe_disney_pass",
+        "probe_duration_seconds",
+        "probe_core",
+        "probe_core_cleaned_up",
         "gpt_candidates",
         "gemini_candidates",
         "disney_candidates",
@@ -1228,27 +2078,33 @@ def print_sync_report(result: dict[str, Any]) -> None:
             print(f"{key}={val}")
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
     try:
+        # --- sync ---
         if args.command == "sync":
             result = sync_pipeline(
                 config_path=args.config,
                 source_path=args.source,
                 no_activate=args.no_activate,
                 config_out=args.config_out,
+                probe=args.probe,
+                probe_core=args.probe_core,
             )
 
-            # Also write local copy if requested
             if args.config_out and result.get("config_sha256"):
                 if result.get("no_change"):
-                    print(f"local_output=skipped (no change)")
+                    print("local_output=skipped (no change)")
                 else:
                     tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".yaml", prefix="oclash-sync-out-")
                     os.close(tmp_fd)
-                    tmp_p = Path(tmp_path_str)
                     data = load_yaml(Path(result["input_path"]))
                     media_keywords = ["流媒体", "媒体流"]
                     transformed = transform(
@@ -1278,6 +2134,35 @@ def main() -> int:
 
             return 0
 
+        # --- probe ---
+        if args.command == "probe":
+            source = args.source or find_default_source()
+            if not source.is_file():
+                raise ConfigError(f"Source file not found: {source}")
+            data = load_yaml(source)
+            proxies_list = data.get("proxies", [])
+            if not isinstance(proxies_list, list) or not proxies_list:
+                raise ConfigError("No static nodes in the source configuration.")
+
+            import time as _time
+            start_time = _time.monotonic()
+            all_results = run_probe_pipeline(
+                proxies_list,
+                core_path=args.probe_core,
+                base_url=args.base_url,
+                gpt_url=args.gpt_url,
+                gemini_url=args.gemini_url,
+                disney_url=args.disney_url,
+            )
+            duration = _time.monotonic() - start_time
+
+            resolved_core = find_mihomo_core(args.probe_core)
+            print_probe_report(all_results, duration, resolved_core)
+            print("router_contacted=false")
+            print("push_performed=false")
+            return 0
+
+        # --- existing commands ---
         if args.command == "export":
             exported = export_source(args.source, args.workdir.expanduser())
             print(f"exported={exported}")
@@ -1304,7 +2189,6 @@ def main() -> int:
                 interval=args.interval,
                 tolerance=args.tolerance,
             )
-            # Suppress output: dry-run never writes or deploys.
             node_names = static_node_names(data)
             media_count = sum(
                 1
@@ -1356,8 +2240,7 @@ def main() -> int:
 
     except ConfigError as exc:
         msg = str(exc)
-        if msg.startswith("BLOCKED_SSH_KEY_REQUIRED"):
-            # Print the BLOCKED message to stderr for the caller to detect
+        if msg.startswith("BLOCKED_"):
             print(msg, file=sys.stderr)
         else:
             print(f"ERROR: {exc}", file=sys.stderr)
