@@ -100,7 +100,7 @@ RESEARCH_STAGES: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         "L2_5_codex_evidence_organizer",
-        "Hermes-Codex handoff",
+        "Codex executor",
         "Codex",
         (
             "source_candidates.json",
@@ -457,8 +457,8 @@ def _validate_production_freshness(
         return errors
 
     l2_5 = by_name.get("L2_5_codex_evidence_organizer")
-    if l2_5 and str(l2_5.get("status") or "").lower() == "handoff-smoke":
-        errors.append("production_freshness:L2_5_codex_evidence_organizer:handoff_smoke_not_allowed")
+    if l2_5 and str(l2_5.get("status") or "").lower() in {"handoff-smoke", "codex-executor-smoke"}:
+        errors.append("production_freshness:L2_5_codex_evidence_organizer:codex_executor_smoke_not_allowed")
 
     l5 = by_name.get("L5_deepseek_acceptance")
     if not l5:

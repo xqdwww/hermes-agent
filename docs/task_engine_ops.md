@@ -236,7 +236,7 @@ The default backend list should prefer:
 
 ## Codex Handoff Protocol
 
-`L2_5_codex_evidence_organizer` must use the file-based Hermes-Codex handoff protocol. It must not be replaced by `delegate_task` or an in-memory summary.
+`L2_5_codex_evidence_organizer` must use Codex as the executor. Prefer direct terminal `codex exec`; the file-based Hermes-Codex handoff protocol is legacy compatibility for runners that still require request/status artifacts. Do not replace this stage with `delegate_task` or an in-memory summary.
 
 Required inputs:
 
@@ -329,7 +329,7 @@ Do not leak pseudo-tool plans or raw strings such as `web_search`, `api_call`, o
 
 - Do not fall back to CCPA or an unauthorized Gemini alias.
 - Do not use `web_search` or generic search instead of DDGS.
-- Do not use `delegate_task` instead of the Codex handoff protocol.
+- Do not use `delegate_task` instead of the Codex executor stage.
 - Do not relax the validator to make a run pass.
 - Do not let Flash or the default Controller directly answer explicit `RESEARCH`, `DECISION`, or `RESEARCH_DECISION` tasks.
 - Do not mark blocked as complete.
