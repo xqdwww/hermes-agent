@@ -1,6 +1,6 @@
 ---
 name: clashverge-openclash-static
-summary: Convert Clash Verge's effective Mihomo configuration into the user's accepted simple static OpenClash profile and deploy it safely.
+summary: Probe imported Clash Verge nodes, merge calibrated last-known-good service candidates, generate the accepted simple static OpenClash profile, and deploy it safely.
 ---
 
 # Clash Verge → OpenClash Static Configuration
@@ -49,8 +49,11 @@ Rules:
 - Global/GPT/Disney ordering is Japan → Taiwan → other nodes.
 - Gemini ordering is Japan → Taiwan → Hong Kong → Germany → other nodes.
 - Remove the placeholder node named `使用前先更新订阅`.
-- GPT uses the previously working candidate set intersected with the current subscription. Do not run or trust the old GPT service probe.
-- Gemini and Disney use the accepted candidate sets intersected with the current subscription.
+- The historical GPT/Gemini/Disney candidate sets seed last-known-good state on the first run. Do not restore the old binary GPT probe.
+- New imports use one temporary loopback Mihomo instance, serial selector switching with controller read-back, multi-signal service probes, exact manual calibration, and LKG merging.
+- `PASS` and manual PASS enter automatic and manual groups. Existing LKG survives challenge, auth uncertainty, unknown, and a single transport failure. Explicit region failure or manual FAIL removes it.
+- New UNKNOWN nodes may appear only at the tail of the corresponding manual group; they never enter the automatic group.
+- If a service has no LKG nodes, stop with `BLOCKED_NO_LKG_<SERVICE>_NODES`; never delete its group or rules and never silently route it through the default group.
 - Preserve ordinary source rules, rename the old target `顺畅网络` to `默认代理`, regenerate narrow GPT/Gemini/Disney rules, and finish with exactly `MATCH,默认代理`.
 - Remove Clash Verge-only controller/listener/profile fields, temporary probe/controller fields, and `/tmp/verge` paths if present. Preserve a general top-level `tun` section because it may carry user network semantics.
 - Validate group references, rule targets, cycles, duplicate names, and the final MATCH before writing or deploying.
@@ -67,6 +70,8 @@ python3 scripts/clashverge_to_openclash.py all \
   --activate
 ```
 
+Before generation, `all` probes current static nodes locally and updates the private LKG state. Deployment still uses the existing validated backup/health/rollback path.
+
 ### “更新 OpenClash 节点，但不要启用”
 
 Export, transform, upload, and remotely validate, but do not switch the active profile or restart:
@@ -74,6 +79,22 @@ Export, transform, upload, and remotely validate, but do not switch the active p
 ```bash
 python3 scripts/clashverge_to_openclash.py all \
   --deploy
+```
+
+This still performs the local probe and LKG merge, but remote activation and restart remain disabled.
+
+### “测试 OpenClash 节点”
+
+Probe and refresh the diagnostic report without generating or deploying and without changing LKG:
+
+```bash
+python3 scripts/clashverge_to_openclash.py probe
+```
+
+Only an explicit request may update LKG in probe-only mode:
+
+```bash
+python3 scripts/clashverge_to_openclash.py probe --update-lkg
 ```
 
 ### Local generation only
@@ -106,6 +127,21 @@ The audit output:
 - may be used for manual review.
 
 Report only paths and counts. Never print the YAML body or connection secrets.
+
+## Dynamic service-probe contract
+
+- Private state: `~/.hermes/state/clashverge-openclash-static/service-probe-lkg.json`, schema version 1, atomically written with mode 0600.
+- Diagnostic report: `/tmp/openclash-service-probe-results.json`, atomically written with mode 0600.
+- State and report contain node names, polymorphic service results, timestamps, LKG decisions, and redacted egress signatures only. They never contain node connection parameters or a full egress IP.
+- The first state is seeded from the three service groups produced by the current baseline transform; no second hard-coded seed list exists.
+- Selector PUT must be followed by controller GET and exact full-name confirmation. Unconfirmed selection is `NODE_SWITCH_UNCONFIRMED`, not service failure.
+- Run the temporary core in `rule` mode with an independent `PROBE` selector and final `MATCH,PROBE`; bind it to active `en0`, or a verified active physical default interface when `en0` is unavailable. Reject loopback, `utun`, and virtual interfaces with `BLOCKED_NO_PHYSICAL_INTERFACE`.
+- Validate the temporary YAML with the selected Mihomo core before startup. After startup, confirm runtime mode and final rule through the controller and read `GLOBAL`; `GLOBAL.now=DIRECT` is harmless in rule mode because requests explicitly use the temporary mixed proxy and `MATCH` targets `PROBE`.
+- Requests are serial per node, use a fresh curl process, connect timeout 3 seconds, total timeout 8 seconds, at most two attempts, and a 15-minute round deadline. The selector wait is 0.75 seconds.
+- GPT 403 challenge evidence is `CHALLENGE_UNKNOWN`, never `FAIL_REGION` without explicit region text.
+- Manual calibration matches only an exact raw node name or the exact name after removing a leading flag and spaces.
+- Egress persistence is limited to country, ASN, and a run-keyed HMAC prefix. Mark `PROBABLE_TUN_OR_UPSTREAM_RECAPTURE` only when at least three `BASE_PASS` nodes span at least two declared regions and every eligible node has the same complete signature. Transport failures do not participate; a guarded run cannot change LKG or service groups.
+- Temporary YAML, response bodies, headers, logs, and Mihomo are cleaned in `finally`. The probe never changes Clash Verge, TUN, system proxy, OpenClash, or router state.
 
 ## Deployment contract
 

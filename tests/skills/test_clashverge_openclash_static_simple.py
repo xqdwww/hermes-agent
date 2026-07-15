@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import stat
 import subprocess
 from copy import deepcopy
 from pathlib import Path
@@ -320,3 +322,546 @@ def test_deploy_blocks_before_upload_when_active_path_read_fails(tmp_path, monke
             activate=True,
         )
     assert uploads == []
+
+
+def http_evidence(
+    status: int | None,
+    *,
+    body: str = "",
+    host: str = "example.com",
+    curl_code: int = 0,
+) -> dict[str, object]:
+    return {
+        "curl_code": curl_code,
+        "http_status": status,
+        "final_host": host,
+        "content_type": "text/html",
+        "time_connect": 0.1 if curl_code == 0 else 0.0,
+        "body_excerpt": body,
+    }
+
+
+def service_result(
+    raw: str,
+    *,
+    final: str | None = None,
+    override: str | None = None,
+) -> dict[str, object]:
+    return {
+        "raw_result": raw,
+        "override": override,
+        "final_result": final or override or raw,
+        "evidence": {},
+    }
+
+
+def probe_node(
+    name: str,
+    *,
+    gpt: dict[str, object] | None = None,
+    gemini: dict[str, object] | None = None,
+    disney: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "selector_confirmed": True,
+        "base_result": "BASE_PASS",
+        "services": {
+            "gpt": gpt or service_result("UNKNOWN"),
+            "gemini": gemini or service_result("UNKNOWN"),
+            "disney": disney or service_result("UNKNOWN"),
+        },
+    }
+
+
+def lkg_entry() -> dict[str, object]:
+    return {
+        "last_raw_result": "PASS",
+        "last_final_result": "PASS",
+        "last_confirmed_pass_at": "2026-07-15T00:00:00+08:00",
+        "source": "legacy_seed",
+        "lkg": True,
+    }
+
+
+def test_v2_challenge_and_exact_manual_overrides() -> None:
+    challenge = MODULE.classify_service_evidence(
+        "gpt",
+        http_evidence(403, body="Cloudflare cf-chl verify you are human", host="chatgpt.com"),
+        http_evidence(404, host="cdn.oaistatic.com"),
+    )
+    assert challenge == "CHALLENGE_UNKNOWN"
+    assert MODULE.apply_manual_override("gpt", "🇯🇵日本aws高速02", challenge) == {
+        "raw_result": "CHALLENGE_UNKNOWN",
+        "override": "MANUAL_OVERRIDE_PASS",
+        "final_result": "MANUAL_OVERRIDE_PASS",
+    }
+
+    assert MODULE.manual_override_for("gemini", "🇺🇸美国-住宅") == "MANUAL_OVERRIDE_FAIL"
+    assert MODULE.manual_override_for("gemini", "美国迈阿密-hy2") == "MANUAL_OVERRIDE_PASS"
+    assert MODULE.manual_override_for("gemini", "🇺🇸美国拉斯维加斯-hy2") == "MANUAL_OVERRIDE_PASS"
+    assert MODULE.manual_override_for("gemini", "🇺🇸美国-住宅-备用") is None
+    assert MODULE.classify_service_evidence(
+        "disney", http_evidence(401), http_evidence(404)
+    ) == "AUTH_UNKNOWN"
+
+
+def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
+    anchor = "🇯🇵锚点"
+    existing_unknown = "🇨🇳台湾旧LKG"
+    transport_lkg = "🇸🇬传输失败旧LKG"
+    region_fail = "🇺🇸地区失败旧LKG"
+    manual_fail = "🇺🇸美国-住宅"
+    new_pass = "🇩🇪新PASS"
+    new_unknown = "🇰🇷新UNKNOWN"
+    absent_old = "🇬🇧已下线旧节点"
+    names = [
+        anchor,
+        existing_unknown,
+        transport_lkg,
+        region_fail,
+        manual_fail,
+        new_pass,
+        new_unknown,
+    ]
+    state = {
+        "schema_version": 1,
+        "updated_at": "old",
+        "nodes": {
+            anchor: {service: lkg_entry() for service in MODULE.SERVICE_KEYS},
+            existing_unknown: {"gpt": lkg_entry()},
+            transport_lkg: {"gpt": lkg_entry()},
+            region_fail: {"gpt": lkg_entry()},
+            manual_fail: {"gemini": lkg_entry()},
+            absent_old: {"gpt": lkg_entry()},
+        },
+    }
+    nodes = [
+        probe_node(
+            anchor,
+            gpt=service_result("PASS"),
+            gemini=service_result("PASS"),
+            disney=service_result("PASS"),
+        ),
+        probe_node(existing_unknown, gpt=service_result("UNKNOWN")),
+        probe_node(transport_lkg, gpt=service_result("FAIL_TRANSPORT")),
+        probe_node(region_fail, gpt=service_result("FAIL_REGION")),
+        probe_node(
+            manual_fail,
+            gemini=service_result(
+                "PASS", final="MANUAL_OVERRIDE_FAIL", override="MANUAL_OVERRIDE_FAIL"
+            ),
+        ),
+        probe_node(new_pass, gpt=service_result("PASS")),
+        probe_node(new_unknown, gpt=service_result("UNKNOWN")),
+    ]
+    selections, new_state, enriched = MODULE.merge_lkg_results(
+        names,
+        {name: index for index, name in enumerate(names)},
+        state,
+        nodes,
+        probable_recapture=False,
+        observed_at="2026-07-15T12:00:00+08:00",
+    )
+
+    assert existing_unknown in selections["gpt"]["automatic"]
+    assert transport_lkg in selections["gpt"]["automatic"]
+    assert new_pass in selections["gpt"]["automatic"]
+    assert region_fail not in selections["gpt"]["automatic"]
+    assert manual_fail not in selections["gemini"]["automatic"]
+    assert new_unknown not in selections["gpt"]["automatic"]
+    assert new_unknown in selections["gpt"]["manual_candidates"]
+    assert absent_old not in new_state["nodes"]
+    assert all(absent_old not in group["automatic"] for group in selections.values())
+    new_unknown_result = next(item for item in enriched if item["name"] == new_unknown)
+    assert new_unknown_result["lkg_merge"]["gpt"] == "NEW_NODE_NOT_LKG"
+    generated = MODULE.transform(
+        {"proxies": [proxy(name) for name in names], "rules": []}, selections
+    )
+    generated_groups = {group["name"]: group for group in generated["proxy-groups"]}
+    assert len(generated_groups) == 12
+    assert generated_groups["GPT自动"]["proxies"] == selections["gpt"]["automatic"]
+    assert generated_groups["GPT手动"]["proxies"] == [
+        "GPT自动",
+        *selections["gpt"]["automatic"],
+        *selections["gpt"]["manual_candidates"],
+    ]
+
+
+def test_v2_probable_recapture_does_not_update_lkg() -> None:
+    anchor = "🇯🇵旧LKG"
+    new_node = "🇺🇸新节点"
+    state = {
+        "schema_version": 1,
+        "updated_at": "old",
+        "nodes": {anchor: {service: lkg_entry() for service in MODULE.SERVICE_KEYS}},
+    }
+    signature_nodes = [
+        {
+            "name": anchor,
+            "base_result": "BASE_PASS",
+            "egress_country": "JP",
+            "egress_asn": 64500,
+            "egress_ip_hash": "samehash",
+        },
+        {
+            "name": new_node,
+            "base_result": "BASE_PASS",
+            "egress_country": "JP",
+            "egress_asn": 64500,
+            "egress_ip_hash": "samehash",
+        },
+        {
+            "name": "🇨🇳台湾节点",
+            "base_result": "BASE_PASS",
+            "egress_country": "JP",
+            "egress_asn": 64500,
+            "egress_ip_hash": "samehash",
+        },
+    ]
+    assert MODULE.probable_unified_egress(signature_nodes) is True
+    nodes = [
+        probe_node(
+            anchor,
+            gpt=service_result("FAIL_REGION"),
+            gemini=service_result("FAIL_REGION"),
+            disney=service_result("FAIL_REGION"),
+        ),
+        probe_node(
+            new_node,
+            gpt=service_result("PASS"),
+            gemini=service_result("PASS"),
+            disney=service_result("PASS"),
+        ),
+    ]
+    selections, new_state, _ = MODULE.merge_lkg_results(
+        [anchor, new_node],
+        {anchor: 0, new_node: 1},
+        state,
+        nodes,
+        probable_recapture=True,
+        observed_at="new",
+    )
+    assert new_state == state
+    assert selections["gpt"]["automatic"] == [anchor]
+    assert new_node not in selections["gpt"]["automatic"]
+
+
+def test_v2_state_seed_atomic_write_and_mode(tmp_path) -> None:
+    legacy = {
+        "proxy-groups": [
+            {"name": "GPT自动", "proxies": ["gpt-node"]},
+            {"name": "Gemini自动", "proxies": ["gemini-node"]},
+            {"name": "迪士尼自动", "proxies": ["disney-node"]},
+        ]
+    }
+    state = MODULE.seed_lkg_state(legacy, updated_at="seed-time")
+    assert state["nodes"]["gpt-node"]["gpt"]["source"] == "legacy_seed"
+    assert state["nodes"]["gemini-node"]["gemini"]["lkg"] is True
+    state_path = tmp_path / "private" / "service-probe-lkg.json"
+    MODULE.atomic_write_json(state, state_path, private_parent=True)
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+    assert json.loads(state_path.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert not list(state_path.parent.glob("*.tmp"))
+
+    for temp_root in {Path("/tmp").resolve(), Path(MODULE.tempfile.gettempdir()).resolve()}:
+        temp_root_state = temp_root / "openclash-v2-test-state.json"
+        original_parent_mode = stat.S_IMODE(temp_root_state.parent.stat().st_mode)
+        try:
+            MODULE.atomic_write_json(state, temp_root_state, private_parent=True)
+            assert stat.S_IMODE(temp_root_state.stat().st_mode) == 0o600
+            assert stat.S_IMODE(temp_root_state.parent.stat().st_mode) == original_parent_mode
+        finally:
+            temp_root_state.unlink(missing_ok=True)
+
+
+def test_v2_empty_service_group_blocks() -> None:
+    name = "🇯🇵only-node"
+    state = {"schema_version": 1, "updated_at": "old", "nodes": {}}
+    with pytest.raises(MODULE.ConfigError, match="BLOCKED_NO_LKG_GPT_NODES"):
+        MODULE.merge_lkg_results(
+            [name],
+            {name: 0},
+            state,
+            [
+                probe_node(
+                    name,
+                    gpt=service_result("FAIL_REGION"),
+                    gemini=service_result("FAIL_REGION"),
+                    disney=service_result("FAIL_REGION"),
+                )
+            ],
+            probable_recapture=False,
+            observed_at="now",
+        )
+
+
+def test_v2_probe_report_rejects_credentials_and_full_ip() -> None:
+    MODULE.validate_probe_report_safe(
+        {"nodes": [{"name": "node", "egress_ip_hash": "0123456789abcdef"}]}
+    )
+    with pytest.raises(MODULE.ConfigError, match="forbidden key"):
+        MODULE.validate_probe_report_safe({"nodes": [{"password": "secret"}]})
+    with pytest.raises(MODULE.ConfigError, match="full egress IP"):
+        MODULE.validate_probe_report_safe({"nodes": [{"egress": "203.0.113.8"}]})
+
+
+def test_v2_fake_selector_and_http_runner() -> None:
+    selected: list[str] = []
+    slept: list[float] = []
+
+    def switch(name: str) -> bool:
+        selected.append(name)
+        return name != "🇺🇸unconfirmed"
+
+    def request(url: str) -> dict[str, object]:
+        if url == "https://speed.cloudflare.com/meta":
+            return {
+                **http_evidence(200, body='{"clientIp":"198.51.100.7","country":"JP","asn":16509}'),
+                "remote_ip": "198.51.100.7",
+            }
+        if url == "https://www.gstatic.com/generate_204":
+            return http_evidence(204, host="www.gstatic.com")
+        if url == "https://chatgpt.com/":
+            return http_evidence(403, body="Cloudflare challenge-platform", host="chatgpt.com")
+        return http_evidence(404, host=urllib_host(url))
+
+    report = MODULE.probe_nodes_with_runner(
+        [proxy("🇯🇵日本aws高速02"), proxy("🇺🇸unconfirmed")],
+        switch_node=switch,
+        request_url=request,
+        sleep_fn=slept.append,
+        monotonic_fn=lambda: 0.0,
+        run_key=b"fixed-test-key",
+    )
+    assert selected == ["🇯🇵日本aws高速02", "🇺🇸unconfirmed"]
+    assert slept == [MODULE.PROBE_SWITCH_WAIT_SECONDS]
+    first, second = report["nodes"]
+    assert first["services"]["gpt"]["raw_result"] == "CHALLENGE_UNKNOWN"
+    assert first["services"]["gpt"]["final_result"] == "MANUAL_OVERRIDE_PASS"
+    assert first["egress_ip_hash"] and first["egress_ip_hash"] != "198.51.100.7"
+    assert second["base_result"] == "NODE_SWITCH_UNCONFIRMED"
+    assert second["services"]["gpt"]["final_result"] == "NODE_SWITCH_UNCONFIRMED"
+    MODULE.validate_probe_report_safe(report)
+
+
+def test_v2_probe_transport_rule_route_and_selector_confirmation() -> None:
+    config = MODULE.build_probe_config(
+        [proxy("node-a"), proxy("node-b")],
+        mixed_port=12345,
+        controller_port=23456,
+        interface_name="en0",
+    )
+    assert config["mode"] == "rule"
+    assert config["interface-name"] == "en0"
+    assert config["rules"] == ["MATCH,PROBE"]
+    assert config["proxy-groups"] == [
+        {"name": "PROBE", "type": "select", "proxies": ["node-a", "node-b"]}
+    ]
+
+    calls: list[tuple[str, str]] = []
+
+    def runtime_request(_port: int, path: str, **_kwargs):
+        calls.append(("runtime", path))
+        if path == "/configs":
+            return {"mode": "rule"}
+        if path == "/rules":
+            return {"rules": [{"type": "Match", "proxy": "PROBE"}]}
+        if path == "/proxies/GLOBAL":
+            return {"now": "DIRECT"}
+        raise AssertionError(path)
+
+    assert MODULE.validate_probe_runtime(23456, request=runtime_request) == "DIRECT"
+    assert ("runtime", "/proxies/GLOBAL") in calls
+
+    def mismatched_selector(_port: int, _path: str, **kwargs):
+        return {} if kwargs.get("method") == "PUT" else {"now": "node-b"}
+
+    assert (
+        MODULE.select_probe_node(23456, "node-a", request=mismatched_selector) is False
+    )
+
+
+def test_v2_recapture_ignores_transport_failure_and_distinct_egress() -> None:
+    nodes = [
+        {
+            "name": "🇯🇵日本节点",
+            "base_result": "BASE_PASS",
+            "egress_country": "JP",
+            "egress_asn": 16509,
+            "egress_ip_hash": "japan-hash",
+        },
+        {
+            "name": "🇨🇳台湾节点",
+            "base_result": "BASE_PASS",
+            "egress_country": "TW",
+            "egress_asn": 3462,
+            "egress_ip_hash": "taiwan-hash",
+        },
+        {
+            "name": "🇺🇸失败节点",
+            "base_result": "HTTP_TIMEOUT",
+            "egress_country": None,
+            "egress_asn": None,
+            "egress_ip_hash": None,
+        },
+    ]
+    assert MODULE.probable_unified_egress(nodes) is False
+
+
+def test_v2_missing_physical_interface_blocks() -> None:
+    def runner(args, **_kwargs):
+        if args[-1] == "en0":
+            return subprocess.CompletedProcess(args, 1, "", "")
+        if "route" in args[0]:
+            return subprocess.CompletedProcess(args, 0, "  interface: utun8\n", "")
+        raise AssertionError(args)
+
+    with pytest.raises(MODULE.ConfigError, match="BLOCKED_NO_PHYSICAL_INTERFACE"):
+        MODULE.find_probe_interface(runner=runner)
+
+
+def test_v2_temporary_probe_cleanup_on_runtime_validation_failure(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeProcess:
+        def __init__(self):
+            self.running = True
+            self.terminated = False
+
+        def poll(self):
+            return None if self.running else 0
+
+        def terminate(self):
+            self.terminated = True
+            self.running = False
+
+        def wait(self, timeout=None):
+            return 0
+
+    process = FakeProcess()
+    started_config: list[Path] = []
+    validation_commands: list[list[str]] = []
+    ports = iter((12345, 23456))
+    core = tmp_path / "mihomo"
+
+    def fake_validation(args, **_kwargs):
+        validation_commands.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    def fake_popen(args, **_kwargs):
+        started_config.append(Path(args[-1]))
+        return process
+
+    monkeypatch.setattr(MODULE, "find_probe_core", lambda _path=None: core)
+    monkeypatch.setattr(MODULE, "find_probe_interface", lambda: "en0")
+    monkeypatch.setattr(MODULE, "reserve_loopback_port", lambda: next(ports))
+    monkeypatch.setattr(MODULE.subprocess, "run", fake_validation)
+    monkeypatch.setattr(MODULE.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(MODULE, "wait_for_controller", lambda *_args: None)
+    monkeypatch.setattr(
+        MODULE,
+        "validate_probe_runtime",
+        lambda *_args: (_ for _ in ()).throw(MODULE.ConfigError("route failed")),
+    )
+
+    with pytest.raises(MODULE.ConfigError, match="route failed"):
+        MODULE.run_local_service_probe(
+            {"proxies": [proxy("node-a")]}, core_path=str(core)
+        )
+    assert validation_commands and "-t" in validation_commands[0]
+    assert process.terminated is True
+    assert started_config and not started_config[0].exists()
+
+
+def test_v2_egress_metadata_falls_back_after_primary_403() -> None:
+    requested: list[str] = []
+
+    def request(url: str) -> dict[str, object]:
+        requested.append(url)
+        if url == "https://speed.cloudflare.com/meta":
+            return http_evidence(403, body="forbidden")
+        if url == "https://ipwho.is/":
+            return http_evidence(
+                200,
+                body=(
+                    '{"ip":"198.51.100.8","country_code":"JP",'
+                    '"connection":{"asn":16509}}'
+                ),
+            )
+        if url == "https://www.gstatic.com/generate_204":
+            return http_evidence(204, host="www.gstatic.com")
+        return http_evidence(200, host=urllib_host(url))
+
+    report = MODULE.probe_nodes_with_runner(
+        [proxy("fallback-node")],
+        switch_node=lambda _name: True,
+        request_url=request,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: 0.0,
+        run_key=b"fixed-test-key",
+    )
+    node = report["nodes"][0]
+    assert requested[:2] == [
+        "https://speed.cloudflare.com/meta",
+        "https://ipwho.is/",
+    ]
+    assert "https://ipapi.co/json/" not in requested
+    assert node["base_result"] == "BASE_PASS"
+    assert node["egress_country"] == "JP"
+    assert node["egress_asn"] == 16509
+    assert node["egress_ip_hash"] != "198.51.100.8"
+    MODULE.validate_probe_report_safe(report)
+
+
+def test_v2_dynamic_pipeline_writes_report_and_lkg_state(tmp_path) -> None:
+    names = MODULE.ordered_unique(
+        [*MODULE.GPT_CANDIDATES, *MODULE.GEMINI_CANDIDATES, *MODULE.DISNEY_CANDIDATES]
+    )
+    data = {"proxies": [proxy(name) for name in names], "rules": []}
+    report_path = tmp_path / "probe-results.json"
+    state_path = tmp_path / "state" / "service-probe-lkg.json"
+
+    def fake_probe(source, *, core_path=None):
+        return {
+            "schema_version": 1,
+            "probe_version": "test",
+            "run_id": "testrun",
+            "run_timestamp": "2026-07-15T12:00:00+08:00",
+            "stopped_due_deadline": False,
+            "probable_tun_or_upstream_recapture": False,
+            "nodes": [
+                probe_node(
+                    "🇯🇵日本aws高速02",
+                    gpt=service_result(
+                        "CHALLENGE_UNKNOWN",
+                        final="MANUAL_OVERRIDE_PASS",
+                        override="MANUAL_OVERRIDE_PASS",
+                    ),
+                    gemini=service_result("PASS"),
+                    disney=service_result("PASS"),
+                )
+            ],
+        }
+
+    selections, written = MODULE.dynamic_probe_and_select(
+        data,
+        state_path=state_path,
+        report_path=report_path,
+        core_path=None,
+        update_lkg=True,
+        probe_runner=fake_probe,
+    )
+    assert written == json.loads(report_path.read_text(encoding="utf-8"))
+    assert written["lkg_seed_source"] == "legacy_seed"
+    assert written["lkg_state_updated"] is True
+    assert "🇯🇵日本aws高速02" in selections["gpt"]["automatic"]
+    assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+    saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved_state["nodes"]["🇯🇵日本aws高速02"]["gpt"]["source"] == "manual_override"
+
+
+def urllib_host(url: str) -> str:
+    return url.split("/", 3)[2]
