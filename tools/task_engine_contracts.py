@@ -93,7 +93,7 @@ RESEARCH_STAGES: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         "L2_5_codex_evidence_organizer",
-        "Hermes-Codex handoff",
+        "Codex executor",
         "Codex",
         (
             "source_candidates.json",

@@ -98,7 +98,7 @@ class TaskEngineExecutor(Protocol):
     def run_ddgs(self, stage: StageSpec, queries: list[str]) -> list[dict[str, str]]:
         ...
 
-    def run_codex_handoff(self, stage: StageSpec, inputs: dict[str, Any]) -> Any:
+    def run_codex_executor(self, stage: StageSpec, inputs: dict[str, Any]) -> Any:
         ...
 
     def run_omlx_model(self, stage: StageSpec, model: str, prompt: str) -> str:
@@ -640,12 +640,16 @@ class LocalTaskEngineExecutor:
             )
         return hits
 
-    def run_codex_handoff(self, stage: StageSpec, inputs: dict[str, Any]) -> str:
+    def run_codex_executor(self, stage: StageSpec, inputs: dict[str, Any]) -> str:
         required = ("source_candidates.json", "ddgs_gap_sources.json")
         missing = [name for name in required if not inputs.get(name)]
         if missing:
-            raise RuntimeError(f"{stage.stage_name}: missing handoff inputs: {', '.join(missing)}")
+            raise RuntimeError(f"{stage.stage_name}: missing Codex executor inputs: {', '.join(missing)}")
         return build_l2_5_evidence_organizer_outputs(inputs)
+
+    def run_codex_handoff(self, stage: StageSpec, inputs: dict[str, Any]) -> str:
+        """Backward-compatible alias for older smoke tests and callers."""
+        return self.run_codex_executor(stage, inputs)
 
     def run_omlx_model(self, stage: StageSpec, model: str, prompt: str) -> str:
         started = time.time()
@@ -1148,14 +1152,14 @@ def run_research_l1_l2_smoke(
     }
 
 
-def run_research_l2_5_codex_handoff_smoke(
+def run_research_l2_5_codex_executor_smoke(
     prior_run: dict[str, Any],
     *,
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
     query: str = "",
 ) -> dict[str, Any]:
-    """Smoke the L2.5 handoff file protocol after real L1/L2 records exist."""
+    """Smoke the L2.5 Codex executor after real L1/L2 records exist."""
     executor = executor or LocalTaskEngineExecutor()
     stages = list(prior_run.get("stages", []))
     by_name = {stage.get("stage_name"): stage for stage in stages if isinstance(stage, dict)}
@@ -1166,14 +1170,14 @@ def run_research_l2_5_codex_handoff_smoke(
             "status": "blocked",
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": "L2_5_codex_evidence_organizer",
-            "message": "Codex handoff smoke requires completed L1 and L2 records.",
+            "message": "Codex executor smoke requires completed L1 and L2 records.",
         }
     if l1.get("valid_for_pipeline") is not True or l2.get("valid_for_pipeline") is not True:
         return {
             "status": "blocked",
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": "L2_5_codex_evidence_organizer",
-            "message": "Codex handoff smoke requires L1/L2 valid_for_pipeline=true.",
+            "message": "Codex executor smoke requires L1/L2 valid_for_pipeline=true.",
         }
 
     stage = CANONICAL_STAGES[ENGINE_RESEARCH][2]
@@ -1183,7 +1187,7 @@ def run_research_l2_5_codex_handoff_smoke(
         "original_question": query,
     }
     try:
-        content = executor.run_codex_handoff(stage, inputs)
+        content = executor.run_codex_executor(stage, inputs)
         artifact_path, outputs = executor.write_artifact(stage, content, base_dir=base_dir)
         record = executor.make_stage_record(
             stage,
@@ -1192,7 +1196,7 @@ def run_research_l2_5_codex_handoff_smoke(
             outputs=outputs,
             created=True,
             valid=True,
-            status="handoff-smoke",
+            status="codex-executor-smoke",
             executor_model=stage.model,
         )
         stages.append(record.__dict__)
@@ -1203,7 +1207,7 @@ def run_research_l2_5_codex_handoff_smoke(
             "pipeline_status": PIPELINE_INCOMPLETE,
             "full_pipeline_validation": validation,
             "run": run,
-            "message": "L2.5 Codex handoff file protocol smoke completed. Full RESEARCH pipeline remains incomplete by design.",
+            "message": "L2.5 Codex executor smoke completed. Legacy request files are retained as compatibility artifacts. Full RESEARCH pipeline remains incomplete by design.",
         }
     except Exception as exc:
         outputs = planned_outputs(stage, base_dir)
@@ -1225,8 +1229,24 @@ def run_research_l2_5_codex_handoff_smoke(
             "pipeline_status": PIPELINE_BLOCKED,
             "blocked_stage": stage.stage_name,
             "run": {"mode": ENGINE_RESEARCH, "execution_mode": "real-smoke-l1-l2-plus-l2_5", "stages": stages},
-            "message": "Codex handoff smoke stopped fail-closed.",
+            "message": "Codex executor smoke stopped fail-closed.",
         }
+
+
+def run_research_l2_5_codex_handoff_smoke(
+    prior_run: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    executor: TaskEngineExecutor | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Backward-compatible alias for the renamed Codex executor smoke."""
+    return run_research_l2_5_codex_executor_smoke(
+        prior_run,
+        base_dir=base_dir,
+        executor=executor,
+        query=query,
+    )
 
 
 def run_research_l3_synthesis_smoke(
@@ -1296,12 +1316,12 @@ def run_research_l1_l3_smoke(
     base_dir: str | Path,
     executor: TaskEngineExecutor | None = None,
 ) -> dict[str, Any]:
-    """Run real L1/L2, L2.5 handoff, then real L3 R1 synthesis and stop."""
+    """Run real L1/L2, L2.5 Codex executor, then real L3 R1 synthesis and stop."""
     executor = executor or LocalTaskEngineExecutor()
     l1_l2 = run_research_l1_l2_smoke(query, base_dir=base_dir, executor=executor)
     if l1_l2.get("status") != "ok":
         return l1_l2
-    l2_5 = run_research_l2_5_codex_handoff_smoke(l1_l2["run"], base_dir=base_dir, executor=executor, query=query)
+    l2_5 = run_research_l2_5_codex_executor_smoke(l1_l2["run"], base_dir=base_dir, executor=executor, query=query)
     if l2_5.get("status") != "ok":
         return l2_5
     return run_research_l3_synthesis_smoke(l2_5["run"], base_dir=base_dir, executor=executor, query=query)
@@ -9469,6 +9489,7 @@ __all__ = [
     "run_research_decision_premise_auditor_smoke",
     "run_research_decision_structure_mapper_smoke",
     "run_research_decision_supplementary_search_smoke",
+    "run_research_l2_5_codex_executor_smoke",
     "run_research_l2_5_codex_handoff_smoke",
     "run_research_l1_l2_smoke",
     "run_research_l1_l3_smoke",

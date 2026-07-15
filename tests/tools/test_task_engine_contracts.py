@@ -68,7 +68,7 @@ from tools.task_engine_executors import (
     run_research_decision_premise_auditor_smoke,
     run_research_decision_structure_mapper_smoke,
     run_research_decision_supplementary_search_smoke,
-    run_research_l2_5_codex_handoff_smoke,
+    run_research_l2_5_codex_executor_smoke,
     run_research_l1_l3_smoke,
     run_research_l1_l4_smoke,
     run_research_l1_l5_smoke,
@@ -970,11 +970,14 @@ def test_structure_mapper_canonical_binding_and_output(tmp_path: Path):
     )
     l1 = research["plan"]["stages"][0]
     l2 = research["plan"]["stages"][1]
-    handoff = research["plan"]["stages"][2]
+    codex_stage = research["plan"]["stages"][2]
     l4 = research["plan"]["stages"][4]
     assert l1["owner"] == GEMINI_HIGH
     assert l1["model"] == GEMINI_HIGH
     assert l1["executor_model"] == GEMINI_HIGH
+    assert codex_stage["owner"] == "Codex executor"
+    assert codex_stage["model"] == "Codex"
+    assert codex_stage["executor_model"] == "Codex"
     assert l4["stage_name"] == "L4_gemini_audit"
     assert l4["owner"] == GEMINI_PRO_HIGH
     assert l4["model"] == GEMINI_PRO_HIGH
@@ -984,7 +987,7 @@ def test_structure_mapper_canonical_binding_and_output(tmp_path: Path):
     assert research["plan"]["stages"][5]["artifact_path"].endswith(
         "L5_deepseek_acceptance/research_evidence_packet.md"
     )
-    assert "evidence_runner_001.request.json" in "\n".join(handoff["outputs"].values())
+    assert "evidence_runner_001.request.json" in "\n".join(codex_stage["outputs"].values())
 
     research_decision = json.loads(
         task_engine_runner(
@@ -1055,7 +1058,7 @@ def test_wrong_divergence_model_fails_closed(tmp_path: Path):
     assert any("structure_mapper:r1_forbidden_here" in error for error in validation["errors"])
 
 
-def test_codex_handoff_requires_request_json_and_outputs(tmp_path: Path):
+def test_codex_executor_keeps_legacy_request_json_outputs(tmp_path: Path):
     run = _make_run(tmp_path, ENGINE_RESEARCH)
     request_json = tmp_path / "L2_5_codex_evidence_organizer" / "evidence_runner_001.request.json"
     request_json.unlink()
@@ -1958,7 +1961,7 @@ def test_run_agy_gemini_empty_sentinel_after_refresh_fails_closed(monkeypatch, t
     assert f"reason={executors.AGY_PRINT_MODE_EMPTY_RESPONSE}" in message
 
 
-def test_l2_5_codex_handoff_smoke_writes_protocol_files(tmp_path: Path):
+def test_l2_5_codex_executor_smoke_writes_compatibility_protocol_files(tmp_path: Path):
     class FakeExecutor(LocalTaskEngineExecutor):
         def run_agy_gemini(self, stage, prompt, model):
             return {"source_candidates": [{"title": "fake"}]}
@@ -1969,7 +1972,7 @@ def test_l2_5_codex_handoff_smoke_writes_protocol_files(tmp_path: Path):
     l1_l2 = run_research_l1_l2_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
     assert l1_l2["status"] == "ok"
 
-    result = run_research_l2_5_codex_handoff_smoke(
+    result = run_research_l2_5_codex_executor_smoke(
         l1_l2["run"],
         base_dir=tmp_path,
         executor=FakeExecutor(),
@@ -1983,6 +1986,9 @@ def test_l2_5_codex_handoff_smoke_writes_protocol_files(tmp_path: Path):
         "L2_ddgs_supplement",
         "L2_5_codex_evidence_organizer",
     ]
+    assert stages[-1]["owner"] == "Codex executor"
+    assert stages[-1]["executor_model"] == "Codex"
+    assert stages[-1]["status"] == "codex-executor-smoke"
     handoff_dir = tmp_path / "L2_5_codex_evidence_organizer"
     for name in (
         "source_candidates.json",
@@ -2053,7 +2059,7 @@ def test_l3_requires_fresh_l1_l2_l2_5_artifacts(tmp_path: Path):
             return "should not run"
 
     l1_l2 = run_research_l1_l2_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
-    l2_5 = run_research_l2_5_codex_handoff_smoke(l1_l2["run"], base_dir=tmp_path, executor=FakeExecutor())
+    l2_5 = run_research_l2_5_codex_executor_smoke(l1_l2["run"], base_dir=tmp_path, executor=FakeExecutor())
     l2_5["run"]["stages"][0]["created_in_current_run"] = False
 
     result = run_research_l3_synthesis_smoke(l2_5["run"], base_dir=tmp_path, executor=FakeExecutor())
@@ -2076,7 +2082,7 @@ def test_l3_rejects_legacy_artifacts(tmp_path: Path):
             return "should not run"
 
     l1_l2 = run_research_l1_l2_smoke(ADHD_PROMPT, base_dir=tmp_path, executor=FakeExecutor())
-    l2_5 = run_research_l2_5_codex_handoff_smoke(l1_l2["run"], base_dir=tmp_path, executor=FakeExecutor())
+    l2_5 = run_research_l2_5_codex_executor_smoke(l1_l2["run"], base_dir=tmp_path, executor=FakeExecutor())
     l2_5["run"]["stages"][1]["legacy_contaminated"] = True
 
     result = run_research_l3_synthesis_smoke(l2_5["run"], base_dir=tmp_path, executor=FakeExecutor())
