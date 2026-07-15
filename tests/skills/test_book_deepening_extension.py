@@ -242,5 +242,184 @@ def test_provided_source_does_not_create_persistent_book_infrastructure():
     assert "create any new vector index" in body
     assert "permanent Book Capsule" in body
     assert "Do not create a disk checkpoint" in body
-    assert "TaskMode" not in source
-    assert "Workflow" not in source
+    assert "never create or modify a Workflow, router, TaskMode" in source
+    assert "formal_workflow_created: false" in source
+
+
+def test_guided_mode_entrypoints_are_discoverable_without_replacing_mode_a():
+    _, body, _ = load_skill()
+    description = CATEGORY_DESCRIPTION_PATH.read_text(encoding="utf-8")
+    for entrypoint in (
+        "进入引导式读书模式《书名》",
+        "用引导模式聊《书名》",
+        "开始连续聊《书名》",
+    ):
+        assert entrypoint in body
+        assert entrypoint in description
+    assert "Route Manual Mode A Entrypoints" in body
+    assert "manual Mode A entrypoints" in body
+    assert "must never activate\nGuided Mode B" in body
+
+
+def test_guided_mode_is_explicitly_not_a_formal_workflow_or_dag():
+    _, body, _ = load_skill()
+    assert "`guided_mode_b`" in body
+    assert "`引导式读书模式 B`" in body
+    assert "不是 Hermes 持久化 Workflow 或 DAG" in body
+    assert "guided_mode_created: true" in body
+    assert "formal_workflow_created: false" in body
+    assert "never create or modify a Workflow, router, TaskMode" in body
+
+
+def test_guided_state_is_small_and_session_only():
+    _, body, _ = load_skill()
+    for field in (
+        "guided_mode:",
+        "active_book:",
+        "discussion_mode:",
+        "stage:",
+        "focus_question:",
+        "effective_turns:",
+        "retrieval_calls_this_turn:",
+        "connection_used:",
+    ):
+        assert field in body
+    assert "conversation context 的会话引导模式" in body
+    assert "Do not create disk recovery" in body
+
+
+def test_guided_orient_calls_resolve_once_and_does_not_retrieve_excerpts():
+    _, body, _ = load_skill()
+    guided = body.split("## Guided Mode B", 1)[1].split("## Route Manual Mode A", 1)[0]
+    assert "make exactly\none `resolve_book` call" in guided
+    assert "Do not retrieve excerpts, summarize the book, introduce\nthe author, or connect books on this orient turn" in guided
+    assert "stage: orient" in guided
+    assert "effective_turns: 0" in guided
+
+
+def test_guided_resolved_not_found_and_ambiguous_routes_are_bounded():
+    _, body, _ = load_skill()
+    guided = body.split("### Orient And Explain", 1)[1].split("### Probe Short Loop", 1)[0]
+    assert "`resolved`: set the guided active book, `personal_excerpt_discussion`" in guided
+    assert "`not_found`: keep the supplied title with `book_id: null`" in guided
+    assert "`general_discussion` and `stage: orient`" in guided
+    assert "discussion can continue" in guided
+    assert "Do not call `current_book`, browse" in guided
+    assert "`ambiguous`: show at most five candidates" in guided
+    assert "Never choose automatically" in guided
+
+
+def test_guided_user_explains_first_but_is_not_asked_twice():
+    _, body, _ = load_skill()
+    assert "## Active Guided Turn Gate" in body
+    assert "This gate has priority over answering the book question" in body
+    assert "treat `guided_mode.active` as true until a Close response explicitly\nends it" in body
+    assert "先不用追求完整。你用两三句话说说，你目前怎么理解这个问题？" in body
+    assert "reply with exactly this one\nsentence and nothing else" in body
+    assert "A question alone is not the user's explanation" in body
+    assert "<!-- guided_mode_b: active; stage=awaiting_focus_question; user_explanation_received=false -->" in body
+    assert "This marker is session context only. It is not a disk checkpoint" in body
+    assert "the\nActive Guided Turn Gate applies without interpretation" in body
+    assert "Do not answer\nit first; the Active Guided Turn Gate" in body
+    assert "already contains the user's own explanation, do not\nask again" in body
+
+
+def test_guided_exit_uses_the_exact_short_close_contract():
+    _, body, _ = load_skill()
+    gate = body.split("## Active Guided Turn Gate", 1)[1].split("## Hard Turn Contract", 1)[0]
+    for label in (
+        "这轮你已经说清楚了：",
+        "仍然悬而未决的是：",
+        "最值得带走的一个问题：",
+    ):
+        assert label in gate
+    assert "containing these three\nlabels exactly once, in this order" in gate
+    assert "do not ask a new follow-up question" in gate
+
+
+def test_guided_personal_probe_reuses_only_bounded_book_notes_action():
+    frontmatter, body, source = load_skill()
+    guided = body.split("### Probe Short Loop", 1)[1].split("### Connect", 1)[0]
+    for contract in (
+        "action: current_book",
+        "top_k: 3",
+        "candidate_k: 20",
+        "max_per_parent: 1",
+        "excerpt_max_chars: 500",
+        "include_text: true",
+    ):
+        assert contract in guided
+    assert "make at most one call with the existing helper" in guided
+    assert "In `general_discussion`, do not call\n`current_book`" in guided
+    assert "never label it as personal history" in guided
+    assert extract_skill_conditions(frontmatter)["requires_tools"] == ["book_notes_retrieval"]
+    assert "BookNotesRetriever" not in source
+
+
+def test_guided_probe_has_one_gap_one_main_question_and_one_action():
+    _, body, _ = load_skill()
+    guided = body.split("### Probe Short Loop", 1)[1].split("### Connect", 1)[0]
+    assert "identify one main gap, and ask one\nmain follow-up question" in guided
+    assert "at most one secondary question and one\ncounter-lens" in guided
+    assert "choose\nonly one `next_action`" in guided
+    assert "Deepen exactly one of premise, mechanism,\nboundary, counterexample, or application" in guided
+    assert "Do not simulate a multi-agent discussion" in guided
+
+
+def test_guided_connect_requires_probe_and_is_bounded_and_inferred():
+    _, body, _ = load_skill()
+    guided = body.split("### Connect", 1)[1].split("### Close, Pause, And Resume", 1)[0]
+    assert "after at least one\ncompleted Probe" in guided
+    assert "Automatic connection is\nallowed once per guided session" in guided
+    for contract in (
+        "action: other_books",
+        "top_k_books: 3",
+        "candidate_k: 40",
+        "max_chunks_per_book: 1",
+        "max_chunks_per_parent: 1",
+        "relationship_intent: null",
+        "excerpt_max_chars: 500",
+    ):
+        assert contract in guided
+    assert "Select at most three books and one chunk per book" in guided
+    assert "relationship with `[INFERENCE]`" in guided
+
+
+def test_guided_turn_caps_early_exit_and_close_are_nonpersistent():
+    _, body, _ = load_skill()
+    guided = body.split("### Close, Pause, And Resume", 1)[1].split("The guided retrieval budget", 1)[0]
+    assert "soft turn target is 4 and hard turn cap is 6" in guided
+    for exit_phrase in ("退出引导式读书模式", "结束这轮读书讨论", "先聊到这里"):
+        assert exit_phrase in guided
+    assert "At 6 effective turns, closing is mandatory" in guided
+    assert "guided_mode.active: false" in guided
+    assert "at\nmost five short points" in guided
+    assert "permanent Book Capsule" in guided
+    assert "checkpoint, vector record, or telemetry" in guided
+
+
+def test_guided_pause_resume_and_light_reset_are_conversation_local():
+    _, body, _ = load_skill()
+    assert "继续刚才的引导式读书" in body
+    assert "resume the most recent stage only when the\nstate is coherent" in body
+    assert "刚才的引导状态已经不完整。书名可以保留，我们重新确认一下这轮最想讨论的问题。" in body
+    assert "preserve the in-context state but pause automatic\nprogression" in body
+
+
+def test_guided_budget_and_forbidden_platform_changes_are_explicit():
+    _, body, source = load_skill()
+    for contract in (
+        "current_book_results: 3",
+        "other_books: 3",
+        "chunks_per_other_book: 1",
+        "excerpt_max_chars: 500",
+        "retrieval_calls_per_turn: 1",
+        "automatic_connect_per_session: 1",
+        "soft_turn_target: 4",
+        "hard_turn_cap: 6",
+    ):
+        assert contract in body
+    assert "background service, memory, or runtime\nconfiguration" in body
+    assert "external research" in body
+    assert "lancedb" not in source.lower()
+    assert "embedding" not in source.lower()

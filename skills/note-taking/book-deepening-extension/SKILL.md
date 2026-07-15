@@ -1,12 +1,12 @@
 ---
 name: book-deepening-extension
-description: "Use when the user wants to start discussing a saved book, explain it with a Feynman-style dialogue, or connect it to books they previously saved. 中文名称：读后深潜与认知延伸。"
+description: "Use when the user wants to start discussing a saved book, explain it with a Feynman-style dialogue, connect it to books they previously saved, or explicitly enter a continuous guided book discussion. 中文名称：读后深潜与认知延伸。"
 license: MIT
 metadata:
   hermes:
     display_name: 读后深潜与认知延伸
     internal_design_id: KARPATHY_READING_LAB
-    tags: [books, reading, feynman, reflection, connection]
+    tags: [books, reading, feynman, reflection, connection, guided-discussion]
     category: note-taking
     related_skills: []
     requires_tools: [book_notes_retrieval]
@@ -18,6 +18,39 @@ Support a short, focused book discussion using saved excerpts when available,
 model knowledge when they are not, or text the user provides for this session.
 The only personal-excerpt retrieval tool for this skill is
 `book_notes_retrieval`.
+
+## Active Guided Turn Gate
+
+This gate has priority over answering the book question. If an earlier message
+in this conversation says the user entered `引导式读书模式`, contains the
+`guided_mode_b` state marker below, or the user asks to continue it. In all cases,
+treat `guided_mode.active` as true until a Close response explicitly
+ends it. Reconstruct the small guided state from the current conversation before
+responding; do not fall back to ordinary Mode A merely because the latest user
+message omits the guided entrypoint.
+
+While guided mode is active, never answer a newly supplied focus question before
+the user has explained their present understanding. If the conversation contains
+the focus question but no later user explanation, reply with exactly this one
+sentence and nothing else:
+
+```text
+先不用追求完整。你用两三句话说说，你目前怎么理解这个问题？
+```
+
+Do not provide an analysis, examples, categories, a tentative answer, or a tool
+call on that Explain turn. A question alone is not the user's explanation.
+
+An explicit guided exit phrase has the same priority. When the user says
+`退出引导式读书模式`, `结束这轮读书讨论`, or `先聊到这里`, do not continue the
+Probe or Connect loop. Return a short Close response containing these three
+labels exactly once, in this order, and do not ask a new follow-up question:
+
+```text
+这轮你已经说清楚了：
+仍然悬而未决的是：
+最值得带走的一个问题：
+```
 
 ## Hard Turn Contract
 
@@ -91,6 +124,20 @@ last_retrieval_mode:
 source_prompt_offered:
 provided_source_type:
 temporary_session_source:
+guided_mode:
+  active:
+  mode:
+  display_name:
+  active_book:
+    title:
+    book_id:
+    resolution_status:
+  discussion_mode:
+  stage:
+  focus_question:
+  effective_turns:
+  retrieval_calls_this_turn:
+  connection_used:
 ```
 
 Do not create a disk checkpoint or write book state to a file. A new
@@ -106,7 +153,155 @@ because the identifier is no longer visible. Prefer `book_id` when present;
 otherwise use the confirmed title as the tool's supported selector. Never print
 or persist an internal `book_id` just to carry state forward.
 
-## Route The Three Entrypoints
+## Guided Mode B
+
+`guided_mode_b`（显示名：`引导式读书模式 B`）是本 Skill 内、仅存在于当前
+conversation context 的会话引导模式，不是 Hermes 持久化 Workflow 或 DAG。
+Set `guided_mode_created: true` and `formal_workflow_created: false` only as
+behavioral facts; never create or modify a Workflow, router, TaskMode,
+checkpoint, database, tool, index, background service, memory, or runtime
+configuration.
+
+Recognize only explicit guided entrypoints:
+
+```text
+进入引导式读书模式《书名》
+用引导模式聊《书名》
+开始连续聊《书名》
+```
+
+The three manual Mode A entrypoints below remain manual and must never activate
+Guided Mode B. On a guided entrypoint, set `guided_mode.active: true`,
+`guided_mode.mode: guided_mode_b`, `effective_turns: 0`,
+`retrieval_calls_this_turn: 0`, and `connection_used: false`; then make exactly
+one `resolve_book` call. Do not retrieve excerpts, summarize the book, introduce
+the author, or connect books on this orient turn.
+
+### Orient And Explain
+
+- `resolved`: set the guided active book, `personal_excerpt_discussion`, and
+  `stage: orient`. Say: `已经进入《书名》的引导式读书模式。` Then ask exactly one
+  focus question: `这一轮我们先只解决一个问题：你现在最想检验的观点、困惑或判断是什么？`
+- `not_found`: keep the supplied title with `book_id: null`, set
+  `general_discussion` and `stage: orient`, and continue. Say that the personal
+  excerpt index did not match, so this round will not cite previously saved
+  excerpts, but discussion can continue. Ask the same single focus question.
+  Do not call `current_book`, browse, introduce the work, infer that the user
+  has no notes, or repeatedly request a file.
+- `ambiguous`: show at most five candidates and wait for the user's choice.
+  Never choose automatically.
+
+For either resolved or not-found orient responses, append this exact invisible
+conversation-state marker after the focus question:
+
+```html
+<!-- guided_mode_b: active; stage=awaiting_focus_question; user_explanation_received=false -->
+```
+
+This marker is session context only. It is not a disk checkpoint, persisted
+workflow state, telemetry, or a reason to expose any internal book identifier.
+When the marker is present and the next user message is only a question, the
+Active Guided Turn Gate applies without interpretation: a question is not an
+explanation, even if it contains a tentative premise or contrast.
+
+When the user supplies only a focus question, set `stage: explain` and ask only:
+`先不用追求完整。你用两三句话说说，你目前怎么理解这个问题？` Do not answer
+it first; the Active Guided Turn Gate requires that sentence and nothing else.
+If the same turn already contains the user's own explanation, do not
+ask again; proceed directly to Probe.
+
+### Probe Short Loop
+
+Set `stage: probe` and reset `retrieval_calls_this_turn: 0`. In
+`personal_excerpt_discussion`, make at most one call with the existing helper:
+
+```yaml
+action: current_book
+book_id: <guided_mode.active_book.book_id>
+query: <short combination of focus_question and the user's explanation>
+top_k: 3
+candidate_k: 20
+max_per_parent: 1
+excerpt_max_chars: 500
+include_text: true
+```
+
+Use the confirmed-title selector fallback already defined for Mode A when the
+same-session identifier is unavailable. In `general_discussion`, do not call
+`current_book`; use the user's explanation and bounded model knowledge while
+stating that no personal excerpt was used. In `provided_text_discussion`, use
+only text actually present and never label it as personal history unless the
+user explicitly requests a later comparison.
+
+Each Probe reply performs exactly four actions: accurately restate the user's
+understanding, add one most relevant point, identify one main gap, and ask one
+main follow-up question. Allow at most one secondary question and one
+counter-lens. Choose one primary lens from Feynman, Socratic, critic, connector,
+or applier. Do not simulate a multi-agent discussion.
+
+After each effective user answer, increment `effective_turns` once and choose
+only one `next_action`: `clarify`, `deepen`, `connect`, or `close`. Clarify one
+definition, premise, or causal link. Deepen exactly one of premise, mechanism,
+boundary, counterexample, or application. Never present a list of simultaneous
+paths.
+
+### Connect
+
+Enter `stage: connect` only when the user explicitly asks, or after at least one
+completed Probe when the connection is clearly useful. Automatic connection is
+allowed once per guided session; set `connection_used: true`. A later connection
+requires another explicit request. Make at most one call:
+
+```yaml
+action: other_books
+exclude_book_id: <guided_mode.active_book.book_id or omit when null>
+query: <the clarified focus question>
+top_k_books: 3
+candidate_k: 40
+max_chunks_per_book: 1
+max_chunks_per_parent: 1
+relationship_intent: null
+excerpt_max_chars: 500
+include_text: true
+```
+
+Select at most three books and one chunk per book. Label every model-assigned
+`echo`, `tension`, `completion`, or `unclear` relationship with `[INFERENCE]`;
+vector similarity does not establish that relationship. For each book give only
+the title, relationship, connection point, and use for the current question.
+
+### Close, Pause, And Resume
+
+The soft turn target is 4 and hard turn cap is 6. Close early when the user says
+`退出引导式读书模式`, `结束这轮读书讨论`, or `先聊到这里`, or when the focus has a
+clear conclusion. At 6 effective turns, closing is mandatory and no further
+question is allowed. Set `stage: close`, then use the three exact Close labels
+from the Active Guided Turn Gate to state what the user made clear, what remains
+unresolved, and one question worth carrying forward; use at
+most five short points. The final label records a takeaway question but must not invite another
+turn. Finally set `guided_mode.active: false`.
+
+If the user changes topic, preserve the in-context state but pause automatic
+progression. On `继续刚才的引导式读书`, resume the most recent stage only when the
+state is coherent. If it is missing or inconsistent, say:
+`刚才的引导状态已经不完整。书名可以保留，我们重新确认一下这轮最想讨论的问题。`
+Do not create disk recovery. Close never creates a permanent Book Capsule,
+report, user profile, checkpoint, vector record, or telemetry.
+
+The guided retrieval budget is the same one-call budget as Mode A:
+
+```yaml
+current_book_results: 3
+other_books: 3
+chunks_per_other_book: 1
+excerpt_max_chars: 500
+retrieval_calls_per_turn: 1
+automatic_connect_per_session: 1
+soft_turn_target: 4
+hard_turn_cap: 6
+```
+
+## Route Manual Mode A Entrypoints
 
 ### 1. 开始讨论《书名》
 
