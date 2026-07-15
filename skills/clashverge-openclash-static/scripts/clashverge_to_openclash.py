@@ -1,51 +1,31 @@
 #!/usr/bin/env python3
-"""Export, transform, validate, probe, and optionally deploy a Clash Verge config for OpenClash.
+"""Convert a Clash Verge effective YAML into the user's accepted simple OpenClash profile.
 
-The transformation is deterministic and idempotent:
-
-  * Preserve all static nodes (proxies), specialist groups, DNS, and rules.
-  * Add global manual/automatic groups with regional fallback ordering.
-  * Add GPT, Gemini, and Disney specialist groups with regional fallback.
-  * When probe results are provided, service candidate nodes are filtered to
-    only those that passed the probe (PASS).  Nodes that FAIL or return UNKNOWN
-    are excluded from the corresponding specialist groups, keeping the panel
-    clean and avoiding automatically switching into a known-unreachable node.
-  * When probe results are NOT provided (legacy path) the old region-based
-    heuristics apply, including the hardcoded Gemini US exclusion.
-  * Manual-select groups list direct static nodes (no per-node priority wrappers).
-  * The final MATCH rule routes to the default manual group.
-  * The ``sync`` subcommand is a one-shot end-to-end pipeline that accepts
-    "更新 OpenClash 节点" as its natural-language trigger.
-
-Service probing uses a temporary, isolated Mihomo instance so the running
-Clash Verge session is never disturbed.  The temporary ``PROBE`` select group
-and ephemeral ports are stripped before the final config is written.
-
-The script never prints proxy credentials or the full YAML body.
+Policy:
+- exactly 12 managed groups;
+- manual groups list direct nodes;
+- automatic groups are ordinary fallback groups;
+- GPT uses the previously working candidate set, not the unreliable GPT probe;
+- Gemini and Disney use the accepted candidate sets;
+- the placeholder node is removed;
+- service rules are narrow and the final rule is exactly MATCH,默认代理;
+- no per-node wrapper groups are generated.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
-import http.client
-import json
 import os
-import random
+import re
 import shlex
 import shutil
-import signal
-import socket
 import subprocess
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.request
-from dataclasses import dataclass, field
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Iterable, Sequence
 
 try:
     import yaml
@@ -55,10 +35,6 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 DEFAULT_VERGE_CANDIDATES = (
     Path.home()
     / "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml",
@@ -66,64 +42,88 @@ DEFAULT_VERGE_CANDIDATES = (
     / "Library/Application Support/com.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml",
 )
 
-FALLBACK_URL = "https://www.gstatic.com/generate_204"
-FALLBACK_INTERVAL = 60
-FALLBACK_TIMEOUT = 5000
-FALLBACK_MAX_FAILED = 1
+PLACEHOLDER_NODES = {"使用前先更新订阅"}
 
-SYNC_CONFIG_PATH = Path.home() / ".hermes/config/openclash-sync.yaml"
-
-# Temporary probe group — never deployed to OpenClash
-PROBE_GROUP_NAME = "PROBE"
-
-# Blocked / guard constants
-BLOCKED_PROBE_CORE_MISSING = "BLOCKED_LOCAL_PROBE_CORE_MISSING"
-BLOCKED_NO_VALID_GPT = "BLOCKED_NO_VALID_GPT_NODES"
-BLOCKED_NO_VALID_GEMINI = "BLOCKED_NO_VALID_GEMINI_NODES"
-BLOCKED_NO_VALID_DISNEY = "BLOCKED_NO_VALID_DISNEY_NODES"
-
-# Probe result status codes
-STATUS_PASS = "PASS"
-STATUS_FAIL = "FAIL"
-STATUS_UNKNOWN = "UNKNOWN"
-STATUS_FAIL_TRANSPORT = "FAIL_TRANSPORT"
-
-# Manual calibration overrides — these take precedence over probe results.
-# Key: exact node name. Value: PASS or FAIL.
-# See: Gemini实测校准 (user-confirmed node behaviour).
-GEMINI_MANUAL_OVERRIDES: dict[str, str] = {
-    "美国-住宅": STATUS_FAIL,
-    "美国迈阿密-hy2": STATUS_PASS,
-    "美国拉斯维加斯-hy2": STATUS_PASS,
-}
-PROBE_OVERRIDE_MISMATCH = "PROBE_OVERRIDE_MISMATCH"
-
-# Service probe endpoints (public entry points for reachability tests)
-GPT_PROBE_URL = "https://chatgpt.com/"
-GEMINI_PROBE_URL = "https://gemini.google.com/"
-DISNEY_PROBE_URL = "https://www.disneyplus.com/"
-
-# Temporary Mihomo probe instance default ports
-_PROBE_MIXED_PORT_BASE = 17891
-_PROBE_CONTROLLER_PORT_BASE = 19091
-
-# Default timeout for a single HTTP probe request (seconds)
-_DEFAULT_PROBE_TIMEOUT = 8
-
-# Mihomo core candidate paths on macOS
-_MIHOMO_CORE_PATHS: tuple[str, ...] = (
-    "/Applications/Clash Verge.app/Contents/Resources/clash-meta",
-    "/Applications/Clash Verge.app/Contents/Resources/mihomo",
-    os.path.join(str(Path.home()), "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-meta"),
-    os.path.join(str(Path.home()), "Library/Application Support/com.github.clash-verge-rev.clash-verge-rev/clash-meta"),
-    "/usr/local/bin/clash-meta",
-    "/usr/local/bin/mihomo",
-    "/opt/homebrew/bin/clash-meta",
-    "/opt/homebrew/bin/mihomo",
+# Accepted working GPT candidates. Only names present in the current subscription are used.
+GPT_CANDIDATES = (
+    "🇨🇳台湾-住宅",
+    "🇬🇧英国-住宅01",
+    "🇯🇵日本aws高速02",
+    "🇯🇵日本aws高速03",
+    "🇯🇵日本-原生01",
+    "🇸🇬新加坡aws高速01",
+    "🇸🇬新加坡aws高速02",
+    "🇸🇬新加坡-hy2",
+    "🇺🇸美国-住宅",
+    "🇺🇸美国迈阿密-hy2",
+    "🇺🇸美国拉斯维加斯-hy2",
 )
 
-# Skill-generated group names that must be removed on re-generation.
-SKILL_GROUP_NAMES: set[str] = {
+# Accepted Gemini set from the final reviewed profile.
+GEMINI_CANDIDATES = (
+    "🇨🇳台湾-住宅",
+    "🇭🇰香港aws高速01",
+    "🇸🇬新加坡aws高速01",
+    "🇸🇬新加坡aws高速02",
+    "🇯🇵日本aws高速01",
+    "🇯🇵日本aws高速02",
+    "🇨🇳香港原生htk高速01",
+    "🇨🇳香港原生htk高速02",
+    "🇨🇳香港hkb家宽01",
+    "🇰🇷韩国aws01",
+    "🇯🇵日本-流媒体02",
+    "🇰🇷韩国-流媒体01",
+    "新加坡-媒体流01",
+    "🇨🇳香港原生hkt01-hy2",
+    "🇺🇸美国住宅-hy2",
+    "🇺🇸美国迈阿密-hy2",
+    "🇺🇸美国拉斯维加斯-hy2",
+)
+
+# Accepted Disney set from the final reviewed profile.
+DISNEY_CANDIDATES = (
+    "🇨🇳台湾-住宅",
+    "🇺🇸美国-住宅",
+    "🇭🇰香港aws高速01",
+    "🇸🇬新加坡aws高速01",
+    "🇸🇬新加坡aws高速02",
+    "🇯🇵日本aws高速01",
+    "🇯🇵日本aws高速02",
+    "🇨🇳香港原生htk高速01",
+    "🇨🇳香港原生htk高速02",
+    "🇨🇳香港hkb家宽01",
+    "🇰🇷韩国aws01",
+    "🇯🇵日本-流媒体02",
+    "🇰🇷韩国-流媒体01",
+    "新加坡-媒体流01",
+    "🇨🇳香港原生hkt01-hy2",
+    "🇺🇸美国住宅-hy2",
+    "🇺🇸美国迈阿密-hy2",
+    "🇺🇸美国拉斯维加斯-hy2",
+)
+
+SERVICE_RULES = (
+    # GPT / ChatGPT
+    "DOMAIN-SUFFIX,chatgpt.com,GPT专用",
+    "DOMAIN-SUFFIX,openai.com,GPT专用",
+    "DOMAIN-SUFFIX,oaistatic.com,GPT专用",
+    "DOMAIN-SUFFIX,oaiusercontent.com,GPT专用",
+    # Gemini: intentionally narrow; do not capture the whole Google ecosystem.
+    "DOMAIN,gemini.google.com,Gemini专用",
+    "DOMAIN,bard.google.com,Gemini专用",
+    "DOMAIN,aistudio.google.com,Gemini专用",
+    "DOMAIN-SUFFIX,generativelanguage.googleapis.com,Gemini专用",
+    "DOMAIN-SUFFIX,ai.google.dev,Gemini专用",
+    "DOMAIN-SUFFIX,deepmind.google,Gemini专用",
+    "DOMAIN-SUFFIX,deepmind.com,Gemini专用",
+    # Disney+
+    "DOMAIN-SUFFIX,disneyplus.com,迪士尼",
+    "DOMAIN-SUFFIX,disney-plus.net,迪士尼",
+    "DOMAIN-SUFFIX,dssott.com,迪士尼",
+    "DOMAIN-SUFFIX,bamgrid.com,迪士尼",
+)
+
+MANAGED_GROUP_NAMES = (
     "默认代理",
     "手动选择",
     "自动选择",
@@ -136,94 +136,62 @@ SKILL_GROUP_NAMES: set[str] = {
     "迪士尼",
     "迪士尼手动",
     "迪士尼自动",
+)
+
+BUILTIN_TARGETS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"}
+SENSITIVE_KEYS = {
+    "server",
+    "port",
+    "password",
+    "uuid",
+    "token",
+    "servername",
+    "sni",
+    "public-key",
+    "short-id",
+    "private-key",
+    "client-secret",
+    "psk",
+    "secret",
+    "authorization",
+    "proxy-authorization",
 }
 
-# Prefixes for wrapper groups generated by this skill.
-SKILL_WRAPPER_PREFIXES = ("全局优先│", "GPT优先│", "Gemini优先│", "迪士尼优先│")
-
-# Region keywords – Chinese names and common flag emoji.
-REGION_KEYWORDS: dict[str, list[str]] = {
-    "日本": ["日本", "\U0001f1ef\U0001f1f5"],  # 🇯🇵
-    "台湾": ["台湾", "\U0001f1f9\U0001f1fc"],  # 🇹🇼
-    "香港": ["香港", "\U0001f1ed\U0001f1f0"],  # 🇭🇰
-    "德国": ["德国", "\U0001f1e9\U0001f1ea"],  # 🇩🇪
-    "美国": ["美国", "\U0001f1fa\U0001f1f8"],  # 🇺🇸  – legacy exclusion only
+CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
+    "allow-lan",
+    "bind-address",
+    "external-controller",
+    "external-controller-cors",
+    "external-controller-unix",
+    "mixed-port",
+    "port",
+    "profile",
+    "redir-port",
+    "secret",
+    "socks-port",
+    "tproxy-port",
 }
+HEALTH_CHECK_ATTEMPTS = 3
+HEALTH_CHECK_DELAY_SECONDS = 2
+_DROP_RUNTIME = object()
 
-# Region display-name → sort key for global / GPT / Disney.
-_GLOBAL_REGION_ORDER = {"日本": 0, "台湾": 1}
-# Region display-name → sort key for Gemini.
-_GEMINI_REGION_ORDER = {"日本": 0, "台湾": 1, "香港": 2, "德国": 3}
-
-# Minimum probes to consider a node viable for each service
-_PROBE_RETRIES = 1  # one retry per probe
-
-
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ProbeResult:
-    """Result of a single service probe for one node."""
-
-    node_name: str
-    service: str  # "base", "gpt", "gemini", "disney"
-    status: str  # PASS / FAIL / UNKNOWN / FAIL_TRANSPORT
-    latency_ms: float | None = None
-    reason: str = ""
-
-
-@dataclass
-class NodeProbeResults:
-    """All probe results for one node."""
-
-    node_name: str
-    base: ProbeResult
-    gpt: ProbeResult
-    gemini: ProbeResult
-    disney: ProbeResult
-
-
-# ---------------------------------------------------------------------------
-# Sync config template
-# ---------------------------------------------------------------------------
-
-SYNC_CONFIG_TEMPLATE = {
-    "source": {
-        "mode": "clash_verge_effective",
-        "effective_config_path": None,
-    },
-    "router": {
-        "host": "root@192.168.10.1",
-        "core_path": "/etc/openclash/core/clash_meta",
-        "remote_temp_path": "/tmp/clash-verge-static-openclash.yaml",
-        "remote_target_path": "/etc/openclash/config/clash-verge-static-openclash.yaml",
-    },
-    "deployment": {
-        "activate_by_default": True,
-        "restart_service": True,
-        "backup_directory": "/etc/openclash/config/backups",
-        "health_wait_seconds": 12,
-    },
-}
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+_FLAG_PREFIX_RE = re.compile(r"^[\U0001F1E6-\U0001F1FF]{2}\s*")
 
 
 class ConfigError(RuntimeError):
-    """Raised when the source configuration cannot be transformed safely."""
+    """Raised when a source configuration cannot be transformed safely."""
 
 
 def now_stamp() -> str:
     return dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
         check=check,
@@ -239,15 +207,20 @@ def find_default_source() -> Path:
             return candidate
 
     base = Path.home() / "Library/Application Support"
-    matches = sorted(base.glob("*clash-verge*/**/clash-verge.yaml")) if base.exists() else []
+    matches = sorted(base.glob("*clash-verge*/**/*.yaml")) if base.exists() else []
     for match in matches:
         if match.is_file():
-            return match
+            try:
+                data = load_yaml(match)
+            except ConfigError:
+                continue
+            if isinstance(data.get("proxies"), list) and data["proxies"]:
+                return match
 
-    searched = "\n".join(f"  - {p}" for p in DEFAULT_VERGE_CANDIDATES)
+    searched = "\n".join(f"  - {path}" for path in DEFAULT_VERGE_CANDIDATES)
     raise ConfigError(
-        "Could not find the Clash Verge effective configuration. Checked:\n"
-        f"{searched}\nPass --source explicitly."
+        "Could not find a Clash Verge effective configuration containing static proxies. "
+        f"Checked:\n{searched}\nPass --source explicitly."
     )
 
 
@@ -255,165 +228,49 @@ def load_yaml(path: Path) -> dict[str, Any]:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise ConfigError(f"Cannot read source file: {path}: {exc}") from exc
+        raise ConfigError(f"Cannot read YAML: {path}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc
-
     if not isinstance(data, dict):
         raise ConfigError("The YAML root must be a mapping/object.")
     return data
 
 
-def dump_yaml(data: dict[str, Any], path: Path) -> None:
+def dump_yaml(data: dict[str, Any], path: Path, *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = yaml.safe_dump(
         data,
         allow_unicode=True,
         sort_keys=False,
         default_flow_style=False,
-        width=4096,
+        width=180,
     )
     path.write_text(text, encoding="utf-8")
+    os.chmod(path, mode)
 
 
-def ordered_unique(values: list[str]) -> list[str]:
+def ordered_unique(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
         if value not in seen:
-            result.append(value)
             seen.add(value)
+            result.append(value)
     return result
 
 
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def normalize_node_name(name: str) -> str:
+    return _FLAG_PREFIX_RE.sub("", name).strip()
 
 
-def find_free_port(base: int, max_tries: int = 50) -> int:
-    """Return a free TCP port starting from *base*."""
-    for offset in range(max_tries):
-        port = base + offset
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    raise ConfigError(f"Cannot find a free TCP port near {base}")
-
-
-# ---------------------------------------------------------------------------
-# SSH / remote helpers
-# ---------------------------------------------------------------------------
-
-
-def quote_remote(path: str) -> str:
-    return shlex.quote(path)
-
-
-def ssh_command(host: str, command: str, *, capture: bool = False) -> subprocess.CompletedProcess[str]:
-    return run(["ssh", host, command], capture=capture)
-
-
-def check_ssh_batchmode(host: str) -> bool:
-    try:
-        run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", host, "true"],
-            capture=True,
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def remote_sha256(host: str, path: str) -> str | None:
-    try:
-        result = ssh_command(host, f"sha256sum {quote_remote(path)} 2>/dev/null || echo MISSING", capture=True)
-        stdout = result.stdout.strip()
-        if "MISSING" in stdout:
-            return None
-        return stdout.split()[0]
-    except subprocess.CalledProcessError:
-        return None
-
-
-def remote_file_exists(host: str, path: str) -> bool:
-    try:
-        ssh_command(host, f"test -f {quote_remote(path)}", capture=True)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def remote_check_file(host: str, path: str) -> None:
-    if not remote_file_exists(host, path):
-        raise ConfigError(f"Remote path {path} does not exist on {host}")
-
-
-# ---------------------------------------------------------------------------
-# Health check helpers
-# ---------------------------------------------------------------------------
-
-
-def run_health_checks(host: str, health_wait: int) -> dict[str, Any]:
-    import time
-
-    time.sleep(health_wait)
-
-    results: dict[str, Any] = {}
-
-    try:
-        pgrep = ssh_command(host, "pgrep -x clash-meta || pgrep -x mihomo || pgrep -x clash || true", capture=True)
-        results["core_process"] = bool(pgrep.stdout.strip())
-    except subprocess.CalledProcessError:
-        results["core_process"] = False
-
-    try:
-        watchdog = ssh_command(host, "pgrep -f 'openclash.*watchdog' || true", capture=True)
-        results["watchdog"] = bool(watchdog.stdout.strip())
-    except subprocess.CalledProcessError:
-        results["watchdog"] = False
-
-    try:
-        ports = ssh_command(host, "ss -tlnp | grep -E ':(7890|9090|7891|7892)' || true", capture=True)
-        results["listening_ports"] = bool(ports.stdout.strip())
-    except subprocess.CalledProcessError:
-        results["listening_ports"] = False
-
-    try:
-        logs = ssh_command(
-            host,
-            "logread -e openclash 2>/dev/null | tail -5 || "
-            "journalctl -u openclash -n 5 --no-pager 2>/dev/null || "
-            "echo NONE",
-            capture=True,
-        )
-        log_text = logs.stdout.strip()
-        results["recent_logs"] = log_text
-        results["fatal_error"] = any(
-            kw in log_text.lower()
-            for kw in ["fatal", "error:", "failed to start", "config error"]
-        )
-    except subprocess.CalledProcessError:
-        results["fatal_error"] = False
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Node helpers
-# ---------------------------------------------------------------------------
-
-
-def static_node_names(data: dict[str, Any]) -> list[str]:
+def static_proxy_objects(data: dict[str, Any]) -> list[dict[str, Any]]:
     proxies = data.get("proxies")
     if not isinstance(proxies, list) or not proxies:
         raise ConfigError(
-            "No static nodes were found under 'proxies:'. Export the Clash Verge effective/merged "
-            "configuration rather than a provider-only subscription."
+            "No static nodes were found under 'proxies:'. Use the Clash Verge effective/merged YAML."
         )
 
+    result: list[dict[str, Any]] = []
     names: list[str] = []
     for index, proxy in enumerate(proxies):
         if not isinstance(proxy, dict):
@@ -421,1097 +278,509 @@ def static_node_names(data: dict[str, Any]) -> list[str]:
         name = proxy.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ConfigError(f"proxies[{index}] has no valid name.")
+        if name in PLACEHOLDER_NODES:
+            continue
+        result.append(proxy)
         names.append(name)
 
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
-        raise ConfigError(f"Duplicate proxy names detected: {', '.join(duplicates)}")
-    return names
-
-
-def detect_region(name: str) -> str | None:
-    name_lower = name.casefold()
-    for region, keywords in REGION_KEYWORDS.items():
-        for kw in keywords:
-            if kw.casefold() in name_lower:
-                return region
-    return None
-
-
-def region_sort_key(name: str, order: dict[str, int]) -> tuple[int, int]:
-    region = detect_region(name)
-    if region and region in order:
-        return (order[region], 0)
-    return (9999, 1)
-
-
-def _region_order_global_tw_others(name: str) -> tuple[int, int]:
-    return region_sort_key(name, _GLOBAL_REGION_ORDER)
-
-
-def _region_order_gemini(name: str) -> tuple[int, int]:
-    return region_sort_key(name, _GEMINI_REGION_ORDER)
-
-
-def is_skill_group(name: str) -> bool:
-    if name in SKILL_GROUP_NAMES:
-        return True
-    for prefix in SKILL_WRAPPER_PREFIXES:
-        if name.startswith(prefix):
-            return True
-    return False
-
-
-def is_priority_wrapper(name: str) -> bool:
-    return any(name.startswith(p) for p in SKILL_WRAPPER_PREFIXES)
-
-
-# ---------------------------------------------------------------------------
-# Mihomo probe core discovery
-# ---------------------------------------------------------------------------
-
-
-def find_mihomo_core(core_path: str | None = None) -> str:
-    """Return a path to a usable Mihomo/clash-meta binary.
-
-    Priority:
-      1. Explicit *core_path* argument.
-      2. Known macOS installation paths.
-      3. ``PATH`` lookup via ``which``.
-    """
-    if core_path:
-        if os.path.isfile(core_path) and os.access(core_path, os.X_OK):
-            return core_path
-        # Try which as well
-        try:
-            result = subprocess.run(["which", core_path], capture_output=True, text=True, check=False)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except OSError:
-            pass
-        raise ConfigError(
-            f"{BLOCKED_PROBE_CORE_MISSING}\n\n"
-            f"Probe core not found at configured path: {core_path}"
-        )
-
-    for candidate in _MIHOMO_CORE_PATHS:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-
-    try:
-        result = subprocess.run(["which", "clash-meta"], capture_output=True, text=True, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except OSError:
-        pass
-
-    raise ConfigError(
-        f"{BLOCKED_PROBE_CORE_MISSING}\n\n"
-        "Could not find a Mihomo / clash-meta binary. "
-        "Install Clash Verge or pass --probe-core explicitly.\n"
-        "Checked paths: " + ", ".join(str(p) for p in _MIHOMO_CORE_PATHS)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Temporary Mihomo probe instance management
-# ---------------------------------------------------------------------------
-
-
-def _build_probe_config(
-    proxies: list[dict[str, Any]],
-    mixed_port: int,
-    controller_port: int,
-    probe_group: str = PROBE_GROUP_NAME,
-) -> dict[str, Any]:
-    """Build a minimal Mihomo config for isolated probing."""
-    node_names = [p["name"] for p in proxies]
-    return {
-        "port": 0,
-        "mixed-port": mixed_port,
-        "socks-port": 0,
-        "allow-lan": False,
-        "external-controller": f"127.0.0.1:{controller_port}",
-        "mode": "rule",
-        "log-level": "error",
-        "ipv6": False,
-        "find-process-mode": "off",
-        "global-client-fingerprint": "random",
-        "dns": {"enabled": False},
-        "proxies": proxies,
-        "proxy-groups": [
-            {
-                "name": probe_group,
-                "type": "select",
-                "proxies": node_names,
-            }
-        ],
-        "rules": ["MATCH,PROBE"],
-    }
-
-
-def _wait_for_controller(controller_url: str, timeout: float = 10.0) -> None:
-    """Poll the Mihomo external-controller /version until it responds or times out."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            req = urllib.request.Request(f"{controller_url}/version")
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                if resp.status == 200:
-                    return
-        except (urllib.error.URLError, OSError, http.client.RemoteDisconnected):
-            pass
-        time.sleep(0.3)
-    raise ConfigError("Mihomo probe instance did not start within timeout")
-
-
-def _controller_switch_node(controller_url: str, node_name: str) -> None:
-    """Switch the PROBE select group to *node_name* via the controller API."""
-    data = json.dumps({"name": node_name}).encode()
-    req = urllib.request.Request(
-        f"{controller_url}/proxies/{PROBE_GROUP_NAME}",
-        data=data,
-        method="PUT",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        if resp.status not in (200, 204):
-            raise ConfigError(f"Controller switch returned HTTP {resp.status}")
-
-
-class MihomoProbeManager:
-    """Context manager that starts/stops a temporary, isolated Mihomo instance
-    for probing proxy connectivity.
-
-    The instance listens ONLY on 127.0.0.1.  All temporary files are deleted
-    on exit even if an exception occurred.
-    """
-
-    def __init__(
-        self,
-        core_path: str,
-        mixed_port: int | None = None,
-        controller_port: int | None = None,
-    ):
-        self.core_path = core_path
-        self.mixed_port = mixed_port or find_free_port(_PROBE_MIXED_PORT_BASE)
-        self.controller_port = controller_port or find_free_port(_PROBE_CONTROLLER_PORT_BASE)
-        self._temp_dir: Path | None = None
-        self._process: subprocess.Popen | None = None
-        self._controller_url = f"http://127.0.0.1:{self.controller_port}"
-        self.opener: urllib.request.OpenerDirector | None = None
-
-    def start(self, proxies: list[dict[str, Any]]) -> None:
-        """Create temp directory, write config, start Mihomo, wait for ready."""
-        self._temp_dir = Path(tempfile.mkdtemp(prefix="oclash-probe-"))
-        config_path = self._temp_dir / "config.yaml"
-
-        config = _build_probe_config(
-            proxies, self.mixed_port, self.controller_port
-        )
-        dump_yaml(config, config_path)
-        config_path.chmod(0o600)
-
-        self._process = subprocess.Popen(
-            [self.core_path, "-d", str(self._temp_dir), "-f", str(config_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=lambda: os.umask(0o077) if hasattr(os, "umask") else None,
-        )
-
-        # Wait for controller readiness
-        _wait_for_controller(self._controller_url, timeout=10.0)
-
-        # Build proxy opener for probes
-        proxy_url = f"http://127.0.0.1:{self.mixed_port}"
-        proxy_handler = urllib.request.ProxyHandler({
-            "http": proxy_url,
-            "https": proxy_url,
-        })
-        self.opener = urllib.request.build_opener(proxy_handler)
-
-    def switch_node(self, node_name: str) -> None:
-        """Switch the PROBE group to a different node."""
-        _controller_switch_node(self._controller_url, node_name)
-        # Brief settling time for the new route
-        time.sleep(0.5)
-
-    def stop(self) -> None:
-        """Terminate the Mihomo process and remove all temporary files."""
-        if self._process is not None:
-            try:
-                self._process.send_signal(signal.SIGTERM)
-                self._process.wait(timeout=5)
-            except (subprocess.TimeoutExpired, ProcessLookupError):
-                try:
-                    self._process.kill()
-                    self._process.wait(timeout=3)
-                except (subprocess.TimeoutExpired, ProcessLookupError):
-                    pass
-            self._process = None
-
-        if self._temp_dir is not None:
-            shutil.rmtree(self._temp_dir, ignore_errors=True)
-            self._temp_dir = None
-
-    def __enter__(self) -> MihomoProbeManager:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.stop()
-
-
-# ---------------------------------------------------------------------------
-# HTTP probe helpers
-# ---------------------------------------------------------------------------
-
-
-def _http_get(
-    opener: urllib.request.OpenerDirector,
-    url: str,
-    timeout: int = _DEFAULT_PROBE_TIMEOUT,
-) -> tuple[int | None, dict[str, str], bytes]:
-    """Make a GET request through the opener and return (status, headers, body).
-
-    Returns (None, {}, b"") for connection-level errors so callers can
-    distinguish network failures from HTTP-level responses.
-    """
-    try:
-        response = opener.open(url, timeout=timeout)
-        body = response.read()
-        return response.status, dict(response.headers), body
-    except urllib.error.HTTPError as e:
-        body = e.read()
-        return e.code, dict(e.headers), body
-    except (urllib.error.URLError, http.client.RemoteDisconnected, OSError) as e:
-        return None, {}, b""
-
-
-# ---------------------------------------------------------------------------
-# Service probe functions
-# ---------------------------------------------------------------------------
-# Each returns (status: str, latency_ms: float | None, reason: str).
-# Accept an opener for testability.
-
-
-def probe_base(
-    opener: urllib.request.OpenerDirector,
-    url: str = FALLBACK_URL,
-    timeout: int = _DEFAULT_PROBE_TIMEOUT,
-) -> tuple[str, float | None, str]:
-    """Basic connectivity probe through the proxy.
-
-    A PASS means the proxy can reach *url* and gets a 200/204 response.
-    """
-    start = time.monotonic()
-    status_code, _headers, _body = _http_get(opener, url, timeout=timeout)
-    elapsed = (time.monotonic() - start) * 1000
-
-    # Retry once on failure
-    if status_code is None or status_code not in (200, 204):
-        start = time.monotonic()
-        status_code, _headers, _body = _http_get(opener, url, timeout=timeout)
-        elapsed = (time.monotonic() - start) * 1000
-
-    if status_code is None:
-        return STATUS_FAIL_TRANSPORT, None, "Connection failed"
-    if status_code in (200, 204):
-        return STATUS_PASS, round(elapsed, 1), "OK"
-    return STATUS_FAIL, round(elapsed, 1), f"HTTP {status_code}"
-
-
-def probe_gpt(
-    opener: urllib.request.OpenerDirector,
-    timeout: int = _DEFAULT_PROBE_TIMEOUT,
-    url: str = GPT_PROBE_URL,
-) -> tuple[str, float | None, str]:
-    """Probe GPT/ChatGPT service reachability.
-
-    PASS:
-      - HTTP 200 with OpenAI/ChatGPT markers in body or headers.
-    
-    FAIL:
-      - HTTP 403, 451, or 3xx redirect to unsupported-country page.
-      - Two consecutive connection failures.
-    
-    UNKNOWN:
-      - CAPTCHA walls, login-only response that doesn't reveal region.
-      - Response structure we cannot classify.
-    """
-    start = time.monotonic()
-    status_code, headers, body = _http_get(opener, url, timeout=timeout)
-    elapsed = (time.monotonic() - start) * 1000
-
-    # Retry once on connection error
-    if status_code is None:
-        start = time.monotonic()
-        status_code, headers, body = _http_get(opener, url, timeout=timeout)
-        elapsed = (time.monotonic() - start) * 1000
-
-    if status_code is None:
-        return STATUS_FAIL, None, "Connection failed"
-
-    return _classify_gpt_response(status_code, headers, body, elapsed)
-
-
-def _classify_gpt_response(
-    status_code: int, headers: dict[str, str], body: bytes, elapsed_ms: float
-) -> tuple[str, float | None, str]:
-    """Classify a GPT probe HTTP response."""
-    body_lower = body.lower() if body else b""
-    body_text = body_lower.decode("utf-8", errors="replace")
-
-    # Detect region blocking
-    location = headers.get("location", "").lower()
-    if status_code in (403, 451):
-        return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code} blocked"
-    if status_code in (301, 302, 307, 308):
-        if any(kw in location for kw in ("unsupported-country", "blocked", "not-available")):
-            return STATUS_FAIL, round(elapsed_ms, 1), "Redirect to blocked page"
-        if "auth" in location or "login" in location:
-            # Auth-only redirect — may still indicate reachability
-            pass
-
-    if status_code == 200:
-        # Success — check for expected markers
-        if b"openai" in body_lower or b"chatgpt" in body_lower or b"__next_data__" in body_lower:
-            return STATUS_PASS, round(elapsed_ms, 1), "Service reachable"
-        # Strict: don't assume 200 alone means PASS
-        if b"captcha" in body_lower or b"challenge" in body_lower:
-            return STATUS_UNKNOWN, round(elapsed_ms, 1), "CAPTCHA wall"
-        # Generic 200 but no markers — UNKNOWN
-        return STATUS_UNKNOWN, round(elapsed_ms, 1), "200 without service markers"
-    if status_code == 429:
-        return STATUS_UNKNOWN, round(elapsed_ms, 1), "Rate limited"
-
-    return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code}"
-
-
-def probe_gemini(
-    opener: urllib.request.OpenerDirector,
-    timeout: int = _DEFAULT_PROBE_TIMEOUT,
-    url: str = GEMINI_PROBE_URL,
-) -> tuple[str, float | None, str]:
-    """Probe Gemini service reachability.
-
-    PASS:
-      - HTTP 200 with Gemini/Google AI markers.
-    
-    FAIL:
-      - HTTP 403, 451, or redirect showing unsupported country.
-      - Two consecutive connection failures.
-    
-    UNKNOWN:
-      - Login wall, CAPTCHA, or response we cannot classify.
-    """
-    start = time.monotonic()
-    status_code, headers, body = _http_get(opener, url, timeout=timeout)
-    elapsed = (time.monotonic() - start) * 1000
-
-    if status_code is None:
-        start = time.monotonic()
-        status_code, headers, body = _http_get(opener, url, timeout=timeout)
-        elapsed = (time.monotonic() - start) * 1000
-
-    if status_code is None:
-        return STATUS_FAIL, None, "Connection failed"
-
-    return _classify_gemini_response(status_code, headers, body, elapsed)
-
-
-def _classify_gemini_response(
-    status_code: int, headers: dict[str, str], body: bytes, elapsed_ms: float
-) -> tuple[str, float | None, str]:
-    """Classify a Gemini probe HTTP response."""
-    body_lower = body.lower() if body else b""
-    body_text = body_lower.decode("utf-8", errors="replace")
-
-    location = headers.get("location", "").lower()
-    if status_code in (403, 451):
-        return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code} blocked"
-    if status_code in (301, 302, 307, 308):
-        if any(kw in location for kw in ("unsupported-country", "blocked", "not-available")):
-            return STATUS_FAIL, round(elapsed_ms, 1), "Redirect to blocked page"
-        if "auth" in location or "login" in location or "accounts.google.com" in location:
-            # Auth redirect to Google login — the service itself is reachable,
-            # it just needs authentication. This counts as PASS for connectivity.
-            return STATUS_PASS, round(elapsed_ms, 1), "Auth redirect (service reachable)"
-
-    if status_code == 200:
-        if b"gemini" in body_lower or b"google" in body_lower or b"__next_data__" in body_lower:
-            return STATUS_PASS, round(elapsed_ms, 1), "Service reachable"
-        if b"captcha" in body_lower or b"challenge" in body_lower:
-            return STATUS_UNKNOWN, round(elapsed_ms, 1), "CAPTCHA wall"
-        return STATUS_UNKNOWN, round(elapsed_ms, 1), "200 without service markers"
-    if status_code == 429:
-        return STATUS_UNKNOWN, round(elapsed_ms, 1), "Rate limited"
-
-    return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code}"
-
-
-def probe_disney(
-    opener: urllib.request.OpenerDirector,
-    timeout: int = _DEFAULT_PROBE_TIMEOUT,
-    url: str = DISNEY_PROBE_URL,
-) -> tuple[str, float | None, str]:
-    """Probe Disney+ service reachability.
-
-    PASS:
-      - HTTP 200/30x with Disney markers.
-      - 30x to auth/login (indicates service is reachable, needs login).
-    
-    FAIL:
-      - HTTP 403, 451, or redirect to unsupported region page.
-      - Two consecutive connection failures.
-    
-    UNKNOWN:
-      - Response we cannot classify.
-    """
-    start = time.monotonic()
-    status_code, headers, body = _http_get(opener, url, timeout=timeout)
-    elapsed = (time.monotonic() - start) * 1000
-
-    if status_code is None:
-        start = time.monotonic()
-        status_code, headers, body = _http_get(opener, url, timeout=timeout)
-        elapsed = (time.monotonic() - start) * 1000
-
-    if status_code is None:
-        return STATUS_FAIL, None, "Connection failed"
-
-    return _classify_disney_response(status_code, headers, body, elapsed)
-
-
-def _classify_disney_response(
-    status_code: int, headers: dict[str, str], body: bytes, elapsed_ms: float
-) -> tuple[str, float | None, str]:
-    """Classify a Disney+ probe HTTP response."""
-    body_lower = body.lower() if body else b""
-    body_text = body_lower.decode("utf-8", errors="replace")
-
-    location = headers.get("location", "").lower()
-    if status_code in (403, 451):
-        return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code} blocked"
-    if status_code in (301, 302, 307, 308):
-        if any(kw in location for kw in ("unsupported-country", "blocked", "unavailable", "region")):
-            return STATUS_FAIL, round(elapsed_ms, 1), "Redirect to blocked page"
-        # Auth or locale redirect — service is reachable
-        if any(kw in location for kw in ("auth", "login", "sign-in", "disneyplus.com")):
-            return STATUS_PASS, round(elapsed_ms, 1), "Auth redirect (service reachable)"
-
-    if status_code == 200:
-        if any(kw in body_lower for kw in (b"disney", b"disneyplus", b"star+")):
-            return STATUS_PASS, round(elapsed_ms, 1), "Service reachable"
-        if b"captcha" in body_lower or b"challenge" in body_lower:
-            return STATUS_UNKNOWN, round(elapsed_ms, 1), "CAPTCHA wall"
-        return STATUS_UNKNOWN, round(elapsed_ms, 1), "200 without service markers"
-    if status_code == 429:
-        return STATUS_UNKNOWN, round(elapsed_ms, 1), "Rate limited"
-
-    return STATUS_FAIL, round(elapsed_ms, 1), f"HTTP {status_code}"
-
-
-# ---------------------------------------------------------------------------
-# Orchestrated probe pipeline
-# ---------------------------------------------------------------------------
-
-
-def run_probe_pipeline(
-    proxies: list[dict[str, Any]],
-    *,
-    core_path: str | None = None,
-    mixed_port: int | None = None,
-    controller_port: int | None = None,
-    base_url: str = FALLBACK_URL,
-    gpt_url: str = GPT_PROBE_URL,
-    gemini_url: str = GEMINI_PROBE_URL,
-    disney_url: str = DISNEY_PROBE_URL,
-    base_timeout: int = _DEFAULT_PROBE_TIMEOUT,
-    probe_timeout: int = _DEFAULT_PROBE_TIMEOUT,
-) -> dict[str, NodeProbeResults]:
-    """Run the full probe pipeline for every static node.
-
-    Returns a dict mapping ``node_name`` → ``NodeProbeResults``.
-
-    Every node is tested regardless of individual failures.  The caller
-    inspects results to decide which nodes enter which service groups.
-    """
-    resolved_core = find_mihomo_core(core_path)
-    all_results: dict[str, NodeProbeResults] = {}
-
-    with MihomoProbeManager(resolved_core, mixed_port=mixed_port, controller_port=controller_port) as mgr:
-        mgr.start(proxies)
-
-        for proxy in proxies:
-            node_name = proxy["name"]
-
-            # 1. Switch to this node
-            mgr.switch_node(node_name)
-
-            # 2. Base connectivity test
-            assert mgr.opener is not None  # set by mgr.start()
-            base_status, base_latency, base_reason = probe_base(
-                mgr.opener, url=base_url, timeout=base_timeout
-            )
-
-            # If base fails (FAIL_TRANSPORT), mark all three services FAIL_TRANSPORT
-            if base_status == STATUS_FAIL_TRANSPORT:
-                base_result = ProbeResult(node_name, "base", base_status, base_latency, base_reason)
-                fail_transport = ProbeResult(node_name, "", STATUS_FAIL_TRANSPORT, None, "Transport failed")
-                all_results[node_name] = NodeProbeResults(
-                    node_name=node_name,
-                    base=base_result,
-                    gpt=ProbeResult(node_name, "gpt", STATUS_FAIL_TRANSPORT, None, "Transport failed"),
-                    gemini=ProbeResult(node_name, "gemini", STATUS_FAIL_TRANSPORT, None, "Transport failed"),
-                    disney=ProbeResult(node_name, "disney", STATUS_FAIL_TRANSPORT, None, "Transport failed"),
-                )
-                continue
-
-            # 3. Service probes
-            gpt_status, gpt_latency, gpt_reason = probe_gpt(mgr.opener, timeout=probe_timeout, url=gpt_url)
-            gemini_status, gemini_latency, gemini_reason = probe_gemini(mgr.opener, timeout=probe_timeout, url=gemini_url)
-            disney_status, disney_latency, disney_reason = probe_disney(mgr.opener, timeout=probe_timeout, url=disney_url)
-
-            all_results[node_name] = NodeProbeResults(
-                node_name=node_name,
-                base=ProbeResult(node_name, "base", base_status, base_latency, base_reason),
-                gpt=ProbeResult(node_name, "gpt", gpt_status, gpt_latency, gpt_reason),
-                gemini=ProbeResult(node_name, "gemini", gemini_status, gemini_latency, gemini_reason),
-                disney=ProbeResult(node_name, "disney", disney_status, disney_latency, disney_reason),
-            )
-
-    return all_results
-
-
-def probe_results_to_dict(probe_results: dict[str, NodeProbeResults]) -> dict[str, dict[str, str]]:
-    """Convert probe results to a serialisable dict for reporting.
-
-    Keys: node_name → {service: status}.
-    """
-    out: dict[str, dict[str, str]] = {}
-    for node_name, nr in probe_results.items():
-        out[node_name] = {
-            "base": nr.base.status,
-            "gpt": nr.gpt.status,
-            "gemini": nr.gemini.status,
-            "disney": nr.disney.status,
-        }
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Candidate extraction (modified — supports probe filtering)
-# ---------------------------------------------------------------------------
-
-
-def _static_proxies_in_group(
-    groups: list[dict[str, Any]], group_name: str, node_names: set[str]
-) -> list[str]:
-    for g in groups:
-        if g.get("name") == group_name:
-            proxies = g.get("proxies")
-            if isinstance(proxies, list):
-                return ordered_unique(p for p in proxies if p in node_names)
-    return []
-
-
-def extract_gpt_candidates(
-    groups: list[dict[str, Any]], node_names: set[str]
-) -> list[str]:
-    candidates = _static_proxies_in_group(groups, "GPT专用", node_names)
-    if not candidates:
-        candidates = _static_proxies_in_group(groups, "GPT自动", node_names)
-    return candidates
-
-
-def extract_gemini_candidates(
-    groups: list[dict[str, Any]], node_names: set[str]
-) -> list[str]:
-    """Gemini candidates: region-filtered (legacy path) or probe-driven.
-
-    When *probe_results* is provided the hardcoded US exclusion is NOT applied
-    — only probe PASS / FAIL matters.  Without probes the legacy region filter
-    applies for backward compatibility.
-    """
-    candidates = _static_proxies_in_group(groups, "Gemini专用", node_names)
-    if not candidates:
-        candidates = _static_proxies_in_group(groups, "Gemini自动", node_names)
-    if not candidates:
-        candidates = list(node_names)
-
-    allowed_regions = {"日本", "台湾", "香港", "德国"}
-    return ordered_unique(
-        n for n in candidates if detect_region(n) in allowed_regions
-    )
-
-
-def extract_disney_candidates(
-    groups: list[dict[str, Any]],
-    node_names: set[str],
-    media_keywords: list[str],
-) -> list[str]:
-    candidates = _static_proxies_in_group(groups, "迪士尼", node_names)
-    if not candidates:
-        candidates = _static_proxies_in_group(groups, "迪士尼自动", node_names)
-
-    matched = [
-        name
-        for name in node_names
-        if any(keyword.casefold() in name.casefold() for keyword in media_keywords)
-    ]
-    result = ordered_unique(list(candidates) + matched)
+        raise ConfigError(f"Duplicate proxy names: {', '.join(duplicates)}")
+    if not result:
+        raise ConfigError("No usable static nodes remain after removing placeholders.")
     return result
 
 
-def filter_nodes_by_probe(
-    candidates: list[str],
-    probe_results: dict[str, NodeProbeResults],
-    service: str,
-) -> list[str]:
-    """Return only candidates whose probe status is PASS for *service*.
-
-    *service* is one of ``"gpt"``, ``"gemini"``, ``"disney"``.
-    Candidates not found in *probe_results* are excluded.
-    """
-    passed: list[str] = []
-    for name in candidates:
-        nr = probe_results.get(name)
-        if nr is None:
-            continue
-        if service == "gpt" and nr.gpt.status == STATUS_PASS:
-            passed.append(name)
-        elif service == "gemini" and nr.gemini.status == STATUS_PASS:
-            passed.append(name)
-        elif service == "disney" and nr.disney.status == STATUS_PASS:
-            passed.append(name)
-    return passed
-
-
-def apply_gemini_manual_overrides(
-    gemini_nodes: list[str],
-    all_node_names: list[str],
-    probe_results: dict[str, NodeProbeResults] | None,
-) -> list[str]:
-    """Apply *GEMINI_MANUAL_OVERRIDES* and report mismatches.
-
-    *overrides* map exact node names to ``STATUS_PASS`` or ``STATUS_FAIL``.
-    Overridden nodes are forced in or out of *gemini_nodes* regardless of
-    what the probe reported.  When a probe result disagrees with the
-    override, a ``PROBE_OVERRIDE_MISMATCH`` line is printed so the user
-    knows the probe needs calibration.
-
-    Overrides only affect Gemini — they do not alter GPT, Disney, or
-    global proxy groups.
-    """
-    overrides = GEMINI_MANUAL_OVERRIDES
-    if not overrides:
-        return gemini_nodes
-
-    result = set(gemini_nodes)
-
-    for name, verdict in overrides.items():
-        if name not in all_node_names:
-            continue  # node not present in this config; nothing to do
-
-        if probe_results is not None:
-            probe = probe_results.get(name)
-            if probe is not None and probe.gemini.status != verdict:
-                print(
-                    f"{PROBE_OVERRIDE_MISMATCH}: node={name!r} "
-                    f"override={verdict} probe={probe.gemini.status}"
-                )
-
-        if verdict == STATUS_PASS:
-            result.add(name)
-        elif verdict == STATUS_FAIL:
-            result.discard(name)
-
-    # Preserve original ordering, then append any new nodes at the end
-    seen = set()
-    ordered: list[str] = []
-    for name in gemini_nodes:
-        if name in result and name not in seen:
-            ordered.append(name)
-            seen.add(name)
-    for name in result:
-        if name not in seen:
-            ordered.append(name)
-            seen.add(name)
-
-    return ordered
-
-
-# ---------------------------------------------------------------------------
-# Group building
-# ---------------------------------------------------------------------------
-
-
-def build_fallback_group(
-    name: str,
-    proxies: list[str],
+def resolve_candidates(
+    available_names: Sequence[str],
+    candidates: Sequence[str],
     *,
-    url: str = FALLBACK_URL,
-    interval: int = FALLBACK_INTERVAL,
-    timeout: int = FALLBACK_TIMEOUT,
-    max_failed_times: int = FALLBACK_MAX_FAILED,
-) -> dict[str, Any]:
+    label: str,
+) -> list[str]:
+    raw_map = {name: name for name in available_names}
+    normalized_map: dict[str, list[str]] = {}
+    for name in available_names:
+        normalized_map.setdefault(normalize_node_name(name), []).append(name)
+
+    resolved: list[str] = []
+    for candidate in candidates:
+        if candidate in raw_map:
+            resolved.append(candidate)
+            continue
+        matches = normalized_map.get(normalize_node_name(candidate), [])
+        if len(matches) == 1:
+            resolved.append(matches[0])
+        elif len(matches) > 1:
+            raise ConfigError(
+                f"Ambiguous normalized {label} candidate '{candidate}': {', '.join(matches)}"
+            )
+
+    resolved = ordered_unique(resolved)
+    if not resolved:
+        raise ConfigError(f"No {label} candidate from the accepted profile exists in this subscription.")
+    return resolved
+
+
+def region_rank(name: str, *, gemini: bool = False) -> int:
+    if "日本" in name or "🇯🇵" in name:
+        return 0
+    if "台湾" in name or "🇹🇼" in name:
+        return 1
+    if gemini and ("香港" in name or "🇭🇰" in name):
+        return 2
+    if gemini and ("德国" in name or "🇩🇪" in name):
+        return 3
+    return 4 if gemini else 2
+
+
+def stable_region_sort(
+    names: Sequence[str],
+    source_order: dict[str, int],
+    *,
+    gemini: bool = False,
+) -> list[str]:
+    return sorted(names, key=lambda name: (region_rank(name, gemini=gemini), source_order[name]))
+
+
+def fallback_group(name: str, proxies: list[str]) -> dict[str, Any]:
     return {
         "name": name,
         "type": "fallback",
         "proxies": proxies,
-        "url": url,
-        "interval": interval,
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": 60,
         "lazy": True,
-        "timeout": timeout,
-        "max-failed-times": max_failed_times,
+        "timeout": 5000,
+        "max-failed-times": 1,
     }
 
 
-def build_select_group(name: str, proxies: list[str]) -> dict[str, Any]:
-    return {"name": name, "type": "select", "proxies": proxies}
-
-
-# ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
-
-
-def remove_skill_groups(groups: list[dict[str, Any]]) -> None:
-    to_remove = [i for i, g in enumerate(groups) if is_skill_group(g.get("name", ""))]
-    for i in reversed(to_remove):
-        del groups[i]
-
-
-def remove_old_match_rules(data: dict[str, Any]) -> None:
-    rules = data.get("rules", [])
-    if not isinstance(rules, list):
-        raise ConfigError("'rules' must be a list.")
-    data["rules"] = [
-        r for r in rules if not (isinstance(r, str) and r.strip().upper().startswith("MATCH,"))
+def build_groups(
+    all_nodes: list[str],
+    gpt_nodes: list[str],
+    gemini_nodes: list[str],
+    disney_nodes: list[str],
+) -> list[dict[str, Any]]:
+    return [
+        {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
+        {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
+        fallback_group("自动选择", all_nodes),
+        {"name": "GPT专用", "type": "select", "proxies": ["GPT手动", "GPT自动"]},
+        {"name": "GPT手动", "type": "select", "proxies": ["GPT自动", *gpt_nodes]},
+        fallback_group("GPT自动", gpt_nodes),
+        {"name": "Gemini专用", "type": "select", "proxies": ["Gemini手动", "Gemini自动"]},
+        {"name": "Gemini手动", "type": "select", "proxies": ["Gemini自动", *gemini_nodes]},
+        fallback_group("Gemini自动", gemini_nodes),
+        {"name": "迪士尼", "type": "select", "proxies": ["迪士尼手动", "迪士尼自动"]},
+        {"name": "迪士尼手动", "type": "select", "proxies": ["迪士尼自动", *disney_nodes]},
+        fallback_group("迪士尼自动", disney_nodes),
     ]
 
 
-def remove_probe_groups(groups: list[dict[str, Any]]) -> None:
-    """Remove any temporary PROBE groups from the final config."""
-    to_remove = [i for i, g in enumerate(groups) if g.get("name") == PROBE_GROUP_NAME]
-    for i in reversed(to_remove):
-        del groups[i]
+def rule_target(rule: str) -> str | None:
+    parts = [part.strip() for part in rule.split(",")]
+    if not parts:
+        return None
+    if parts[0].upper() == "MATCH":
+        return parts[1] if len(parts) > 1 else None
+    if parts[-1].lower() == "no-resolve":
+        return parts[-2] if len(parts) >= 3 else None
+    return parts[-1] if len(parts) >= 2 else None
 
 
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
+def build_rules(data: dict[str, Any]) -> list[str]:
+    rules = data.get("rules", [])
+    if not isinstance(rules, list):
+        raise ConfigError("'rules' must be a list.")
+
+    preserved: list[str] = []
+    for rule in rules:
+        if not isinstance(rule, str):
+            continue
+        stripped = rule.strip()
+        target = rule_target(stripped)
+        if stripped.upper().startswith("MATCH,"):
+            continue
+        # Replace older default-group name.
+        stripped = stripped.replace(",顺畅网络", ",默认代理")
+        # Service rules are regenerated from the accepted narrow rule set.
+        if target in {"GPT专用", "Gemini专用", "迪士尼"}:
+            continue
+        preserved.append(stripped)
+
+    return ordered_unique([*SERVICE_RULES, *preserved, "MATCH,默认代理"])
 
 
-def validate_references(data: dict[str, Any], node_names: list[str]) -> None:
-    groups = data.get("proxy-groups", [])
-    group_names = {
-        item.get("name")
-        for item in groups
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-    valid_targets = set(node_names) | group_names | {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}
+def validate_config(data: dict[str, Any]) -> None:
+    proxies = static_proxy_objects(data)
+    proxy_names = {str(proxy["name"]) for proxy in proxies}
 
+    groups = data.get("proxy-groups")
+    if not isinstance(groups, list):
+        raise ConfigError("'proxy-groups' must be a list.")
+    group_names = [group.get("name") for group in groups if isinstance(group, dict)]
+    if group_names != list(MANAGED_GROUP_NAMES):
+        raise ConfigError(
+            "Managed groups do not match the accepted 12-group structure: "
+            + ", ".join(str(name) for name in group_names)
+        )
+    if len(set(group_names)) != len(group_names):
+        raise ConfigError("Duplicate proxy-group names detected.")
+    if any("优先│" in str(name) or "优先｜" in str(name) for name in group_names):
+        raise ConfigError("Per-node priority wrapper groups are forbidden.")
+
+    group_name_set = set(group_names)
+    graph: dict[str, list[str]] = {str(name): [] for name in group_names}
     errors: list[str] = []
     for group in groups:
-        name = group.get("name", "<unnamed>")
-        refs = group.get("proxies", [])
-        if refs is None:
+        if not isinstance(group, dict):
+            errors.append("proxy-groups contains a non-object item")
             continue
+        name = str(group.get("name", "<unnamed>"))
+        refs = group.get("proxies")
         if not isinstance(refs, list):
             errors.append(f"group '{name}' has a non-list proxies field")
             continue
         for ref in refs:
-            if isinstance(ref, str) and ref not in valid_targets:
+            if not isinstance(ref, str):
+                errors.append(f"group '{name}' contains a non-string target")
+                continue
+            if ref not in proxy_names and ref not in group_name_set and ref not in BUILTIN_TARGETS:
                 errors.append(f"group '{name}' references missing target '{ref}'")
+            if ref in group_name_set:
+                graph[name].append(ref)
 
-    if errors:
-        raise ConfigError("Reference validation failed:\n- " + "\n- ".join(errors))
+    visiting: set[str] = set()
+    visited: set[str] = set()
 
+    def has_cycle(node: str) -> bool:
+        if node in visiting:
+            return True
+        if node in visited:
+            return False
+        visiting.add(node)
+        for child in graph[node]:
+            if has_cycle(child):
+                return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
 
-def check_cycles(groups: list[dict[str, Any]]) -> None:
-    group_map: dict[str, list[str]] = {}
-    for g in groups:
-        name = g.get("name", "")
-        refs = g.get("proxies", [])
-        if isinstance(name, str) and isinstance(refs, list):
-            group_map[name] = [r for r in refs if isinstance(r, str)]
+    if any(has_cycle(node) for node in graph):
+        errors.append("proxy-group reference cycle detected")
 
-    errors: list[str] = []
-
-    for gname, refs in group_map.items():
-        if gname in refs:
-            errors.append(f"group '{gname}' references itself")
-
-    for gname, refs in group_map.items():
-        for r in refs:
-            if r in group_map and gname in group_map[r] and gname != r:
-                errors.append(f"cycle detected: '{gname}' ↔ '{r}'")
-
-    if errors:
-        raise ConfigError("Cycle validation failed:\n- " + "\n- ".join(errors))
-
-
-def check_unique_group_names(groups: list[dict[str, Any]]) -> None:
-    names = [g.get("name", "") for g in groups]
-    duplicates = sorted({n for n in names if names.count(n) > 1})
-    if duplicates:
-        raise ConfigError(f"Duplicate group names: {', '.join(duplicates)}")
-
-
-def check_node_count(data: dict[str, Any], *, min_nodes: int = 1) -> int:
-    names = static_node_names(data)
-    count = len(names)
-    if count < min_nodes:
-        raise ConfigError(
-            f"Only {count} static node(s) found (minimum required: {min_nodes}). "
-            "The Clash Verge effective configuration may not be the merged result."
-        )
-    return count
-
-
-def validate_service_nodes(
-    gpt_nodes: list[str],
-    gemini_nodes: list[str],
-    disney_nodes: list[str],
-) -> str | None:
-    """Return a BLOCKED_* constant if any service group is empty, else None."""
-    if not gpt_nodes:
-        return BLOCKED_NO_VALID_GPT
-    if not gemini_nodes:
-        return BLOCKED_NO_VALID_GEMINI
-    if not disney_nodes:
-        return BLOCKED_NO_VALID_DISNEY
-    return None
-
-
-def local_validate(data: dict[str, Any]) -> dict[str, Any]:
-    node_names = static_node_names(data)
-    groups = data.get("proxy-groups", [])
-    validate_references(data, node_names)
-    check_cycles(groups)
-    check_unique_group_names(groups)
-
-    text = yaml.safe_dump(
-        data,
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-        width=4096,
-    )
-    reloaded = yaml.safe_load(text)
-    if not isinstance(reloaded, dict):
-        raise ConfigError("Output YAML re-serialisation produced a non-dict root.")
-    if "proxy-groups" not in reloaded:
-        raise ConfigError("Output YAML re-serialisation lost the proxy-groups key.")
-
-    return data
-
-
-# ---------------------------------------------------------------------------
-# Main transform
-# ---------------------------------------------------------------------------
-
-
-def transform(
-    data: dict[str, Any],
-    *,
-    manual_group: str,
-    auto_group: str,
-    disney_group: str,
-    media_keywords: list[str],
-    test_url: str = FALLBACK_URL,
-    interval: int = FALLBACK_INTERVAL,
-    tolerance: int | None = None,
-    probe_results: dict[str, NodeProbeResults] | None = None,
-) -> dict[str, Any]:
-    node_names = static_node_names(data)
-    node_set = set(node_names)
-    groups = data.setdefault("proxy-groups", [])
-    if not isinstance(groups, list):
-        raise ConfigError("'proxy-groups' must be a list.")
-    for index, item in enumerate(groups):
-        if not isinstance(item, dict):
-            raise ConfigError(f"proxy-groups[{index}] is not an object.")
-
-    # --- Extract candidates (pre-cleanup) ---
-    global_nodes = node_names
-    gpt_nodes = extract_gpt_candidates(groups, node_set)
-    if probe_results is not None:
-        # When probes are available, candidate pools start from ALL static
-        # nodes.  The probe results determine which nodes enter each service
-        # group, so we do not filter by group membership or region here.
-        gemini_nodes = list(node_set)
-    else:
-        gemini_nodes = extract_gemini_candidates(groups, node_set)
-    disney_nodes = extract_disney_candidates(groups, node_set, media_keywords)
-
-    # --- Probe-based filtering (when available) ---
-    if probe_results is not None:
-        gpt_nodes = filter_nodes_by_probe(gpt_nodes, probe_results, "gpt")
-        gemini_nodes = [n for n in gemini_nodes if
-                        probe_results.get(n) and probe_results[n].gemini.status == STATUS_PASS]
-        disney_nodes = filter_nodes_by_probe(disney_nodes, probe_results, "disney")
-
-    # --- Gemini manual override (even without probe results) ---
-    gemini_nodes = apply_gemini_manual_overrides(
-        gemini_nodes, node_names, probe_results,
-    )
-
-    # Sort deterministically
-    global_nodes_sorted = sorted(global_nodes, key=_region_order_global_tw_others)
-    gpt_nodes_sorted = sorted(gpt_nodes, key=_region_order_global_tw_others) if gpt_nodes else []
-    gemini_nodes_sorted = sorted(gemini_nodes, key=_region_order_gemini) if gemini_nodes else []
-    disney_nodes_sorted = sorted(disney_nodes, key=_region_order_global_tw_others) if disney_nodes else []
-
-    # --- Remove old skill groups ---
-    remove_skill_groups(groups)
-    remove_old_match_rules(data)
-    remove_probe_groups(groups)
-
-    # --- Build groups ---
-    fallback_url = test_url if test_url != FALLBACK_URL else FALLBACK_URL
-
-    global_auto = build_fallback_group(
-        auto_group,
-        global_nodes_sorted,
-        url=fallback_url,
-        interval=interval,
-    )
-    manual = build_select_group(
-        manual_group,
-        [auto_group] + global_nodes_sorted,
-    )
-    default = build_select_group(
-        "默认代理",
-        [manual_group, auto_group],
-    )
-
-    new_groups: list[dict[str, Any]] = [default, manual, global_auto]
-
-    if gpt_nodes_sorted:
-        gpt_auto = build_fallback_group(
-            "GPT自动",
-            gpt_nodes_sorted,
-            url=fallback_url,
-            interval=interval,
-        )
-        gpt_manual = build_select_group(
-            "GPT手动",
-            ["GPT自动"] + gpt_nodes_sorted,
-        )
-        gpt_special = build_select_group(
-            "GPT专用",
-            ["GPT手动", "GPT自动"],
-        )
-        new_groups.extend([gpt_special, gpt_manual, gpt_auto])
-
-    if gemini_nodes_sorted:
-        gemini_auto = build_fallback_group(
-            "Gemini自动",
-            gemini_nodes_sorted,
-            url=fallback_url,
-            interval=interval,
-        )
-        gemini_manual = build_select_group(
-            "Gemini手动",
-            ["Gemini自动"] + gemini_nodes_sorted,
-        )
-        gemini_special = build_select_group(
-            "Gemini专用",
-            ["Gemini手动", "Gemini自动"],
-        )
-        new_groups.extend([gemini_special, gemini_manual, gemini_auto])
-
-    if disney_nodes_sorted:
-        disney_auto = build_fallback_group(
-            "迪士尼自动",
-            disney_nodes_sorted,
-            url=fallback_url,
-            interval=interval,
-        )
-        disney_manual = build_select_group(
-            "迪士尼手动",
-            ["迪士尼自动"] + disney_nodes_sorted,
-        )
-        disney_special = build_select_group(
-            "迪士尼",
-            ["迪士尼手动", "迪士尼自动"],
-        )
-        new_groups.extend([disney_special, disney_manual, disney_auto])
-
-    data["proxy-groups"] = new_groups
-
-    # --- Final MATCH ---
-    rules = data.setdefault("rules", [])
+    rules = data.get("rules")
     if not isinstance(rules, list):
-        raise ConfigError("'rules' must be a list.")
-    rules.append("MATCH,默认代理")
+        errors.append("'rules' must be a list")
+    else:
+        for rule in rules:
+            if not isinstance(rule, str):
+                errors.append("rules contains a non-string item")
+                continue
+            target = rule_target(rule)
+            if target and target not in proxy_names and target not in group_name_set and target not in BUILTIN_TARGETS:
+                errors.append(f"rule references missing target '{target}': {rule}")
+        matches = [rule for rule in rules if isinstance(rule, str) and rule.upper().startswith("MATCH,")]
+        if matches != ["MATCH,默认代理"] or not rules or rules[-1] != "MATCH,默认代理":
+            errors.append(f"final MATCH must be exactly MATCH,默认代理; got {matches}")
 
-    # --- Validate ---
-    all_node_names = node_names
-    validate_references(data, all_node_names)
-    check_cycles(data["proxy-groups"])
-    check_unique_group_names(data["proxy-groups"])
-
-    return data
-
-
-# ---------------------------------------------------------------------------
-# Probe summary
-# ---------------------------------------------------------------------------
-
-
-def print_probe_report(results: dict[str, NodeProbeResults], duration_sec: float, core_path: str) -> None:
-    """Print a deterministic probe report without leaking secrets."""
-    total = len(results)
-    gpt_pass = sum(1 for nr in results.values() if nr.gpt.status == STATUS_PASS)
-    gpt_fail = sum(1 for nr in results.values() if nr.gpt.status == STATUS_FAIL)
-    gpt_unknown = sum(1 for nr in results.values() if nr.gpt.status == STATUS_UNKNOWN)
-    gemini_pass = sum(1 for nr in results.values() if nr.gemini.status == STATUS_PASS)
-    gemini_fail = sum(1 for nr in results.values() if nr.gemini.status == STATUS_FAIL)
-    gemini_unknown = sum(1 for nr in results.values() if nr.gemini.status == STATUS_UNKNOWN)
-    disney_pass = sum(1 for nr in results.values() if nr.disney.status == STATUS_PASS)
-    disney_fail = sum(1 for nr in results.values() if nr.disney.status == STATUS_FAIL)
-    disney_unknown = sum(1 for nr in results.values() if nr.disney.status == STATUS_UNKNOWN)
-
-    print(f"probe_total_nodes={total}")
-    print(f"probe_duration_seconds={duration_sec:.1f}")
-    print(f"probe_core_path={core_path}")
-    print(f"probe_core_cleaned_up=true")
-    print(f"probe_gpt_pass={gpt_pass}")
-    print(f"probe_gpt_fail={gpt_fail}")
-    print(f"probe_gpt_unknown={gpt_unknown}")
-    print(f"probe_gemini_pass={gemini_pass}")
-    print(f"probe_gemini_fail={gemini_fail}")
-    print(f"probe_gemini_unknown={gemini_unknown}")
-    print(f"probe_disney_pass={disney_pass}")
-    print(f"probe_disney_fail={disney_fail}")
-    print(f"probe_disney_unknown={disney_unknown}")
-
-    # Per-node details (safe — names only)
-    print("--- per-node results ---")
-    for node_name in sorted(results.keys()):
-        nr = results[node_name]
-        gpt_st = nr.gpt.status
-        gem_st = nr.gemini.status
-        dis_st = nr.disney.status
-        print(f"  {node_name}: base={nr.base.status} gpt={gpt_st} gemini={gem_st} disney={dis_st}")
+    if errors:
+        raise ConfigError("Validation failed:\n- " + "\n- ".join(errors))
 
 
-# ---------------------------------------------------------------------------
-# Export / Deploy
-# ---------------------------------------------------------------------------
+def transform(data: dict[str, Any]) -> dict[str, Any]:
+    output = remove_clash_verge_runtime(deepcopy(data))
+    proxies = static_proxy_objects(output)
+    output["proxies"] = proxies
+    names = [str(proxy["name"]) for proxy in proxies]
+    source_order = {name: index for index, name in enumerate(names)}
+
+    all_nodes = stable_region_sort(names, source_order)
+    gpt_nodes = stable_region_sort(
+        resolve_candidates(names, GPT_CANDIDATES, label="GPT"), source_order
+    )
+    gemini_nodes = stable_region_sort(
+        resolve_candidates(names, GEMINI_CANDIDATES, label="Gemini"),
+        source_order,
+        gemini=True,
+    )
+    disney_nodes = stable_region_sort(
+        resolve_candidates(names, DISNEY_CANDIDATES, label="Disney"), source_order
+    )
+
+    output["proxy-groups"] = build_groups(all_nodes, gpt_nodes, gemini_nodes, disney_nodes)
+    output["rules"] = build_rules(output)
+
+    validate_config(output)
+    return output
+
+
+def remove_clash_verge_runtime(value: Any, *, top_level: bool = True) -> Any:
+    """Drop Clash Verge process-local fields without touching proxy connection fields."""
+    if isinstance(value, list):
+        return [
+            cleaned
+            for item in value
+            if (cleaned := remove_clash_verge_runtime(item, top_level=False)) is not _DROP_RUNTIME
+        ]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            is_temporary_runtime_key = (
+                lowered.startswith("probe-")
+                or lowered.startswith("probe_")
+                or lowered.startswith("controller-")
+                or lowered.startswith("controller_")
+                or lowered.startswith("temporary-probe")
+                or lowered.startswith("temporary_probe")
+                or lowered.startswith("temporary-controller")
+                or lowered.startswith("temporary_controller")
+            )
+            if (top_level and lowered in CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS) or is_temporary_runtime_key:
+                continue
+            cleaned = remove_clash_verge_runtime(item, top_level=False)
+            if cleaned is not _DROP_RUNTIME:
+                result[key] = cleaned
+        return result
+    if isinstance(value, str) and (value == "/tmp/verge" or value.startswith("/tmp/verge/")):
+        return _DROP_RUNTIME
+    return value
+
+
+def redact_value(value: Any, *, path: tuple[str, ...] = ()) -> Any:
+    if isinstance(value, list):
+        return [redact_value(item, path=path) for item in value]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            provider_url = lowered == "url" and "proxy-providers" in path
+            if lowered in SENSITIVE_KEYS or provider_url:
+                if lowered == "port":
+                    result[key] = 0
+                elif lowered == "uuid":
+                    result[key] = "00000000-0000-0000-0000-000000000000"
+                else:
+                    result[key] = "REDACTED"
+            else:
+                result[key] = redact_value(item, path=(*path, lowered))
+        return result
+    return value
+
+
+def make_audit_copy(data: dict[str, Any]) -> dict[str, Any]:
+    return redact_value(deepcopy(data))
 
 
 def export_source(source: Path | None, workdir: Path) -> Path:
     source = source or find_default_source()
+    source = source.expanduser().resolve()
     if not source.is_file():
         raise ConfigError(f"Source does not exist: {source}")
     workdir.mkdir(parents=True, exist_ok=True)
     destination = workdir / f"clash-verge-effective-{now_stamp()}.yaml"
     shutil.copy2(source, destination)
+    os.chmod(destination, 0o600)
     return destination
+
+
+def transform_file(input_path: Path, output_path: Path, audit_output: Path | None) -> dict[str, Any]:
+    transformed = transform(load_yaml(input_path))
+    dump_yaml(transformed, output_path)
+    # Reparse the actual written file before reporting success.
+    validate_config(load_yaml(output_path))
+
+    if audit_output is not None:
+        dump_yaml(make_audit_copy(transformed), audit_output)
+        load_yaml(audit_output)
+    return transformed
+
+
+def quote_remote(value: str) -> str:
+    return shlex.quote(value)
+
+
+def ssh_command(host: str, command: str, *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    return run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
+        capture=capture,
+    )
+
+
+def read_remote_openclash_state(host: str) -> dict[str, str | bool]:
+    command = (
+        "OPENCLASH_STATE_READ=1; set -e; "
+        "active_path=\"$(uci -q get openclash.config.config_path)\"; "
+        "[ -n \"$active_path\" ]; "
+        "case \"$active_path\" in /*) ;; *) exit 1 ;; esac; "
+        "printf 'active_path=%s\\n' \"$active_path\"; "
+        "if [ -f \"$active_path\" ]; then printf 'active_exists=1\\n'; "
+        "else printf 'active_exists=0\\n'; fi; "
+        "if /etc/init.d/openclash enabled >/dev/null 2>&1; then printf 'enabled=1\\n'; "
+        "else printf 'enabled=0\\n'; fi; "
+        "if /etc/init.d/openclash running >/dev/null 2>&1; then printf 'running=1\\n'; "
+        "else printf 'running=0\\n'; fi"
+    )
+    try:
+        result = ssh_command(host, command, capture=True)
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED") from exc
+
+    values: dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in {"active_path", "active_exists", "enabled", "running"}:
+            values[key] = value
+
+    if set(values) != {"active_path", "active_exists", "enabled", "running"}:
+        raise ConfigError("REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED: incomplete state")
+    active_path = values["active_path"]
+    if not active_path.startswith("/") or "\n" in active_path:
+        raise ConfigError("REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED: invalid path")
+    for key in ("active_exists", "enabled", "running"):
+        if values[key] not in {"0", "1"}:
+            raise ConfigError(f"REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED: invalid {key}")
+
+    return {
+        "active_path": active_path,
+        "active_exists": values["active_exists"] == "1",
+        "enabled": values["enabled"] == "1",
+        "running": values["running"] == "1",
+    }
+
+
+def verify_remote_health(
+    host: str,
+    *,
+    remote_path: str,
+    core_path: str,
+    attempts: int = HEALTH_CHECK_ATTEMPTS,
+    delay_seconds: int = HEALTH_CHECK_DELAY_SECONDS,
+) -> None:
+    if attempts < 1:
+        raise ConfigError("HEALTH_CHECK_FAILED: attempts must be at least 1")
+    command = (
+        "OPENCLASH_HEALTH_CHECK=1; set -e; "
+        "/etc/init.d/openclash running >/dev/null 2>&1; "
+        "active_path=\"$(uci -q get openclash.config.config_path)\"; "
+        "[ -n \"$active_path\" ]; "
+        f"[ \"$active_path\" = {quote_remote(remote_path)} ]; "
+        f"{quote_remote(core_path)} -t -d /etc/openclash -f \"$active_path\"; "
+        "proxy_port=''; "
+        "for option in mixed_port http_port; do "
+        "candidate=\"$(uci -q get openclash.config.$option 2>/dev/null || true)\"; "
+        "case \"$candidate\" in ''|*[!0-9]*) ;; *) proxy_port=\"$candidate\"; break ;; esac; "
+        "done; "
+        "runtime_path=\"/etc/openclash/$(basename \"$active_path\")\"; "
+        "if [ -z \"$proxy_port\" ]; then "
+        "for config_path in \"$runtime_path\" \"$active_path\"; do "
+        "[ -f \"$config_path\" ] || continue; "
+        "proxy_port=\"$(sed -n 's/^mixed-port:[[:space:]]*\\([0-9][0-9]*\\).*$/\\1/p' \"$config_path\" | head -n 1)\"; "
+        "[ -n \"$proxy_port\" ] || proxy_port=\"$(sed -n 's/^port:[[:space:]]*\\([0-9][0-9]*\\).*$/\\1/p' \"$config_path\" | head -n 1)\"; "
+        "[ -n \"$proxy_port\" ] && break; "
+        "done; fi; "
+        "case \"$proxy_port\" in ''|*[!0-9]*) exit 1 ;; esac; "
+        "[ \"$proxy_port\" -ge 1 ] && [ \"$proxy_port\" -le 65535 ]; "
+        "if command -v ss >/dev/null 2>&1; then "
+        "ss -lnt | awk -v port=\"$proxy_port\" '$4 ~ (\":\" port \"$\") {found=1} END {exit !found}'; "
+        "elif command -v netstat >/dev/null 2>&1; then "
+        "netstat -lnt | awk -v port=\"$proxy_port\" '$4 ~ (\":\" port \"$\") {found=1} END {exit !found}'; "
+        "else exit 1; fi; "
+        "http_code=\"$(curl --proxy \"http://127.0.0.1:${proxy_port}\" "
+        "--connect-timeout 3 --max-time 8 --silent --output /dev/null "
+        "--write-out '%{http_code}' https://www.gstatic.com/generate_204)\"; "
+        "[ \"$http_code\" = '204' ]"
+    )
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(attempts):
+        try:
+            ssh_command(host, command, capture=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    raise ConfigError(f"HEALTH_CHECK_FAILED after {attempts} attempts") from last_error
+
+
+def rollback_remote_deployment(
+    host: str,
+    *,
+    remote_path: str,
+    target_backup: str,
+    target_absent_marker: str,
+    original_active_path: str,
+    original_active_exists: bool,
+    active_backup: str,
+    uci_backup: str,
+    service_state_backup: str,
+    core_path: str,
+    original_enabled: bool,
+    original_running: bool,
+) -> None:
+    restore_parts = [
+        "OPENCLASH_ROLLBACK=1; set -e",
+        (
+            f"if [ -f {quote_remote(target_absent_marker)} ]; then "
+            f"rm -f {quote_remote(remote_path)}; else "
+            f"cp -p {quote_remote(target_backup)} {quote_remote(remote_path)}; "
+            f"chmod 600 {quote_remote(remote_path)}; fi"
+        ),
+        (
+            f"cp -p {quote_remote(active_backup)} {quote_remote(original_active_path)}; "
+            f"chmod 600 {quote_remote(original_active_path)}"
+            if original_active_exists
+            else f"rm -f {quote_remote(original_active_path)}"
+        ),
+        f"cp -p {quote_remote(uci_backup)} /etc/config/openclash",
+        (
+            "/etc/init.d/openclash enable"
+            if original_enabled
+            else "/etc/init.d/openclash disable"
+        ),
+        (
+            "/etc/init.d/openclash restart"
+            if original_running
+            else "/etc/init.d/openclash stop"
+        ),
+    ]
+    try:
+        ssh_command(host, "; ".join(restore_parts))
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("ROLLBACK_FAILED: restore command failed") from exc
+
+    verify_parts = [
+        "OPENCLASH_ROLLBACK_VERIFY=1; set -e",
+        (
+            f"if [ -f {quote_remote(target_absent_marker)} ]; then "
+            f"[ ! -e {quote_remote(remote_path)} ]; else "
+            f"cmp -s {quote_remote(target_backup)} {quote_remote(remote_path)}; fi"
+        ),
+        f"cmp -s {quote_remote(uci_backup)} /etc/config/openclash",
+        f"[ \"$(uci -q get openclash.config.config_path)\" = {quote_remote(original_active_path)} ]",
+        (
+            f"cmp -s {quote_remote(active_backup)} {quote_remote(original_active_path)}; "
+            f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(original_active_path)}"
+            if original_active_exists
+            else f"[ ! -e {quote_remote(original_active_path)} ]"
+        ),
+        (
+            "/etc/init.d/openclash enabled >/dev/null 2>&1"
+            if original_enabled
+            else "! /etc/init.d/openclash enabled >/dev/null 2>&1"
+        ),
+        (
+            "/etc/init.d/openclash running >/dev/null 2>&1"
+            if original_running
+            else "! /etc/init.d/openclash running >/dev/null 2>&1"
+        ),
+        f"grep -Fqx {quote_remote(f'active_path={original_active_path}')} {quote_remote(service_state_backup)}",
+    ]
+    try:
+        ssh_command(host, "; ".join(verify_parts), capture=True)
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("ROLLBACK_FAILED: rollback verification failed") from exc
 
 
 def deploy(
@@ -1522,8 +791,10 @@ def deploy(
     core_path: str,
     activate: bool,
 ) -> str:
+    local_file = local_file.expanduser().resolve()
     if not local_file.is_file():
         raise ConfigError(f"Output file does not exist: {local_file}")
+    validate_config(load_yaml(local_file))
 
     filename = remote_name or local_file.name
     if "/" in filename or filename in {".", ".."}:
@@ -1532,555 +803,184 @@ def deploy(
     remote_dir = "/etc/openclash/config"
     remote_path = f"{remote_dir}/{filename}"
     stamp = now_stamp()
-    remote_backup = f"{remote_path}.bak.{stamp}"
     remote_tmp = f"/tmp/{filename}.upload.{stamp}"
+    target_backup = f"/tmp/{filename}.target-yaml.{stamp}.bak"
+    target_absent_marker = f"/tmp/{filename}.target-absent.{stamp}"
+    active_backup = f"/tmp/{filename}.active-yaml.{stamp}.bak"
+    uci_backup = f"/etc/config/openclash.bak.{stamp}"
+    service_state_backup = f"/tmp/{filename}.service-state.{stamp}"
 
-    ssh_command(
-        host,
-        "set -e; "
-        f"mkdir -p {quote_remote(remote_dir)}; "
-        f"if [ -f {quote_remote(remote_path)} ]; then cp -p {quote_remote(remote_path)} {quote_remote(remote_backup)}; fi",
+    original_state = read_remote_openclash_state(host)
+    original_active_path = str(original_state["active_path"])
+    original_active_exists = bool(original_state["active_exists"])
+    original_enabled = bool(original_state["enabled"])
+    original_running = bool(original_state["running"])
+
+    active_snapshot = (
+        f"[ -f {quote_remote(original_active_path)} ]; "
+        f"cp -p {quote_remote(original_active_path)} {quote_remote(active_backup)}; "
+        if original_active_exists
+        else f"[ ! -e {quote_remote(original_active_path)} ]; "
     )
+    snapshot = (
+        "OPENCLASH_BACKUP=1; set -e; "
+        f"rm -f {quote_remote(target_absent_marker)} {quote_remote(service_state_backup)}; "
+        + active_snapshot
+        +
+        f"if [ -f {quote_remote(remote_path)} ]; then "
+        f"cp -p {quote_remote(remote_path)} {quote_remote(target_backup)}; "
+        f"else : > {quote_remote(target_absent_marker)}; fi; "
+        f"cp -p /etc/config/openclash {quote_remote(uci_backup)}; "
+        f"printf '%s\\n' {quote_remote(f'active_path={original_active_path}')} "
+        f"{quote_remote(f'active_exists={int(original_active_exists)}')} "
+        f"{quote_remote(f'enabled={int(original_enabled)}')} "
+        f"{quote_remote(f'running={int(original_running)}')} > {quote_remote(service_state_backup)}"
+    )
+    try:
+        ssh_command(host, snapshot)
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("Remote backup failed; deployment was not started.") from exc
 
-    run(["scp", "-O", str(local_file), f"{host}:{remote_tmp}"])
+    try:
+        run(
+            [
+                "scp",
+                "-O",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                str(local_file),
+                f"{host}:{remote_tmp}",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        try:
+            ssh_command(host, f"rm -f {quote_remote(remote_tmp)}", capture=True)
+        except subprocess.CalledProcessError as cleanup_exc:
+            raise ConfigError("REMOTE_UPLOAD_FAILED_AND_CLEANUP_FAILED") from cleanup_exc
+        raise ConfigError("REMOTE_UPLOAD_FAILED; active configuration unchanged") from exc
 
-    test_cmd = (
+    validate_and_install = (
         "set -e; "
         f"chmod 600 {quote_remote(remote_tmp)}; "
         f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_tmp)}; "
+        f"mkdir -p {quote_remote(remote_dir)}; "
         f"mv -f {quote_remote(remote_tmp)} {quote_remote(remote_path)}; "
         f"chmod 600 {quote_remote(remote_path)}"
     )
     try:
-        ssh_command(host, test_cmd)
+        ssh_command(host, validate_and_install)
     except subprocess.CalledProcessError as exc:
-        ssh_command(host, f"rm -f {quote_remote(remote_tmp)}", capture=True)
-        raise ConfigError("Remote Mihomo validation failed; the active configuration was not changed.") from exc
+        rollback_remote_deployment(
+            host,
+            remote_path=remote_path,
+            target_backup=target_backup,
+            target_absent_marker=target_absent_marker,
+            original_active_path=original_active_path,
+            original_active_exists=original_active_exists,
+            active_backup=active_backup,
+            uci_backup=uci_backup,
+            service_state_backup=service_state_backup,
+            core_path=core_path,
+            original_enabled=original_enabled,
+            original_running=original_running,
+        )
+        try:
+            ssh_command(host, f"rm -f {quote_remote(remote_tmp)}", capture=True)
+        except subprocess.CalledProcessError as cleanup_exc:
+            raise ConfigError("REMOTE_CLEANUP_FAILED_AFTER_ROLLBACK") from cleanup_exc
+        raise ConfigError("REMOTE_INSTALL_FAILED_ROLLED_BACK") from exc
 
     if activate:
         activate_cmd = (
             "set -e; "
-            "cp -p /etc/config/openclash "
-            f"/etc/config/openclash.bak.{stamp}; "
             f"uci set openclash.config.config_path={quote_remote(remote_path)}; "
             "uci set openclash.config.enable='1'; "
             "uci commit openclash; "
             "/etc/init.d/openclash restart"
         )
-        ssh_command(host, activate_cmd)
+        try:
+            ssh_command(host, activate_cmd)
+            verify_remote_health(host, remote_path=remote_path, core_path=core_path)
+        except (subprocess.CalledProcessError, ConfigError) as exc:
+            rollback_remote_deployment(
+                host,
+                remote_path=remote_path,
+                target_backup=target_backup,
+                target_absent_marker=target_absent_marker,
+                original_active_path=original_active_path,
+                original_active_exists=original_active_exists,
+                active_backup=active_backup,
+                uci_backup=uci_backup,
+                service_state_backup=service_state_backup,
+                core_path=core_path,
+                original_enabled=original_enabled,
+                original_running=original_running,
+            )
+            raise ConfigError("HEALTH_CHECK_FAILED_ROLLED_BACK") from exc
 
     return remote_path
 
 
-# ---------------------------------------------------------------------------
-# Sync config
-# ---------------------------------------------------------------------------
-
-
-def load_sync_config() -> dict[str, Any]:
-    """Load the sync configuration file. Create a template if it does not exist."""
-    cfg_path = SYNC_CONFIG_PATH
-    if not cfg_path.is_file():
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(SYNC_CONFIG_TEMPLATE, f, allow_unicode=True, sort_keys=False, width=4096)
-        return dict(SYNC_CONFIG_TEMPLATE)
-
-    try:
-        return load_yaml(cfg_path)
-    except (ConfigError, yaml.YAMLError) as exc:
-        raise ConfigError(f"Invalid sync config {cfg_path}: {exc}") from exc
-
-
-# ---------------------------------------------------------------------------
-# Sync pipeline
-# ---------------------------------------------------------------------------
-
-
-def sync_pipeline(
-    config_path: Path | None,
-    source_path: Path | None,
-    no_activate: bool,
-    config_out: Path | None,
-    probe: bool = False,
-    probe_core: str | None = None,
-) -> dict[str, Any]:
-    """Run the full sync pipeline: export → probe → transform → validate → upload → deploy.
-
-    When *probe* is True, every static node is tested for GPT/Gemini/Disney
-    availability through an isolated Mihomo instance.  Only PASS nodes enter
-    the corresponding service groups.
-    """
-    result: dict[str, Any] = {
-        "input_path": None,
-        "input_mtime": None,
-        "static_nodes": 0,
-        "probed": False,
-        "probe_total_nodes": 0,
-        "probe_gpt_pass": 0,
-        "probe_gemini_pass": 0,
-        "probe_disney_pass": 0,
-        "probe_duration_seconds": 0.0,
-        "probe_core": None,
-        "probe_core_cleaned_up": False,
-        "gpt_candidates": 0,
-        "gemini_candidates": 0,
-        "disney_candidates": 0,
-        "config_sha256": None,
-        "local_validated": False,
-        "remote_validated": False,
-        "replaced": False,
-        "restarted": False,
-        "rolled_back": False,
-        "final_running_config": None,
-        "backup_path": None,
-        "no_change": False,
-        "error": None,
-    }
-
-    # 1. Load sync config
-    cfg = load_sync_config()
-    host = cfg["router"]["host"]
-    core_path = cfg["router"]["core_path"]
-    remote_target = cfg["router"]["remote_target_path"]
-    remote_temp = cfg["router"]["remote_temp_path"]
-    backup_dir = cfg["deployment"]["backup_directory"]
-    health_wait = cfg["deployment"]["health_wait_seconds"]
-    activate = cfg["deployment"]["activate_by_default"] and not no_activate
-
-    # 2. Check SSH BatchMode
-    if not check_ssh_batchmode(host):
-        raise ConfigError(
-            f"BLOCKED_SSH_KEY_REQUIRED\n\n"
-            f"SSH BatchMode authentication failed for {host}.\n"
-            f"Please configure SSH public-key authentication first:\n\n"
-            f"  ssh-copy-id {host}\n\n"
-            "Then re-run the sync command. Hermes never prompts for passwords."
-        )
-
-    # 3. Find / load source
-    source = source_path or find_default_source()
-    if not source.is_file():
-        raise ConfigError(f"Source file not found: {source}")
-
-    mtime = dt.datetime.fromtimestamp(os.path.getmtime(source), tz=dt.timezone.utc)
-    result["input_path"] = str(source)
-    result["input_mtime"] = mtime.isoformat()
-
-    data = load_yaml(source)
-    node_count = check_node_count(data, min_nodes=1)
-    result["static_nodes"] = node_count
-
-    # 4. Probe (if requested)
-    probe_results: dict[str, NodeProbeResults] | None = None
-    if probe:
-        proxies_list = data.get("proxies", [])
-        if not isinstance(proxies_list, list) or not proxies_list:
-            raise ConfigError("No static nodes to probe.")
-        _start = time.monotonic()
-        probe_results = run_probe_pipeline(
-            proxies_list,
-            core_path=probe_core,
-        )
-        probe_duration = time.monotonic() - _start
-
-        result["probed"] = True
-        result["probe_total_nodes"] = len(probe_results)
-        result["probe_gpt_pass"] = sum(1 for nr in probe_results.values() if nr.gpt.status == STATUS_PASS)
-        result["probe_gemini_pass"] = sum(1 for nr in probe_results.values() if nr.gemini.status == STATUS_PASS)
-        result["probe_disney_pass"] = sum(1 for nr in probe_results.values() if nr.disney.status == STATUS_PASS)
-        result["probe_duration_seconds"] = round(probe_duration, 1)
-        # Resolve which core was used
-        try:
-            resolved_core = find_mihomo_core(probe_core)
-            result["probe_core"] = resolved_core
-            result["probe_core_cleaned_up"] = True
-        except ConfigError:
-            result["probe_core"] = "not-found"
-            result["probe_core_cleaned_up"] = False
-
-    # 5. Transform
-    media_keywords = ["流媒体", "媒体流"]
-    manual_group = "手动选择"
-    auto_group = "自动选择"
-    disney_group = "迪士尼"
-
-    transformed = transform(
-        data,
-        manual_group=manual_group,
-        auto_group=auto_group,
-        disney_group=disney_group,
-        media_keywords=media_keywords,
-        probe_results=probe_results,
-    )
-
-    # Count candidates
-    node_set = set(static_node_names(data))
-    groups = transformed.get("proxy-groups", [])
-    gpt = extract_gpt_candidates(groups, node_set)
-    gemini = extract_gemini_candidates(groups, node_set)
-    disney = extract_disney_candidates(groups, node_set, media_keywords)
-    result["gpt_candidates"] = len(gpt)
-    result["gemini_candidates"] = len(gemini)
-    result["disney_candidates"] = len(disney)
-
-    # 5a. Service-empty protection (only when probing was done)
-    if probe:
-        blocked = validate_service_nodes(gpt, gemini, disney)
-        if blocked:
-            raise ConfigError(
-                f"{blocked}\n\n"
-                "No PASS nodes were found for a required service group. "
-                "The existing OpenClash configuration has NOT been modified. "
-                "Run `probe` subcommand for per-node details."
-            )
-
-    # 6. Local validation
-    local_validate(transformed)
-    result["local_validated"] = True
-
-    # Write to temp file for upload / SHA-256
-    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".yaml", prefix="oclash-sync-")
-    tmp_path = Path(tmp_path_str)
-    os.close(tmp_fd)
-    dump_yaml(transformed, tmp_path)
-    config_sha = file_sha256(tmp_path)
-    result["config_sha256"] = config_sha
-
-    # 7. SHA-256 dedup check
-    existing_sha = remote_sha256(host, remote_target)
-    if existing_sha == config_sha:
-        tmp_path.unlink(missing_ok=True)
-        result["no_change"] = True
-        result["final_running_config"] = remote_target
-        return result
-
-    # 8. Remote pre-checks
-    remote_check_file(host, core_path)
-    remote_check_file(host, "/etc/openclash/config")
-
-    # 9. Backup existing config
-    stamp = now_stamp()
-    backup_path = f"{backup_dir}/{Path(remote_target).name}.{stamp}.bak"
-    try:
-        ssh_command(
-            host,
-            "set -e; "
-            f"mkdir -p {quote_remote(backup_dir)}; "
-            f"if [ -f {quote_remote(remote_target)} ]; then "
-            f"  cp -p {quote_remote(remote_target)} {quote_remote(backup_path)}; "
-            f"fi",
-            capture=True,
-        )
-        result["backup_path"] = backup_path
-    except subprocess.CalledProcessError as exc:
-        tmp_path.unlink(missing_ok=True)
-        raise ConfigError(f"Failed to back up remote config: {exc}") from exc
-
-    if no_activate:
-        try:
-            run(["scp", "-O", str(tmp_path), f"{host}:{quote_remote(remote_temp)}"])
-            ssh_command(
-                host,
-                "set -e; "
-                f"chmod 600 {quote_remote(remote_temp)}; "
-                f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_temp)}; "
-                f"mv -f {quote_remote(remote_temp)} {quote_remote(remote_target)}; "
-                f"chmod 600 {quote_remote(remote_target)}",
-            )
-            result["remote_validated"] = True
-            result["replaced"] = True
-            result["final_running_config"] = remote_target
-            result["restarted"] = False
-        except subprocess.CalledProcessError as exc:
-            ssh_command(host, f"rm -f {quote_remote(remote_temp)}", capture=True)
-            tmp_path.unlink(missing_ok=True)
-            raise ConfigError(f"No-activate sync failed during upload or validation: {exc}") from exc
-
-        tmp_path.unlink(missing_ok=True)
-        return result
-
-    # 10. Full sync: upload
-    try:
-        run(["scp", "-O", str(tmp_path), f"{host}:{quote_remote(remote_temp)}"])
-    except subprocess.CalledProcessError as exc:
-        tmp_path.unlink(missing_ok=True)
-        raise ConfigError(f"SCP upload failed: {exc}") from exc
-
-    # 11. Remote core validation
-    try:
-        ssh_command(
-            host,
-            "set -e; "
-            f"chmod 600 {quote_remote(remote_temp)}; "
-            f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_temp)}",
-            capture=True,
-        )
-        result["remote_validated"] = True
-    except subprocess.CalledProcessError as exc:
-        ssh_command(host, f"rm -f {quote_remote(remote_temp)}", capture=True)
-        tmp_path.unlink(missing_ok=True)
-        raise ConfigError("Remote Mihomo validation failed; the active configuration was not changed.") from exc
-
-    # 12. Atomic replace
-    try:
-        ssh_command(
-            host,
-            "set -e; "
-            f"mv -f {quote_remote(remote_temp)} {quote_remote(remote_target)}; "
-            f"chmod 600 {quote_remote(remote_target)}",
-        )
-        result["replaced"] = True
-    except subprocess.CalledProcessError as exc:
-        ssh_command(host, f"rm -f {quote_remote(remote_temp)}", capture=True)
-        tmp_path.unlink(missing_ok=True)
-        raise ConfigError(f"Atomic replace failed: {exc}") from exc
-
-    # 13. Restart OpenClash
-    if activate:
-        try:
-            ssh_command(host, "/etc/init.d/openclash restart", capture=True)
-            result["restarted"] = True
-        except subprocess.CalledProcessError as exc:
-            _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
-            tmp_path.unlink(missing_ok=True)
-            raise ConfigError(f"OpenClash restart failed: {exc}") from exc
-
-        health = run_health_checks(host, health_wait)
-
-        if not health.get("core_process"):
-            _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
-            tmp_path.unlink(missing_ok=True)
-            raise ConfigError("Health check failed: core process not running after restart. Rollback applied.")
-
-        if health.get("fatal_error"):
-            _rollback_and_report(host, backup_path, remote_target, backup_dir, health_wait, result)
-            tmp_path.unlink(missing_ok=True)
-            raise ConfigError("Health check failed: fatal error in OpenClash logs. Rollback applied.")
-
-    tmp_path.unlink(missing_ok=True)
-    result["final_running_config"] = remote_target
-    return result
-
-
-def _rollback_and_report(
-    host: str,
-    backup_path: str,
-    remote_target: str,
-    backup_dir: str,
-    health_wait: int,
-    result: dict[str, Any],
-) -> None:
-    try:
-        exists = remote_file_exists(host, backup_path)
-        if exists:
-            ssh_command(
-                host,
-                "set -e; "
-                f"cp -p {quote_remote(backup_path)} {quote_remote(remote_target)}; "
-                "/etc/init.d/openclash restart",
-                capture=True,
-            )
-            result["rolled_back"] = True
-            result["final_running_config"] = remote_target
-
-            import time
-            time.sleep(health_wait)
-            rb_health = run_health_checks(host, health_wait)
-            if not rb_health.get("core_process"):
-                result["final_running_config"] = f"{remote_target} (rollback applied but core not verified)"
-        else:
-            result["rolled_back"] = False
-            result["final_running_config"] = f"{remote_target} (backup not found at {backup_path})"
-
-    except subprocess.CalledProcessError:
-        result["rolled_back"] = False
-        result["final_running_config"] = f"{remote_target} (rollback attempted but failed)"
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Convert a Clash Verge effective YAML into a static OpenClash configuration."
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    # --- existing commands ---
-    export_p = sub.add_parser("export", help="Copy the current Clash Verge effective YAML to a work directory.")
-    export_p.add_argument("--source", type=Path)
-    export_p.add_argument("--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work")
-
-    transform_p = sub.add_parser("transform", help="Transform an exported/effective YAML.")
-    transform_p.add_argument("--input", type=Path, required=True)
-    transform_p.add_argument("--output", type=Path, required=True)
-    add_transform_args(transform_p)
-
-    all_p = sub.add_parser("all", help="Export, transform, and optionally deploy in one command.")
-    all_p.add_argument("--source", type=Path)
-    all_p.add_argument("--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work")
-    all_p.add_argument("--output-name", default="clash-verge-static-openclash.yaml")
-    add_transform_args(all_p)
-    add_deploy_args(all_p)
-
-    deploy_p = sub.add_parser("deploy", help="Upload an existing YAML and validate it remotely before installation.")
-    deploy_p.add_argument("--file", type=Path, required=True)
-    add_deploy_args(deploy_p)
-
-    dry_run_p = sub.add_parser("dry-run", help="Transform without writing output, deploying, or SSH.")
-    dry_run_p.add_argument("--input", type=Path, required=True)
-    add_transform_args(dry_run_p)
-
-    # --- new: probe command ---
-    probe_p = sub.add_parser("probe", help=(
-        "Read the Clash Verge config, start a temporary Mihomo instance, "
-        "and test every static node for GPT, Gemini, and Disney+ reachability. "
-        "Does NOT generate, upload, or replace any configuration."
-    ))
-    probe_p.add_argument("--source", type=Path, help="Override the Clash Verge effective YAML path.")
-    probe_p.add_argument("--probe-core", type=str, help="Path to the Mihomo/clash-meta binary for probing.")
-    probe_p.add_argument("--base-url", default=FALLBACK_URL)
-    probe_p.add_argument("--gpt-url", default=GPT_PROBE_URL)
-    probe_p.add_argument("--gemini-url", default=GEMINI_PROBE_URL)
-    probe_p.add_argument("--disney-url", default=DISNEY_PROBE_URL)
-
-    sync_p = sub.add_parser(
-        "sync",
-        help=(
-            "End-to-end: export from Clash Verge, transform, locally validate, compute SHA-256, "
-            "upload (if changed), remote-validate, replace, restart, and health-check. "
-            "Natural-language trigger: 更新 OpenClash 节点."
-        ),
-    )
-    sync_p.add_argument("--source", type=Path, help="Override the Clash Verge effective YAML path.")
-    sync_p.add_argument(
-        "--config", type=Path, default=SYNC_CONFIG_PATH,
-        help=f"Sync configuration file (default: {SYNC_CONFIG_PATH}).",
-    )
-    sync_p.add_argument(
-        "--no-activate",
-        action="store_true",
-        help="Upload, validate, and save the config, but do NOT switch the active config or restart OpenClash.",
-    )
-    sync_p.add_argument(
-        "--config-out", type=Path,
-        help="Also write the transformed config to a local path for inspection.",
-    )
-    sync_p.add_argument(
-        "--probe", action="store_true",
-        help="Probe every static node for GPT/Gemini/Disney reachability before generating the config.",
-    )
-    sync_p.add_argument(
-        "--probe-core", type=str,
-        help="Path to the Mihomo/clash-meta binary for probing (default: auto-detect).",
-    )
-
-    return parser
-
-
-def add_transform_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--manual-group", default="手动选择")
-    parser.add_argument("--auto-group", default="自动选择")
-    parser.add_argument("--disney-group", default="迪士尼")
-    parser.add_argument(
-        "--media-keyword",
-        action="append",
-        dest="media_keywords",
-        help="Node-name keyword added to the Disney group. Repeatable. Defaults: 流媒体, 媒体流.",
-    )
-    parser.add_argument("--test-url", default=FALLBACK_URL)
-    parser.add_argument("--interval", type=int, default=FALLBACK_INTERVAL)
-    parser.add_argument("--tolerance", type=int, default=None)
+def print_summary(data: dict[str, Any], output: Path, audit_output: Path | None) -> None:
+    groups = {group["name"]: group for group in data["proxy-groups"]}
+    print(f"output={output}")
+    if audit_output is not None:
+        print(f"audit_output={audit_output}")
+    print(f"static_nodes={len(data['proxies'])}")
+    print(f"managed_groups={len(data['proxy-groups'])}")
+    print("priority_wrappers=0")
+    print(f"gpt_nodes={len(groups['GPT自动']['proxies'])}")
+    print(f"gemini_nodes={len(groups['Gemini自动']['proxies'])}")
+    print(f"disney_nodes={len(groups['迪士尼自动']['proxies'])}")
+    print("final_match=MATCH,默认代理")
+    print("secrets_printed=false")
 
 
 def add_deploy_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--deploy", action="store_true", help="For 'all': upload after transformation.")
     parser.add_argument("--host", default="root@192.168.10.1")
     parser.add_argument("--remote-name")
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     parser.add_argument(
         "--activate",
         action="store_true",
-        help="After remote validation, select this config through UCI and restart OpenClash. Opt-in only.",
+        help="Select the installed config through UCI and restart OpenClash after validation.",
     )
 
 
-def transform_file(args: argparse.Namespace, input_path: Path, output_path: Path) -> dict[str, Any]:
-    data = load_yaml(input_path)
-    keywords = args.media_keywords or ["流媒体", "媒体流"]
-    transformed = transform(
-        data,
-        manual_group=args.manual_group,
-        auto_group=args.auto_group,
-        disney_group=args.disney_group,
-        media_keywords=keywords,
-        test_url=args.test_url,
-        interval=args.interval,
-        tolerance=args.tolerance,
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Build the accepted simple static OpenClash profile from Clash Verge."
     )
-    dump_yaml(transformed, output_path)
-    return transformed
+    sub = parser.add_subparsers(dest="command", required=True)
 
-
-def print_summary(data: dict[str, Any], output: Path, args: argparse.Namespace) -> None:
-    node_names = static_node_names(data)
-    keywords = args.media_keywords or ["流媒体", "媒体流"]
-    media_count = sum(
-        1
-        for name in node_names
-        if any(keyword.casefold() in name.casefold() for keyword in keywords)
+    export_p = sub.add_parser("export", help="Copy the current effective Clash Verge YAML.")
+    export_p.add_argument("--source", type=Path)
+    export_p.add_argument(
+        "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
     )
-    groups = data.get("proxy-groups", [])
-    print(f"output={output}")
-    print(f"static_nodes={len(node_names)}")
-    print(f"groups={len(groups)}")
-    print(f"media_nodes_added={media_count}")
-    print(f"default_group={args.manual_group}")
-    print(f"auto_group={args.auto_group}")
-    print("secrets_printed=false")
 
+    transform_p = sub.add_parser("transform", help="Transform an effective YAML locally.")
+    transform_p.add_argument("--input", type=Path, required=True)
+    transform_p.add_argument("--output", type=Path, required=True)
+    transform_p.add_argument("--audit-output", type=Path)
 
-def print_sync_report(result: dict[str, Any]) -> None:
-    for key in (
-        "input_path",
-        "input_mtime",
-        "static_nodes",
-        "probed",
-        "probe_total_nodes",
-        "probe_gpt_pass",
-        "probe_gemini_pass",
-        "probe_disney_pass",
-        "probe_duration_seconds",
-        "probe_core",
-        "probe_core_cleaned_up",
-        "gpt_candidates",
-        "gemini_candidates",
-        "disney_candidates",
-        "config_sha256",
-        "local_validated",
-        "remote_validated",
-        "replaced",
-        "restarted",
-        "rolled_back",
-        "final_running_config",
-        "backup_path",
-        "no_change",
-    ):
-        val = result.get(key)
-        if val is None:
-            print(f"{key}=None")
-        elif isinstance(val, bool):
-            print(f"{key}={str(val).lower()}")
-        else:
-            print(f"{key}={val}")
+    all_p = sub.add_parser("all", help="Export and transform; optionally deploy.")
+    all_p.add_argument("--source", type=Path)
+    all_p.add_argument(
+        "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
+    )
+    all_p.add_argument("--output-name", default="openclash-simple-final.yaml")
+    all_p.add_argument("--audit-name", default="openclash-simple-final-audit.yaml")
+    all_p.add_argument("--deploy", action="store_true")
+    add_deploy_args(all_p)
 
+    deploy_p = sub.add_parser("deploy", help="Validate and install an existing full YAML.")
+    deploy_p.add_argument("--file", type=Path, required=True)
+    add_deploy_args(deploy_p)
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+    return parser
 
 
 def main() -> int:
@@ -2088,141 +988,26 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        # --- sync ---
-        if args.command == "sync":
-            result = sync_pipeline(
-                config_path=args.config,
-                source_path=args.source,
-                no_activate=args.no_activate,
-                config_out=args.config_out,
-                probe=args.probe,
-                probe_core=args.probe_core,
-            )
-
-            if args.config_out and result.get("config_sha256"):
-                if result.get("no_change"):
-                    print("local_output=skipped (no change)")
-                else:
-                    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".yaml", prefix="oclash-sync-out-")
-                    os.close(tmp_fd)
-                    data = load_yaml(Path(result["input_path"]))
-                    media_keywords = ["流媒体", "媒体流"]
-                    transformed = transform(
-                        data,
-                        manual_group="手动选择",
-                        auto_group="自动选择",
-                        disney_group="迪士尼",
-                        media_keywords=media_keywords,
-                    )
-                    dump_yaml(transformed, args.config_out.expanduser().resolve())
-                    print(f"local_output={args.config_out}")
-
-            print_sync_report(result)
-
-            if result.get("no_change"):
-                print("NO_CHANGE_OPENCLASH_CONFIG_CURRENT")
-                return 0
-
-            if result.get("rolled_back"):
-                print("STATUS=ROLLED_BACK")
-            elif result.get("restarted"):
-                print("STATUS=ACTIVATED")
-            elif result.get("replaced"):
-                print("STATUS=REPLACED_NO_ACTIVATE")
-            else:
-                print("STATUS=OK")
-
-            return 0
-
-        # --- probe ---
-        if args.command == "probe":
-            source = args.source or find_default_source()
-            if not source.is_file():
-                raise ConfigError(f"Source file not found: {source}")
-            data = load_yaml(source)
-            proxies_list = data.get("proxies", [])
-            if not isinstance(proxies_list, list) or not proxies_list:
-                raise ConfigError("No static nodes in the source configuration.")
-
-            import time as _time
-            start_time = _time.monotonic()
-            all_results = run_probe_pipeline(
-                proxies_list,
-                core_path=args.probe_core,
-                base_url=args.base_url,
-                gpt_url=args.gpt_url,
-                gemini_url=args.gemini_url,
-                disney_url=args.disney_url,
-            )
-            duration = _time.monotonic() - start_time
-
-            resolved_core = find_mihomo_core(args.probe_core)
-            print_probe_report(all_results, duration, resolved_core)
-            print("router_contacted=false")
-            print("push_performed=false")
-            return 0
-
-        # --- existing commands ---
         if args.command == "export":
-            exported = export_source(args.source, args.workdir.expanduser())
+            exported = export_source(args.source, args.workdir.expanduser().resolve())
             print(f"exported={exported}")
             return 0
 
         if args.command == "transform":
-            input_path = args.input.expanduser().resolve()
-            output_path = args.output.expanduser().resolve()
-            data = transform_file(args, input_path, output_path)
-            print_summary(data, output_path, args)
-            return 0
-
-        if args.command == "dry-run":
-            input_path = args.input.expanduser().resolve()
-            data = load_yaml(input_path)
-            keywords = args.media_keywords or ["流媒体", "媒体流"]
-            transformed = transform(
-                data,
-                manual_group=args.manual_group,
-                auto_group=args.auto_group,
-                disney_group=args.disney_group,
-                media_keywords=keywords,
-                test_url=args.test_url,
-                interval=args.interval,
-                tolerance=args.tolerance,
-            )
-            node_names = static_node_names(data)
-            media_count = sum(
-                1
-                for name in node_names
-                if any(keyword.casefold() in name.casefold() for keyword in keywords)
-            )
-            groups = transformed.get("proxy-groups", [])
-            print(f"static_nodes={len(node_names)}")
-            print(f"groups={len(groups)}")
-            print(f"media_nodes_added={media_count}")
-            print(f"default_group={args.manual_group}")
-            print(f"auto_group={args.auto_group}")
-            print("dry_run=true")
-            return 0
-
-        if args.command == "deploy":
-            remote = deploy(
-                args.file.expanduser().resolve(),
-                host=args.host,
-                remote_name=args.remote_name,
-                core_path=args.core_path,
-                activate=args.activate,
-            )
-            print(f"remote_config={remote}")
-            print(f"activated={str(args.activate).lower()}")
+            output = args.output.expanduser().resolve()
+            audit_output = args.audit_output.expanduser().resolve() if args.audit_output else None
+            data = transform_file(args.input.expanduser().resolve(), output, audit_output)
+            print_summary(data, output, audit_output)
             return 0
 
         if args.command == "all":
             workdir = args.workdir.expanduser().resolve()
             exported = export_source(args.source, workdir)
             output = workdir / args.output_name
-            data = transform_file(args, exported, output)
+            audit_output = workdir / args.audit_name
+            data = transform_file(exported, output, audit_output)
             print(f"source_copy={exported}")
-            print_summary(data, output, args)
+            print_summary(data, output, audit_output)
             if args.deploy:
                 remote = deploy(
                     output,
@@ -2235,15 +1020,22 @@ def main() -> int:
                 print(f"activated={str(args.activate).lower()}")
             return 0
 
+        if args.command == "deploy":
+            remote = deploy(
+                args.file,
+                host=args.host,
+                remote_name=args.remote_name,
+                core_path=args.core_path,
+                activate=args.activate,
+            )
+            print(f"remote_config={remote}")
+            print(f"activated={str(args.activate).lower()}")
+            return 0
+
         parser.error("Unknown command")
         return 2
-
     except ConfigError as exc:
-        msg = str(exc)
-        if msg.startswith("BLOCKED_"):
-            print(msg, file=sys.stderr)
-        else:
-            print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as exc:
         print(f"ERROR: command failed with exit code {exc.returncode}", file=sys.stderr)
