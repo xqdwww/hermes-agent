@@ -1692,6 +1692,32 @@ def read_remote_openclash_state(host: str) -> dict[str, str | bool]:
     }
 
 
+def wait_for_openclash_running(host: str, max_wait_seconds: int = 15) -> None:
+    """Poll /etc/init.d/openclash running every second until success or timeout.
+
+    Args:
+        host: SSH host
+        max_wait_seconds: Maximum seconds to wait (default 15)
+
+    Raises:
+        ConfigError: If running check fails after max_wait_seconds
+    """
+    start_time = time.monotonic()
+    last_error: subprocess.CalledProcessError | None = None
+
+    while time.monotonic() - start_time < max_wait_seconds:
+        try:
+            ssh_command(host, "/etc/init.d/openclash running >/dev/null 2>&1", capture=True)
+            return  # Success: running check passed
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            time.sleep(1)  # Wait 1 second before next attempt
+
+    raise ConfigError(
+        f"OpenClash not running after {max_wait_seconds} seconds"
+    ) from last_error
+
+
 def verify_remote_health(
     host: str,
     *,
@@ -1944,6 +1970,7 @@ def deploy(
         )
         try:
             ssh_command(host, activate_cmd)
+            wait_for_openclash_running(host, max_wait_seconds=15)
             verify_remote_health(host, remote_path=remote_path, core_path=core_path)
         except (subprocess.CalledProcessError, ConfigError) as exc:
             rollback_remote_deployment(

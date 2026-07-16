@@ -865,3 +865,48 @@ def test_v2_dynamic_pipeline_writes_report_and_lkg_state(tmp_path) -> None:
 
 def urllib_host(url: str) -> str:
     return url.split("/", 3)[2]
+
+
+def test_wait_for_openclash_running_polls_until_success(monkeypatch) -> None:
+    """Test: running succeeds on 3rd second - should not wait full 15 seconds."""
+    call_count = 0
+
+    def counting_ssh(host: str, command: str, *, capture: bool = False) -> None:
+        nonlocal call_count
+        call_count += 1
+        if "/etc/init.d/openclash running" in command:
+            if call_count < 3:  # Fail first 2 times
+                raise subprocess.CalledProcessError(1, command)
+            # Succeed on 3rd call
+        return None
+
+    monkeypatch.setattr(MODULE, "ssh_command", counting_ssh)
+    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
+
+    # Should succeed on 3rd attempt (after 2 failures)
+    MODULE.wait_for_openclash_running("root@192.168.10.1", max_wait_seconds=15)
+
+    # Verify: exactly 3 calls (2 failures + 1 success)
+    assert call_count == 3, f"Expected 3 calls, got {call_count}"
+
+
+def test_wait_for_openclash_running_times_out_after_15_seconds(monkeypatch) -> None:
+    """Test: running fails for 15 seconds - should raise ConfigError."""
+    call_count = 0
+
+    def always_fail_ssh(host: str, command: str, *, capture: bool = False) -> None:
+        nonlocal call_count
+        call_count += 1
+        if "/etc/init.d/openclash running" in command:
+            raise subprocess.CalledProcessError(1, command)
+        return None
+
+    monkeypatch.setattr(MODULE, "ssh_command", always_fail_ssh)
+    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
+
+    # Should fail after 15 attempts (one per second)
+    with pytest.raises(MODULE.ConfigError, match="OpenClash not running after 15 seconds"):
+        MODULE.wait_for_openclash_running("root@192.168.10.1", max_wait_seconds=15)
+
+    # Verify: at least 15 calls (could be 16 due to final check)
+    assert call_count >= 15, f"Expected at least 15 calls, got {call_count}"
