@@ -4,6 +4,7 @@ import importlib.util
 import json
 import stat
 import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -185,12 +186,11 @@ def test_transform_removes_verge_runtime_without_touching_proxy_ports() -> None:
 
 
 def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatch) -> None:
-    local_file = tmp_path / "openclash.yaml"
-    local_file.write_text("proxies: []\n", encoding="utf-8")
-    monkeypatch.setattr(MODULE, "load_yaml", lambda path: {})
-    monkeypatch.setattr(MODULE, "validate_config", lambda data: None)
-    monkeypatch.setattr(MODULE, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 0))
     monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
+    candidate = MODULE.UploadedCandidate(
+        "/etc/openclash/config/.clashverge-candidates/new.candidate",
+        "/etc/openclash/config/new.yaml",
+    )
 
     events: list[str] = []
     health_calls = 0
@@ -207,27 +207,29 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
                     "active_exists=1\n"
                     "enabled=1\n"
                     "running=1\n"
+                    "core_running=1\n"
+                    "network_artifacts=1\n"
+                    "tun_present=0\n"
                 ),
                 stderr="",
             )
         if "OPENCLASH_HEALTH_CHECK=1" in command:
-            health_calls += 1
-            raise subprocess.CalledProcessError(1, command)
+            if "original.yaml" not in command:
+                health_calls += 1
+                raise subprocess.CalledProcessError(1, command)
         return subprocess.CompletedProcess([], 0)
 
-    def fake_run(*args, **kwargs):
-        events.append("SCP_UPLOAD")
+    def fake_run(cmd, *args, **kwargs):
+        events.append("LAN_HEALTH" if cmd[0] == "curl" else "LOCAL_COMMAND")
         return subprocess.CompletedProcess([], 0)
 
     monkeypatch.setattr(MODULE, "run", fake_run)
     monkeypatch.setattr(MODULE, "ssh_command", fake_ssh)
     with pytest.raises(MODULE.ConfigError, match="HEALTH_CHECK_FAILED_ROLLED_BACK"):
-        MODULE.deploy(
-            local_file,
+        MODULE.activate_uploaded_candidate(
+            candidate,
             host="router.invalid",
-            remote_name=None,
             core_path="/etc/openclash/core/clash_meta",
-            activate=True,
         )
 
     assert health_calls == MODULE.HEALTH_CHECK_ATTEMPTS
@@ -248,27 +250,45 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
     )
     state_index = next(i for i, event in enumerate(events) if "OPENCLASH_STATE_READ=1" in event)
     backup_index = next(i for i, event in enumerate(events) if "OPENCLASH_BACKUP=1" in event)
-    upload_index = events.index("SCP_UPLOAD")
-    assert state_index < backup_index < upload_index
+    activation_index = next(
+        i for i, event in enumerate(events) if "OPENCLASH_ACTIVATION_INSTALL=1" in event
+    )
+    assert state_index < backup_index < activation_index
     assert any("original.yaml" in command and "active-yaml" in command for command in events)
-    assert any("cp -p /etc/config/openclash" in command and "service-state" in command for command in events)
-    assert any("OPENCLASH_ROLLBACK=1" in command and "original.yaml" in command for command in events)
+    assert any(
+        "cp -p /etc/config/openclash" in command
+        and "cp -p /etc/config/dhcp" in command
+        and "cp -p /etc/config/firewall" in command
+        and "service-state" in command
+        for command in events
+    )
+    stop_index = next(i for i, event in enumerate(events) if "OPENCLASH_ROLLBACK_STOP=1" in event)
+    openclash_restore_index = next(
+        i
+        for i, event in enumerate(events)
+        if event.startswith("cp -p /etc/config/openclash.bak")
+    )
+    assert stop_index < openclash_restore_index
+    assert any("dhcp-uci" in command and "/etc/config/dhcp" in command for command in events)
+    assert any("firewall-uci" in command and "/etc/config/firewall" in command for command in events)
+    assert any(command == "/etc/init.d/firewall reload" for command in events)
+    assert any(command == "/etc/init.d/dnsmasq restart" for command in events)
+    assert any(command == "/etc/init.d/openclash start" for command in events)
+    assert "LAN_HEALTH" in events
     assert any(
         "OPENCLASH_ROLLBACK_VERIFY=1" in command
         and "original.yaml" in command
-        and "/etc/openclash/core/clash_meta -t" in command
         and "openclash enabled" in command
-        and "openclash running" in command
         for command in events
     )
 
 
 def test_rollback_failure_has_explicit_status(tmp_path, monkeypatch) -> None:
-    local_file = tmp_path / "openclash.yaml"
-    local_file.write_text("proxies: []\n", encoding="utf-8")
-    monkeypatch.setattr(MODULE, "load_yaml", lambda path: {})
-    monkeypatch.setattr(MODULE, "validate_config", lambda data: None)
     monkeypatch.setattr(MODULE, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 0))
+    candidate = MODULE.UploadedCandidate(
+        "/etc/openclash/config/.clashverge-candidates/new.candidate",
+        "/etc/openclash/config/new.yaml",
+    )
 
     def fake_ssh(host: str, command: str, *, capture: bool = False):
         if "OPENCLASH_STATE_READ=1" in command:
@@ -280,48 +300,180 @@ def test_rollback_failure_has_explicit_status(tmp_path, monkeypatch) -> None:
                     "active_exists=1\n"
                     "enabled=1\n"
                     "running=1\n"
+                    "core_running=1\n"
+                    "network_artifacts=1\n"
+                    "tun_present=0\n"
                 ),
                 stderr="",
             )
         if "OPENCLASH_HEALTH_CHECK=1" in command:
             raise subprocess.CalledProcessError(1, command)
-        if "OPENCLASH_ROLLBACK=1" in command:
+        if command.startswith("cp -p /tmp/") and "dhcp-uci" in command:
             raise subprocess.CalledProcessError(1, command)
         return subprocess.CompletedProcess([], 0)
 
     monkeypatch.setattr(MODULE, "ssh_command", fake_ssh)
     monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
     with pytest.raises(MODULE.ConfigError, match="ROLLBACK_FAILED"):
-        MODULE.deploy(
-            local_file,
+        MODULE.activate_uploaded_candidate(
+            candidate,
             host="router.invalid",
-            remote_name=None,
             core_path="/etc/openclash/core/clash_meta",
-            activate=True,
         )
 
 
-def test_deploy_blocks_before_upload_when_active_path_read_fails(tmp_path, monkeypatch) -> None:
+def test_failed_restart_restores_previously_stopped_direct_lan_state(
+    tmp_path, monkeypatch
+) -> None:
+    """Simulate the observed procd delete error after OpenClash changed the dataplane."""
+    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
+    candidate = MODULE.UploadedCandidate(
+        "/etc/openclash/config/.clashverge-candidates/new.candidate",
+        "/etc/openclash/config/new.yaml",
+    )
+
+    events: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        events.append("LAYER3_LAN_EGRESS" if cmd[0] == "curl" else "LOCAL_COMMAND")
+        return subprocess.CompletedProcess([], 0)
+
+    def fake_ssh(host: str, command: str, *, capture: bool = False):
+        events.append(command)
+        if "OPENCLASH_STATE_READ=1" in command:
+            return subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=(
+                    "active_path=/etc/openclash/config/original.yaml\n"
+                    "active_exists=1\n"
+                    "enabled=1\n"
+                    "running=0\n"
+                    "core_running=0\n"
+                    "network_artifacts=0\n"
+                    "tun_present=0\n"
+                ),
+                stderr="",
+            )
+        if "OPENCLASH_ACTIVATION_START=1" in command:
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr='ubus call service delete { "name": "openclash" } (Not found)',
+            )
+        if "OPENCLASH_ROLLBACK_STOP=1" in command:
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr='ubus call service delete { "name": "openclash" } (Not found)',
+            )
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(MODULE, "run", fake_run)
+    monkeypatch.setattr(MODULE, "ssh_command", fake_ssh)
+
+    with pytest.raises(MODULE.ConfigError, match="HEALTH_CHECK_FAILED_ROLLED_BACK"):
+        MODULE.activate_uploaded_candidate(
+            candidate,
+            host="router.invalid",
+            core_path="/etc/openclash/core/clash_meta",
+        )
+
+    failed_stop = next(i for i, event in enumerate(events) if "OPENCLASH_ROLLBACK_STOP=1" in event)
+    dhcp_restore = next(
+        i for i, event in enumerate(events) if event.startswith("cp -p /tmp/") and "dhcp-uci" in event
+    )
+    firewall_restore = next(
+        i
+        for i, event in enumerate(events)
+        if event.startswith("cp -p /tmp/") and "firewall-uci" in event
+    )
+    stopped_health = next(
+        i for i, event in enumerate(events) if "OPENCLASH_ROLLBACK_HEALTH=1" in event
+    )
+    assert failed_stop < dhcp_restore < stopped_health
+    assert failed_stop < firewall_restore < stopped_health
+    assert "/etc/init.d/firewall reload" in events
+    assert "/etc/init.d/dnsmasq restart" in events
+    assert any(
+        "ip -4 rule del fwmark 0x162 table 354" in event
+        and "ip -4 route flush table 354" in event
+        and "ip link delete utun" in event
+        for event in events
+    )
+    assert "/etc/init.d/openclash stop" in events
+    assert "LAYER3_LAN_EGRESS" in events
+    assert all("/etc/init.d/openclash restart" not in event for event in events[failed_stop + 1 :])
+
+
+def test_node_probe_failure_never_contacts_router(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "source.yaml"
+    source.write_text("proxies: []\n", encoding="utf-8")
+    router_calls: list[str] = []
+
+    monkeypatch.setattr(MODULE, "export_source", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(MODULE, "load_yaml", lambda _path: {})
+
+    def failed_probe(*_args, **_kwargs):
+        raise MODULE.ConfigError("SIMULATED_NODE_PROBE_FAILURE")
+
+    monkeypatch.setattr(MODULE, "dynamic_probe_and_select", failed_probe)
+    monkeypatch.setattr(
+        MODULE,
+        "ssh_command",
+        lambda *_args, **_kwargs: router_calls.append("ssh"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "clashverge_to_openclash.py",
+            "all",
+            "--source",
+            str(source),
+            "--workdir",
+            str(tmp_path),
+            "--deploy",
+            "--activate",
+        ],
+    )
+
+    assert MODULE.main() == 1
+    assert router_calls == []
+
+
+def test_upload_succeeds_without_state_read_then_activation_blocks(tmp_path, monkeypatch) -> None:
     local_file = tmp_path / "openclash.yaml"
     local_file.write_text("proxies: []\n", encoding="utf-8")
     monkeypatch.setattr(MODULE, "load_yaml", lambda path: {})
     monkeypatch.setattr(MODULE, "validate_config", lambda data: None)
     uploads: list[list[str]] = []
-    monkeypatch.setattr(MODULE, "run", lambda cmd, **kwargs: uploads.append(cmd))
+
+    def fake_run(cmd, **kwargs):
+        uploads.append(cmd)
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(MODULE, "run", fake_run)
 
     def failed_state_read(host: str, command: str, *, capture: bool = False):
-        raise subprocess.CalledProcessError(1, command)
+        if "OPENCLASH_STATE_READ=1" in command:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess([], 0)
 
     monkeypatch.setattr(MODULE, "ssh_command", failed_state_read)
+    candidate = MODULE.upload_candidate(
+        local_file,
+        host="router.invalid",
+        remote_name=None,
+        core_path="/etc/openclash/core/clash_meta",
+    )
+    assert len(uploads) == 1
     with pytest.raises(MODULE.ConfigError, match="REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED"):
-        MODULE.deploy(
-            local_file,
+        MODULE.activate_uploaded_candidate(
+            candidate,
             host="router.invalid",
-            remote_name=None,
             core_path="/etc/openclash/core/clash_meta",
-            activate=True,
         )
-    assert uploads == []
 
 
 def http_evidence(

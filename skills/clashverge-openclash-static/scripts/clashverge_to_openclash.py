@@ -34,9 +34,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 try:
     import yaml
@@ -184,6 +185,12 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
 }
 HEALTH_CHECK_ATTEMPTS = 3
 HEALTH_CHECK_DELAY_SECONDS = 2
+LAN_HEALTH_URL = "https://www.baidu.com/"
+REMOTE_SIDECAR_MIXED_PORT = 17890
+REMOTE_SIDECAR_CONTROLLER_PORT = 19090
+REMOTE_SIDECAR_UID = 65534
+REMOTE_SIDECAR_GID = 65534
+REMOTE_CANDIDATE_DIR = "/etc/openclash/config/.clashverge-candidates"
 LKG_SCHEMA_VERSION = 1
 PROBE_SCHEMA_VERSION = 1
 PROBE_VERSION = "2"
@@ -274,6 +281,38 @@ REPORT_FORBIDDEN_KEYS = {
     "secret",
 }
 _DROP_RUNTIME = object()
+
+
+class DeploymentTransaction(NamedTuple):
+    """Remote state required to put OpenClash and the LAN dataplane back."""
+
+    remote_path: str
+    target_backup: str
+    target_absent_marker: str
+    original_active_path: str
+    original_active_exists: bool
+    active_backup: str
+    openclash_uci_backup: str
+    dhcp_uci_backup: str
+    firewall_uci_backup: str
+    service_state_backup: str
+    network_state_backup: str
+    core_path: str
+    original_enabled: bool
+    original_running: bool
+    original_core_running: bool
+    original_network_artifacts: bool
+    original_tun_present: bool
+
+
+class UploadedCandidate(NamedTuple):
+    candidate_path: str
+    production_path: str
+
+
+class RemoteSidecarSession(NamedTuple):
+    mixed_port: int
+    controller_port: int
 
 _FLAG_PREFIX_RE = re.compile(r"^[\U0001F1E6-\U0001F1FF]{2}\s*")
 
@@ -1128,9 +1167,9 @@ def build_probe_config(
     *,
     mixed_port: int,
     controller_port: int,
-    interface_name: str,
+    interface_name: str | None,
 ) -> dict[str, Any]:
-    return {
+    config: dict[str, Any] = {
         "mixed-port": mixed_port,
         "allow-lan": False,
         "bind-address": "127.0.0.1",
@@ -1139,7 +1178,6 @@ def build_probe_config(
         "mode": "rule",
         "log-level": "warning",
         "ipv6": False,
-        "interface-name": interface_name,
         "dns": {
             "enable": True,
             "ipv6": False,
@@ -1155,6 +1193,9 @@ def build_probe_config(
         ],
         "rules": ["MATCH,PROBE"],
     }
+    if interface_name:
+        config["interface-name"] = interface_name
+    return config
 
 
 def controller_json_request(
@@ -1303,6 +1344,257 @@ def run_local_service_probe(
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=5)
+
+
+def remote_production_fingerprint(host: str) -> str:
+    """Hash production control/data-plane state without returning its contents."""
+    command = (
+        "CANDIDATE_FINGERPRINT=1; set -e; "
+        "for path in /etc/config/openclash /etc/config/dhcp /etc/config/firewall; do "
+        "printf 'file:%s=' \"$path\"; sha256sum \"$path\" | awk '{print $1}'; done; "
+        "if /etc/init.d/openclash running >/dev/null 2>&1; then echo service=running; "
+        "else echo service=stopped; fi; "
+        "printf 'rule4='; ip -4 rule show 2>/dev/null | "
+        "grep -E 'fwmark (0x)?0*162|lookup 354' | sha256sum | awk '{print $1}'; "
+        "printf 'rule6='; ip -6 rule show 2>/dev/null | "
+        "grep -E 'fwmark (0x)?0*162|lookup 354' | sha256sum | awk '{print $1}'; "
+        "printf 'route4='; ip -4 route show table 354 2>/dev/null | sha256sum | awk '{print $1}'; "
+        "printf 'route6='; ip -6 route show table 354 2>/dev/null | sha256sum | awk '{print $1}'; "
+        "printf 'nft='; if command -v nft >/dev/null 2>&1; then "
+        "nft -s list table inet fw4 2>/dev/null | grep -E 'openclash|OpenClash' | "
+        "sha256sum | awk '{print $1}'; else echo unavailable; fi; "
+        "if ip link show utun >/dev/null 2>&1; then echo utun=present; else echo utun=absent; fi"
+    )
+    return ssh_command(host, command, capture=True).stdout or ""
+
+
+def _stop_remote_sidecar(
+    host: str, remote_dir: str, upload_path: str, lock_dir: str, token: str
+) -> None:
+    command = (
+        "CANDIDATE_SIDECAR_CLEANUP=1; "
+        f"if [ \"$(cat {quote_remote(lock_dir + '/owner')} 2>/dev/null)\" = "
+        f"{quote_remote(token)} ]; then "
+        f"pid_file={quote_remote(remote_dir + '/sidecar.pid')}; "
+        "if [ -s \"$pid_file\" ]; then "
+        "pid=\"$(cat \"$pid_file\")\"; kill \"$pid\" 2>/dev/null || true; "
+        "for wait_count in 1 2 3 4 5; do kill -0 \"$pid\" 2>/dev/null || break; sleep 1; done; "
+        "kill -9 \"$pid\" 2>/dev/null || true; fi; "
+        f"rm -rf {quote_remote(remote_dir)}; rm -f {quote_remote(upload_path)}; "
+        f"rm -rf {quote_remote(lock_dir)}; else rm -f {quote_remote(upload_path)}; fi"
+    )
+    ssh_command(host, command, capture=True)
+
+
+@contextmanager
+def remote_candidate_sidecar(
+    config_path: Path,
+    *,
+    host: str,
+    core_path: str,
+):
+    token = uuid.uuid4().hex
+    remote_dir = f"/tmp/clashverge-openclash-sidecar.{token}"
+    upload_path = f"/tmp/clashverge-openclash-sidecar.{token}.upload"
+    lock_dir = "/tmp/clashverge-openclash-sidecar.lock"
+    local_mixed = reserve_loopback_port()
+    local_controller = reserve_loopback_port()
+    before = remote_production_fingerprint(host)
+    tunnel: subprocess.Popen[Any] | None = None
+    primary_error: BaseException | None = None
+    try:
+        run(
+            [
+                "scp",
+                "-O",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                str(config_path),
+                f"{host}:{upload_path}",
+            ]
+        )
+        setup = (
+            "CANDIDATE_SIDECAR_SETUP=1; set -e; "
+            f"mkdir {quote_remote(lock_dir)}; "
+            f"printf '%s\\n' {quote_remote(token)} > {quote_remote(lock_dir + '/owner')}; "
+            f"mkdir {quote_remote(remote_dir)}; "
+            f"mv {quote_remote(upload_path)} {quote_remote(remote_dir + '/config.yaml')}; "
+            f"chmod 700 {quote_remote(remote_dir)}; "
+            f"chmod 600 {quote_remote(remote_dir + '/config.yaml')}; "
+            f"{quote_remote(core_path)} -t -d {quote_remote(remote_dir)} "
+            f"-f {quote_remote(remote_dir + '/config.yaml')}; "
+            "if /etc/init.d/openclash running >/dev/null 2>&1; then "
+            "nft list table inet fw4 2>/dev/null | "
+            f"grep -qE 'meta skgid {REMOTE_SIDECAR_GID} .*return'; fi; "
+            f"chown -R {REMOTE_SIDECAR_UID}:{REMOTE_SIDECAR_GID} {quote_remote(remote_dir)}; "
+            f"start-stop-daemon -S -b -m -p {quote_remote(remote_dir + '/sidecar.pid')} "
+            f"-c {REMOTE_SIDECAR_UID}:{REMOTE_SIDECAR_GID} -x {quote_remote(core_path)} -- "
+            f"-d {quote_remote(remote_dir)} -f {quote_remote(remote_dir + '/config.yaml')}; "
+            f"sleep 1; pid=\"$(cat {quote_remote(remote_dir + '/sidecar.pid')})\"; "
+            "kill -0 \"$pid\"; "
+            f"grep -q '^Gid:[[:space:]]*{REMOTE_SIDECAR_GID}[[:space:]]' /proc/\"$pid\"/status"
+        )
+        ssh_command(host, setup, capture=True)
+        tunnel = subprocess.Popen(
+            [
+                "ssh",
+                "-N",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-L",
+                f"127.0.0.1:{local_mixed}:127.0.0.1:{REMOTE_SIDECAR_MIXED_PORT}",
+                "-L",
+                f"127.0.0.1:{local_controller}:127.0.0.1:{REMOTE_SIDECAR_CONTROLLER_PORT}",
+                host,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        wait_for_controller(local_controller, tunnel)
+        yield RemoteSidecarSession(local_mixed, local_controller)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        if tunnel is not None and tunnel.poll() is None:
+            tunnel.terminate()
+            try:
+                tunnel.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tunnel.kill()
+                tunnel.wait(timeout=5)
+        cleanup_error: BaseException | None = None
+        try:
+            _stop_remote_sidecar(host, remote_dir, upload_path, lock_dir, token)
+        except BaseException as exc:
+            cleanup_error = exc
+        try:
+            after = remote_production_fingerprint(host)
+            if after != before:
+                raise ConfigError("CANDIDATE_SIDECAR_PRODUCTION_STATE_CHANGED")
+        except BaseException as exc:
+            cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            suffix = "_AFTER_PROBE_FAILURE" if primary_error is not None else ""
+            raise ConfigError(f"CANDIDATE_SIDECAR_CLEANUP_FAILED{suffix}") from cleanup_error
+
+
+def run_remote_service_probe(
+    data: dict[str, Any],
+    *,
+    host: str,
+    core_path: str,
+) -> dict[str, Any]:
+    proxies = static_proxy_objects(data)
+    with tempfile.TemporaryDirectory(prefix="openclash-remote-service-probe-") as temporary:
+        workdir = Path(temporary)
+        config_path = workdir / "probe.yaml"
+        config = build_probe_config(
+            proxies,
+            mixed_port=REMOTE_SIDECAR_MIXED_PORT,
+            controller_port=REMOTE_SIDECAR_CONTROLLER_PORT,
+            interface_name=None,
+        )
+        dump_yaml(config, config_path)
+        with remote_candidate_sidecar(
+            config_path, host=host, core_path=core_path
+        ) as sidecar:
+            global_now = validate_probe_runtime(sidecar.controller_port)
+
+            def switch_node(name: str) -> bool:
+                return select_probe_node(sidecar.controller_port, name)
+
+            def request_url(url: str) -> dict[str, Any]:
+                return curl_probe_once(url, sidecar.mixed_port, workdir=workdir)
+
+            report = probe_nodes_with_runner(
+                proxies,
+                switch_node=switch_node,
+                request_url=request_url,
+            )
+            report["probe_transport"] = {
+                "mode": "rule",
+                "interface_name": None,
+                "route": "MATCH,PROBE",
+                "global_now_observed": global_now,
+                "request_path": "ssh_loopback_to_router_sidecar",
+                "sidecar_gid": REMOTE_SIDECAR_GID,
+                "production_openclash_bypass": "nft_meta_skgid_return_verified",
+            }
+            return report
+
+
+def build_candidate_sidecar_config(data: dict[str, Any]) -> dict[str, Any]:
+    config = deepcopy(data)
+    for key in (
+        *CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS,
+        "listeners",
+        "tunnels",
+        "routing-mark",
+        "ebpf",
+    ):
+        config.pop(key, None)
+    config.update(
+        {
+            "mixed-port": REMOTE_SIDECAR_MIXED_PORT,
+            "allow-lan": False,
+            "bind-address": "127.0.0.1",
+            "external-controller": f"127.0.0.1:{REMOTE_SIDECAR_CONTROLLER_PORT}",
+            "secret": "",
+            "mode": "rule",
+            "tun": {"enable": False},
+            "dns": {
+                "enable": True,
+                "ipv6": False,
+                "nameserver": ["1.1.1.1", "8.8.8.8"],
+            },
+        }
+    )
+    return config
+
+
+def probe_uploaded_candidate(
+    local_file: Path,
+    *,
+    host: str,
+    core_path: str,
+    candidate_path: str | None = None,
+) -> None:
+    if candidate_path is not None:
+        digest = hashlib.sha256(local_file.read_bytes()).hexdigest()
+        identity_check = (
+            "OPENCLASH_CANDIDATE_IDENTITY_CHECK=1; set -e; "
+            f"[ -f {quote_remote(candidate_path)} ]; "
+            f"[ \"$(sha256sum {quote_remote(candidate_path)} | awk '{{print $1}}')\" = "
+            f"{quote_remote(digest)} ]"
+        )
+        try:
+            ssh_command(host, identity_check, capture=True)
+        except subprocess.CalledProcessError as exc:
+            raise ConfigError("REMOTE_CANDIDATE_IDENTITY_MISMATCH") from exc
+    data = load_yaml(local_file)
+    validate_config(data)
+    with tempfile.TemporaryDirectory(prefix="openclash-candidate-probe-") as temporary:
+        workdir = Path(temporary)
+        config_path = workdir / "candidate-sidecar.yaml"
+        dump_yaml(build_candidate_sidecar_config(data), config_path)
+        with remote_candidate_sidecar(
+            config_path, host=host, core_path=core_path
+        ) as sidecar:
+            evidence = curl_probe_once(
+                "https://www.gstatic.com/generate_204",
+                sidecar.mixed_port,
+                workdir=workdir,
+            )
+            if evidence.get("curl_code") != 0 or evidence.get("http_status") != 204:
+                raise ConfigError("CANDIDATE_PROBE_FAILED")
 
 
 def validate_probe_report_safe(report: dict[str, Any]) -> None:
@@ -1643,6 +1935,21 @@ def quote_remote(value: str) -> str:
     return shlex.quote(value)
 
 
+def network_state_capture_command(output_path: str) -> str:
+    """Capture the transaction-relevant dataplane and DNS upstream semantics."""
+    return (
+        f"{{ echo '[rule4]'; ip -4 rule show 2>/dev/null; echo '[route4-354]'; "
+        f"ip -4 route show table 354 2>/dev/null; echo '[rule6]'; "
+        f"ip -6 rule show 2>/dev/null; echo '[route6-354]'; "
+        f"ip -6 route show table 354 2>/dev/null; echo '[nft-openclash]'; "
+        f"nft -s list table inet fw4 2>/dev/null | grep -E 'openclash|OpenClash' || true; "
+        f"echo '[utun]'; ip -details link show utun 2>/dev/null || true; "
+        f"echo '[dnsmasq-upstream]'; "
+        f"grep -hE '^(no-resolv|server=|resolv-file=)' "
+        f"/tmp/etc/dnsmasq.conf.* 2>/dev/null || true; }} > {quote_remote(output_path)}"
+    )
+
+
 def ssh_command(host: str, command: str, *, capture: bool = False) -> subprocess.CompletedProcess[str]:
     return run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
@@ -1662,7 +1969,18 @@ def read_remote_openclash_state(host: str) -> dict[str, str | bool]:
         "if /etc/init.d/openclash enabled >/dev/null 2>&1; then printf 'enabled=1\\n'; "
         "else printf 'enabled=0\\n'; fi; "
         "if /etc/init.d/openclash running >/dev/null 2>&1; then printf 'running=1\\n'; "
-        "else printf 'running=0\\n'; fi"
+        "else printf 'running=0\\n'; fi; "
+        "if pidof clash >/dev/null 2>&1 || pidof mihomo >/dev/null 2>&1; "
+        "then printf 'core_running=1\\n'; else printf 'core_running=0\\n'; fi; "
+        "network_artifacts=0; "
+        "ip -4 rule show 2>/dev/null | grep -qE 'fwmark (0x)?0*162 .*lookup (0x)?0*162|fwmark (0x)?0*162 .*lookup 354' "
+        "&& network_artifacts=1; "
+        "ip -4 route show table 354 2>/dev/null | grep -q . && network_artifacts=1; "
+        "if command -v nft >/dev/null 2>&1; then "
+        "nft list chains 2>/dev/null | grep -q 'chain openclash' && network_artifacts=1; "
+        "fi; printf 'network_artifacts=%s\\n' \"$network_artifacts\"; "
+        "if ip link show utun >/dev/null 2>&1; then printf 'tun_present=1\\n'; "
+        "else printf 'tun_present=0\\n'; fi"
     )
     try:
         result = ssh_command(host, command, capture=True)
@@ -1672,15 +1990,39 @@ def read_remote_openclash_state(host: str) -> dict[str, str | bool]:
     values: dict[str, str] = {}
     for line in (result.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"active_path", "active_exists", "enabled", "running"}:
+        if separator and key in {
+            "active_path",
+            "active_exists",
+            "enabled",
+            "running",
+            "core_running",
+            "network_artifacts",
+            "tun_present",
+        }:
             values[key] = value
 
-    if set(values) != {"active_path", "active_exists", "enabled", "running"}:
+    expected = {
+        "active_path",
+        "active_exists",
+        "enabled",
+        "running",
+        "core_running",
+        "network_artifacts",
+        "tun_present",
+    }
+    if set(values) != expected:
         raise ConfigError("REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED: incomplete state")
     active_path = values["active_path"]
     if not active_path.startswith("/") or "\n" in active_path:
         raise ConfigError("REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED: invalid path")
-    for key in ("active_exists", "enabled", "running"):
+    for key in (
+        "active_exists",
+        "enabled",
+        "running",
+        "core_running",
+        "network_artifacts",
+        "tun_present",
+    ):
         if values[key] not in {"0", "1"}:
             raise ConfigError(f"REMOTE_ACTIVE_CONFIG_PATH_READ_FAILED: invalid {key}")
 
@@ -1689,6 +2031,9 @@ def read_remote_openclash_state(host: str) -> dict[str, str | bool]:
         "active_exists": values["active_exists"] == "1",
         "enabled": values["enabled"] == "1",
         "running": values["running"] == "1",
+        "core_running": values["core_running"] == "1",
+        "network_artifacts": values["network_artifacts"] == "1",
+        "tun_present": values["tun_present"] == "1",
     }
 
 
@@ -1731,6 +2076,7 @@ def verify_remote_health(
     command = (
         "OPENCLASH_HEALTH_CHECK=1; set -e; "
         "/etc/init.d/openclash running >/dev/null 2>&1; "
+        "pidof clash >/dev/null 2>&1 || pidof mihomo >/dev/null 2>&1; "
         "active_path=\"$(uci -q get openclash.config.config_path)\"; "
         "[ -n \"$active_path\" ]; "
         f"[ \"$active_path\" = {quote_remote(remote_path)} ]; "
@@ -1772,93 +2118,244 @@ def verify_remote_health(
     raise ConfigError(f"HEALTH_CHECK_FAILED after {attempts} attempts") from last_error
 
 
+def verify_lan_client_egress(
+    *,
+    attempts: int = HEALTH_CHECK_ATTEMPTS,
+    delay_seconds: int = HEALTH_CHECK_DELAY_SECONDS,
+) -> None:
+    """Layer 3: verify egress from the machine running this deployment."""
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(attempts):
+        try:
+            run(
+                [
+                    "curl",
+                    "--noproxy",
+                    "*",
+                    "--connect-timeout",
+                    "3",
+                    "--max-time",
+                    "8",
+                    "--silent",
+                    "--show-error",
+                    "--fail",
+                    "--location",
+                    "--output",
+                    "/dev/null",
+                    LAN_HEALTH_URL,
+                ]
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    raise ConfigError("ROLLBACK_HEALTH_LAYER3_LAN_EGRESS_FAILED") from last_error
+
+
+def verify_stopped_openclash_health(
+    host: str,
+    transaction: DeploymentTransaction,
+) -> None:
+    expected_artifacts = "1" if transaction.original_network_artifacts else "0"
+    tun_check = (
+        "ip link show utun >/dev/null 2>&1"
+        if transaction.original_tun_present
+        else "! ip link show utun >/dev/null 2>&1"
+    )
+    config_check = (
+        f"cmp -s {quote_remote(transaction.active_backup)} "
+        f"{quote_remote(transaction.original_active_path)}; "
+        f"{quote_remote(transaction.core_path)} -t -d /etc/openclash "
+        f"-f {quote_remote(transaction.original_active_path)}"
+        if transaction.original_active_exists
+        else f"[ ! -e {quote_remote(transaction.original_active_path)} ]"
+    )
+    command = (
+        "OPENCLASH_ROLLBACK_HEALTH=1; set -e; "
+        # Layer 0: both procd and the actual core must be stopped.
+        "! /etc/init.d/openclash running >/dev/null 2>&1; "
+        "! pidof clash >/dev/null 2>&1; ! pidof mihomo >/dev/null 2>&1; "
+        # Layer 1: the restored selected config still validates.
+        f"{config_check}; "
+        # Layer 2: no stale transparent-proxy dataplane may survive a stopped service.
+        "network_artifacts=0; "
+        "ip -4 rule show 2>/dev/null | grep -qE "
+        "'fwmark (0x)?0*162 .*lookup (0x)?0*162|fwmark (0x)?0*162 .*lookup 354' "
+        "&& network_artifacts=1; "
+        "ip -4 route show table 354 2>/dev/null | grep -q . && network_artifacts=1; "
+        "if command -v nft >/dev/null 2>&1; then "
+        "nft list chains 2>/dev/null | grep -q 'chain openclash' && network_artifacts=1; fi; "
+        f"[ \"$network_artifacts\" = {quote_remote(expected_artifacts)} ]; "
+        f"{tun_check}; "
+        "/etc/init.d/dnsmasq running >/dev/null 2>&1"
+    )
+    try:
+        ssh_command(host, command, capture=True)
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("ROLLBACK_HEALTH_LAYER0_2_FAILED") from exc
+
+
+def verify_post_rollback_health(host: str, transaction: DeploymentTransaction) -> None:
+    if transaction.original_running:
+        wait_for_openclash_running(host, max_wait_seconds=15)
+        verify_remote_health(
+            host,
+            remote_path=transaction.original_active_path,
+            core_path=transaction.core_path,
+        )
+    else:
+        verify_stopped_openclash_health(host, transaction)
+    verify_lan_client_egress()
+
+
 def rollback_remote_deployment(
     host: str,
     *,
-    remote_path: str,
-    target_backup: str,
-    target_absent_marker: str,
-    original_active_path: str,
-    original_active_exists: bool,
-    active_backup: str,
-    uci_backup: str,
-    service_state_backup: str,
-    core_path: str,
-    original_enabled: bool,
-    original_running: bool,
+    transaction: DeploymentTransaction,
 ) -> None:
-    restore_parts = [
-        "OPENCLASH_ROLLBACK=1; set -e",
-        (
-            f"if [ -f {quote_remote(target_absent_marker)} ]; then "
-            f"rm -f {quote_remote(remote_path)}; else "
-            f"cp -p {quote_remote(target_backup)} {quote_remote(remote_path)}; "
-            f"chmod 600 {quote_remote(remote_path)}; fi"
-        ),
-        (
-            f"cp -p {quote_remote(active_backup)} {quote_remote(original_active_path)}; "
-            f"chmod 600 {quote_remote(original_active_path)}"
-            if original_active_exists
-            else f"rm -f {quote_remote(original_active_path)}"
-        ),
-        f"cp -p {quote_remote(uci_backup)} /etc/config/openclash",
-        (
-            "/etc/init.d/openclash enable"
-            if original_enabled
-            else "/etc/init.d/openclash disable"
-        ),
-        (
-            "/etc/init.d/openclash restart"
-            if original_running
-            else "/etc/init.d/openclash stop"
-        ),
-    ]
+    restore_errors: list[str] = []
+
+    def restore_step(label: str, command: str, *, required: bool = True) -> None:
+        try:
+            ssh_command(host, command, capture=True)
+        except subprocess.CalledProcessError:
+            if required:
+                restore_errors.append(label)
+
+    # Stop first, while OpenClash's live UCI still contains the DNS/firewall
+    # bookkeeping required by revert_dnsmasq() and revert_firewall().  A procd
+    # "service delete: Not found" must not prevent the remaining restoration.
+    restore_step(
+        "pre_restore_stop",
+        "OPENCLASH_ROLLBACK_STOP=1; /etc/init.d/openclash stop",
+        required=False,
+    )
+
     try:
-        ssh_command(host, "; ".join(restore_parts))
-    except subprocess.CalledProcessError as exc:
-        raise ConfigError("ROLLBACK_FAILED: restore command failed") from exc
+        restore_step(
+            "target_yaml",
+            (
+                f"if [ -f {quote_remote(transaction.target_absent_marker)} ]; then "
+                f"rm -f {quote_remote(transaction.remote_path)}; else "
+                f"cp -p {quote_remote(transaction.target_backup)} "
+                f"{quote_remote(transaction.remote_path)}; "
+                f"chmod 600 {quote_remote(transaction.remote_path)}; fi"
+            ),
+        )
+        restore_step(
+            "active_yaml",
+            (
+                f"cp -p {quote_remote(transaction.active_backup)} "
+                f"{quote_remote(transaction.original_active_path)}; "
+                f"chmod 600 {quote_remote(transaction.original_active_path)}"
+                if transaction.original_active_exists
+                else f"rm -f {quote_remote(transaction.original_active_path)}"
+            ),
+        )
+        restore_step(
+            "openclash_uci",
+            f"cp -p {quote_remote(transaction.openclash_uci_backup)} /etc/config/openclash",
+        )
+        restore_step(
+            "dhcp_uci",
+            f"cp -p {quote_remote(transaction.dhcp_uci_backup)} /etc/config/dhcp",
+        )
+        restore_step(
+            "firewall_uci",
+            f"cp -p {quote_remote(transaction.firewall_uci_backup)} /etc/config/firewall",
+        )
+    finally:
+        # This is deliberately independent from file/UCI restoration.  Even if
+        # one copy fails, reload the saved dataplane and restore service state.
+        restore_step("firewall_reload", "/etc/init.d/firewall reload")
+        restore_step("dnsmasq_restart", "/etc/init.d/dnsmasq restart")
+        if transaction.original_running or not transaction.original_network_artifacts:
+            residual_cleanup = (
+                "while ip -4 rule del fwmark 0x162 table 354 2>/dev/null; do :; done; "
+                "ip -4 route flush table 354 2>/dev/null || true; "
+                "while ip -6 rule del fwmark 0x162 table 354 2>/dev/null; do :; done; "
+                "ip -6 route flush table 354 2>/dev/null || true"
+            )
+            if not transaction.original_tun_present:
+                residual_cleanup += (
+                    "; ip link show utun >/dev/null 2>&1 && "
+                    "ip link delete utun 2>/dev/null || true"
+                )
+            restore_step("policy_route_cleanup", residual_cleanup)
+        restore_step(
+            "boot_state",
+            (
+                "/etc/init.d/openclash enable"
+                if transaction.original_enabled
+                else "/etc/init.d/openclash disable"
+            ),
+        )
+        restore_step(
+            "service_state",
+            (
+                "/etc/init.d/openclash start"
+                if transaction.original_running
+                else "/etc/init.d/openclash stop"
+            ),
+            required=False,
+        )
+
+    if restore_errors:
+        raise ConfigError(
+            "ROLLBACK_FAILED: restore steps failed: " + ",".join(restore_errors)
+        )
 
     verify_parts = [
         "OPENCLASH_ROLLBACK_VERIFY=1; set -e",
         (
-            f"if [ -f {quote_remote(target_absent_marker)} ]; then "
-            f"[ ! -e {quote_remote(remote_path)} ]; else "
-            f"cmp -s {quote_remote(target_backup)} {quote_remote(remote_path)}; fi"
+            f"if [ -f {quote_remote(transaction.target_absent_marker)} ]; then "
+            f"[ ! -e {quote_remote(transaction.remote_path)} ]; else "
+            f"cmp -s {quote_remote(transaction.target_backup)} "
+            f"{quote_remote(transaction.remote_path)}; fi"
         ),
-        f"cmp -s {quote_remote(uci_backup)} /etc/config/openclash",
-        f"[ \"$(uci -q get openclash.config.config_path)\" = {quote_remote(original_active_path)} ]",
-        (
-            f"cmp -s {quote_remote(active_backup)} {quote_remote(original_active_path)}; "
-            f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(original_active_path)}"
-            if original_active_exists
-            else f"[ ! -e {quote_remote(original_active_path)} ]"
-        ),
+        f"[ \"$(uci -q get openclash.config.config_path)\" = "
+        f"{quote_remote(transaction.original_active_path)} ]",
+        f"grep -Fqx {quote_remote(f'active_path={transaction.original_active_path}')} "
+        f"{quote_remote(transaction.service_state_backup)}",
         (
             "/etc/init.d/openclash enabled >/dev/null 2>&1"
-            if original_enabled
+            if transaction.original_enabled
             else "! /etc/init.d/openclash enabled >/dev/null 2>&1"
         ),
-        (
-            "/etc/init.d/openclash running >/dev/null 2>&1"
-            if original_running
-            else "! /etc/init.d/openclash running >/dev/null 2>&1"
-        ),
-        f"grep -Fqx {quote_remote(f'active_path={original_active_path}')} {quote_remote(service_state_backup)}",
     ]
+    if not transaction.original_running:
+        verify_parts.extend(
+            [
+                f"cmp -s {quote_remote(transaction.openclash_uci_backup)} /etc/config/openclash",
+                f"cmp -s {quote_remote(transaction.dhcp_uci_backup)} /etc/config/dhcp",
+                f"cmp -s {quote_remote(transaction.firewall_uci_backup)} /etc/config/firewall",
+            ]
+        )
     try:
         ssh_command(host, "; ".join(verify_parts), capture=True)
-    except subprocess.CalledProcessError as exc:
+        verify_post_rollback_health(host, transaction)
+        verify_network_path = transaction.network_state_backup + ".verify"
+        ssh_command(
+            host,
+            "OPENCLASH_ROLLBACK_NETWORK_VERIFY=1; set -e; "
+            + network_state_capture_command(verify_network_path)
+            + f"; cmp -s {quote_remote(transaction.network_state_backup)} "
+            + f"{quote_remote(verify_network_path)}; rm -f {quote_remote(verify_network_path)}",
+            capture=True,
+        )
+    except (subprocess.CalledProcessError, ConfigError) as exc:
         raise ConfigError("ROLLBACK_FAILED: rollback verification failed") from exc
 
 
-def deploy(
+def upload_candidate(
     local_file: Path,
     *,
     host: str,
     remote_name: str | None,
     core_path: str,
-    activate: bool,
-) -> str:
+) -> UploadedCandidate:
+    """Upload and validate an immutable candidate without reading production state."""
     local_file = local_file.expanduser().resolve()
     if not local_file.is_file():
         raise ConfigError(f"Output file does not exist: {local_file}")
@@ -1868,21 +2365,102 @@ def deploy(
     if "/" in filename or filename in {".", ".."}:
         raise ConfigError("--remote-name must be a plain filename.")
 
-    remote_dir = "/etc/openclash/config"
-    remote_path = f"{remote_dir}/{filename}"
-    stamp = now_stamp()
-    remote_tmp = f"/tmp/{filename}.upload.{stamp}"
+    digest = hashlib.sha256(local_file.read_bytes()).hexdigest()
+    production_path = f"/etc/openclash/config/{filename}"
+    candidate_path = f"{REMOTE_CANDIDATE_DIR}/{filename}.{digest[:16]}.candidate"
+    remote_tmp = f"/tmp/{filename}.upload.{uuid.uuid4().hex}"
+
+    try:
+        run(
+            [
+                "scp",
+                "-O",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                str(local_file),
+                f"{host}:{remote_tmp}",
+            ]
+        )
+        install = (
+            "OPENCLASH_CANDIDATE_UPLOAD=1; set -e; "
+            f"chmod 600 {quote_remote(remote_tmp)}; "
+            f"[ \"$(sha256sum {quote_remote(remote_tmp)} | awk '{{print $1}}')\" = "
+            f"{quote_remote(digest)} ]; "
+            f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_tmp)}; "
+            f"mkdir -p {quote_remote(REMOTE_CANDIDATE_DIR)}; "
+            f"if [ -e {quote_remote(candidate_path)} ]; then "
+            f"cmp -s {quote_remote(remote_tmp)} {quote_remote(candidate_path)}; "
+            f"rm -f {quote_remote(remote_tmp)}; else "
+            f"mv {quote_remote(remote_tmp)} {quote_remote(candidate_path)}; fi; "
+            f"chmod 600 {quote_remote(candidate_path)}"
+        )
+        ssh_command(host, install, capture=True)
+    except subprocess.CalledProcessError as exc:
+        try:
+            ssh_command(host, f"rm -f {quote_remote(remote_tmp)}", capture=True)
+        except subprocess.CalledProcessError as cleanup_exc:
+            raise ConfigError("REMOTE_CANDIDATE_UPLOAD_AND_CLEANUP_FAILED") from cleanup_exc
+        raise ConfigError("REMOTE_CANDIDATE_UPLOAD_FAILED; production unchanged") from exc
+    return UploadedCandidate(candidate_path, production_path)
+
+
+def activate_uploaded_candidate(
+    candidate: UploadedCandidate,
+    *,
+    host: str,
+    core_path: str,
+) -> str:
+    """Begin the deployment transaction and atomically activate one candidate."""
+    remote_path = candidate.production_path
+    filename = Path(remote_path).name
+    stamp = f"{now_stamp()}-{uuid.uuid4().hex[:8]}"
     target_backup = f"/tmp/{filename}.target-yaml.{stamp}.bak"
     target_absent_marker = f"/tmp/{filename}.target-absent.{stamp}"
     active_backup = f"/tmp/{filename}.active-yaml.{stamp}.bak"
-    uci_backup = f"/etc/config/openclash.bak.{stamp}"
+    openclash_uci_backup = f"/etc/config/openclash.bak.{stamp}"
+    dhcp_uci_backup = f"/tmp/{filename}.dhcp-uci.{stamp}.bak"
+    firewall_uci_backup = f"/tmp/{filename}.firewall-uci.{stamp}.bak"
     service_state_backup = f"/tmp/{filename}.service-state.{stamp}"
+    network_state_backup = f"/tmp/{filename}.network-state.{stamp}"
 
     original_state = read_remote_openclash_state(host)
     original_active_path = str(original_state["active_path"])
     original_active_exists = bool(original_state["active_exists"])
     original_enabled = bool(original_state["enabled"])
     original_running = bool(original_state["running"])
+    original_core_running = bool(original_state["core_running"])
+    original_network_artifacts = bool(original_state["network_artifacts"])
+    original_tun_present = bool(original_state["tun_present"])
+
+    if original_running != original_core_running:
+        raise ConfigError("REMOTE_OPENCLASH_STATE_INCONSISTENT")
+    if not original_running and (original_network_artifacts or original_tun_present):
+        raise ConfigError(
+            "REMOTE_STOPPED_DATAPLANE_INCONSISTENT: repair stale OpenClash "
+            "DNS/firewall/policy-route/TUN state before activation"
+        )
+
+    transaction = DeploymentTransaction(
+        remote_path=remote_path,
+        target_backup=target_backup,
+        target_absent_marker=target_absent_marker,
+        original_active_path=original_active_path,
+        original_active_exists=original_active_exists,
+        active_backup=active_backup,
+        openclash_uci_backup=openclash_uci_backup,
+        dhcp_uci_backup=dhcp_uci_backup,
+        firewall_uci_backup=firewall_uci_backup,
+        service_state_backup=service_state_backup,
+        network_state_backup=network_state_backup,
+        core_path=core_path,
+        original_enabled=original_enabled,
+        original_running=original_running,
+        original_core_running=original_core_running,
+        original_network_artifacts=original_network_artifacts,
+        original_tun_present=original_tun_present,
+    )
 
     active_snapshot = (
         f"[ -f {quote_remote(original_active_path)} ]; "
@@ -1898,98 +2476,78 @@ def deploy(
         f"if [ -f {quote_remote(remote_path)} ]; then "
         f"cp -p {quote_remote(remote_path)} {quote_remote(target_backup)}; "
         f"else : > {quote_remote(target_absent_marker)}; fi; "
-        f"cp -p /etc/config/openclash {quote_remote(uci_backup)}; "
+        f"cp -p /etc/config/openclash {quote_remote(openclash_uci_backup)}; "
+        f"cp -p /etc/config/dhcp {quote_remote(dhcp_uci_backup)}; "
+        f"cp -p /etc/config/firewall {quote_remote(firewall_uci_backup)}; "
         f"printf '%s\\n' {quote_remote(f'active_path={original_active_path}')} "
         f"{quote_remote(f'active_exists={int(original_active_exists)}')} "
         f"{quote_remote(f'enabled={int(original_enabled)}')} "
-        f"{quote_remote(f'running={int(original_running)}')} > {quote_remote(service_state_backup)}"
+        f"{quote_remote(f'running={int(original_running)}')} "
+        f"{quote_remote(f'core_running={int(original_core_running)}')} "
+        f"{quote_remote(f'network_artifacts={int(original_network_artifacts)}')} "
+        f"{quote_remote(f'tun_present={int(original_tun_present)}')} "
+        f"> {quote_remote(service_state_backup)}; "
+        + network_state_capture_command(network_state_backup)
     )
     try:
         ssh_command(host, snapshot)
     except subprocess.CalledProcessError as exc:
         raise ConfigError("Remote backup failed; deployment was not started.") from exc
 
-    try:
-        run(
-            [
-                "scp",
-                "-O",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                str(local_file),
-                f"{host}:{remote_tmp}",
-            ]
-        )
-    except subprocess.CalledProcessError as exc:
-        try:
-            ssh_command(host, f"rm -f {quote_remote(remote_tmp)}", capture=True)
-        except subprocess.CalledProcessError as cleanup_exc:
-            raise ConfigError("REMOTE_UPLOAD_FAILED_AND_CLEANUP_FAILED") from cleanup_exc
-        raise ConfigError("REMOTE_UPLOAD_FAILED; active configuration unchanged") from exc
-
+    activation_tmp = f"{remote_path}.activate.{uuid.uuid4().hex}.tmp"
     validate_and_install = (
-        "set -e; "
-        f"chmod 600 {quote_remote(remote_tmp)}; "
-        f"{quote_remote(core_path)} -t -d /etc/openclash -f {quote_remote(remote_tmp)}; "
-        f"mkdir -p {quote_remote(remote_dir)}; "
-        f"mv -f {quote_remote(remote_tmp)} {quote_remote(remote_path)}; "
-        f"chmod 600 {quote_remote(remote_path)}"
+        "OPENCLASH_ACTIVATION_INSTALL=1; set -e; "
+        f"[ -f {quote_remote(candidate.candidate_path)} ]; "
+        f"{quote_remote(core_path)} -t -d /etc/openclash "
+        f"-f {quote_remote(candidate.candidate_path)}; "
+        f"cp -p {quote_remote(candidate.candidate_path)} {quote_remote(activation_tmp)}; "
+        f"chmod 600 {quote_remote(activation_tmp)}; "
+        f"mv -f {quote_remote(activation_tmp)} {quote_remote(remote_path)}"
     )
     try:
-        ssh_command(host, validate_and_install)
+        ssh_command(host, validate_and_install, capture=True)
     except subprocess.CalledProcessError as exc:
-        rollback_remote_deployment(
-            host,
-            remote_path=remote_path,
-            target_backup=target_backup,
-            target_absent_marker=target_absent_marker,
-            original_active_path=original_active_path,
-            original_active_exists=original_active_exists,
-            active_backup=active_backup,
-            uci_backup=uci_backup,
-            service_state_backup=service_state_backup,
-            core_path=core_path,
-            original_enabled=original_enabled,
-            original_running=original_running,
-        )
-        try:
-            ssh_command(host, f"rm -f {quote_remote(remote_tmp)}", capture=True)
-        except subprocess.CalledProcessError as cleanup_exc:
-            raise ConfigError("REMOTE_CLEANUP_FAILED_AFTER_ROLLBACK") from cleanup_exc
-        raise ConfigError("REMOTE_INSTALL_FAILED_ROLLED_BACK") from exc
+        rollback_remote_deployment(host, transaction=transaction)
+        raise ConfigError("REMOTE_ACTIVATION_INSTALL_FAILED_ROLLED_BACK") from exc
 
-    if activate:
-        activate_cmd = (
-            "set -e; "
-            f"uci set openclash.config.config_path={quote_remote(remote_path)}; "
-            "uci set openclash.config.enable='1'; "
-            "uci commit openclash; "
-            "/etc/init.d/openclash restart"
-        )
-        try:
-            ssh_command(host, activate_cmd)
-            wait_for_openclash_running(host, max_wait_seconds=15)
-            verify_remote_health(host, remote_path=remote_path, core_path=core_path)
-        except (subprocess.CalledProcessError, ConfigError) as exc:
-            rollback_remote_deployment(
-                host,
-                remote_path=remote_path,
-                target_backup=target_backup,
-                target_absent_marker=target_absent_marker,
-                original_active_path=original_active_path,
-                original_active_exists=original_active_exists,
-                active_backup=active_backup,
-                uci_backup=uci_backup,
-                service_state_backup=service_state_backup,
-                core_path=core_path,
-                original_enabled=original_enabled,
-                original_running=original_running,
-            )
-            raise ConfigError("HEALTH_CHECK_FAILED_ROLLED_BACK") from exc
+    service_action = "restart" if original_running else "start"
+    activate_cmd = (
+        "OPENCLASH_ACTIVATION_START=1; set -e; "
+        f"uci set openclash.config.config_path={quote_remote(remote_path)}; "
+        "uci set openclash.config.enable='1'; uci commit openclash; "
+        f"/etc/init.d/openclash {service_action}"
+    )
+    try:
+        ssh_command(host, activate_cmd, capture=True)
+        wait_for_openclash_running(host, max_wait_seconds=15)
+        verify_remote_health(host, remote_path=remote_path, core_path=core_path)
+    except (subprocess.CalledProcessError, ConfigError) as exc:
+        rollback_remote_deployment(host, transaction=transaction)
+        raise ConfigError("HEALTH_CHECK_FAILED_ROLLED_BACK") from exc
 
     return remote_path
+
+
+def deploy(
+    local_file: Path,
+    *,
+    host: str,
+    remote_name: str | None,
+    core_path: str,
+    activate: bool,
+) -> str:
+    candidate = upload_candidate(
+        local_file, host=host, remote_name=remote_name, core_path=core_path
+    )
+    probe_uploaded_candidate(
+        local_file,
+        host=host,
+        core_path=core_path,
+        candidate_path=candidate.candidate_path,
+    )
+    if not activate:
+        return candidate.candidate_path
+    return activate_uploaded_candidate(candidate, host=host, core_path=core_path)
 
 
 def print_summary(data: dict[str, Any], output: Path, audit_output: Path | None) -> None:
@@ -2043,11 +2601,20 @@ def add_deploy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="root@192.168.10.1")
     parser.add_argument("--remote-name")
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
-    parser.add_argument(
+    activation = parser.add_mutually_exclusive_group()
+    activation.add_argument(
         "--activate",
+        dest="activate",
         action="store_true",
         help="Select the installed config through UCI and restart OpenClash after validation.",
     )
+    activation.add_argument(
+        "--no-activate",
+        dest="activate",
+        action="store_false",
+        help="Upload and sidecar-test only; do not enter the activation transaction.",
+    )
+    parser.set_defaults(activate=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2082,6 +2649,34 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_p.add_argument("--file", type=Path, required=True)
     add_deploy_args(deploy_p)
 
+    upload_p = sub.add_parser(
+        "upload-candidate",
+        help="Upload and validate an immutable candidate without reading production state.",
+    )
+    upload_p.add_argument("--file", type=Path, required=True)
+    upload_p.add_argument("--host", default="root@192.168.10.1")
+    upload_p.add_argument("--remote-name")
+    upload_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
+
+    candidate_probe_p = sub.add_parser(
+        "probe-candidate",
+        help="Test a candidate in an isolated router sidecar without TUN/firewall changes.",
+    )
+    candidate_probe_p.add_argument("--file", type=Path, required=True)
+    candidate_probe_p.add_argument("--candidate-path")
+    candidate_probe_p.add_argument("--host", default="root@192.168.10.1")
+    candidate_probe_p.add_argument(
+        "--core-path", default="/etc/openclash/core/clash_meta"
+    )
+
+    activate_p = sub.add_parser(
+        "activate", help="Activate a previously uploaded candidate transactionally."
+    )
+    activate_p.add_argument("--candidate-path", required=True)
+    activate_p.add_argument("--production-name", required=True)
+    activate_p.add_argument("--host", default="root@192.168.10.1")
+    activate_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
+
     probe_p = sub.add_parser(
         "probe", help="Test static nodes locally without generating or deploying OpenClash."
     )
@@ -2115,12 +2710,18 @@ def main() -> int:
             output = workdir / args.output_name
             audit_output = workdir / args.audit_name
             source_data = load_yaml(exported)
+            probe_runner = run_local_service_probe
+            if args.deploy:
+                probe_runner = lambda data, *, core_path: run_remote_service_probe(
+                    data, host=args.host, core_path=args.core_path
+                )
             selections, _ = dynamic_probe_and_select(
                 source_data,
                 state_path=args.state_path,
                 report_path=args.probe_report,
                 core_path=args.probe_core,
                 update_lkg=True,
+                probe_runner=probe_runner,
             )
             transform_file(exported, output, audit_output, selections)
             data = load_yaml(output)
@@ -2164,6 +2765,52 @@ def main() -> int:
             )
             print(f"remote_config={remote}")
             print(f"activated={str(args.activate).lower()}")
+            return 0
+
+        if args.command == "upload-candidate":
+            candidate = upload_candidate(
+                args.file,
+                host=args.host,
+                remote_name=args.remote_name,
+                core_path=args.core_path,
+            )
+            print(f"candidate_config={candidate.candidate_path}")
+            print(f"production_config={candidate.production_path}")
+            print("production_state_read=false")
+            return 0
+
+        if args.command == "probe-candidate":
+            if args.candidate_path and not args.candidate_path.startswith(
+                REMOTE_CANDIDATE_DIR + "/"
+            ):
+                raise ConfigError("--candidate-path must be in the candidate directory.")
+            probe_uploaded_candidate(
+                args.file,
+                host=args.host,
+                core_path=args.core_path,
+                candidate_path=args.candidate_path,
+            )
+            print("candidate_probe=pass")
+            print("production_state_changed=false")
+            return 0
+
+        if args.command == "activate":
+            production_name = args.production_name
+            if "/" in production_name or production_name in {".", ".."}:
+                raise ConfigError("--production-name must be a plain filename.")
+            candidate_path = args.candidate_path
+            if not candidate_path.startswith(REMOTE_CANDIDATE_DIR + "/"):
+                raise ConfigError("--candidate-path must be in the candidate directory.")
+            remote = activate_uploaded_candidate(
+                UploadedCandidate(
+                    candidate_path,
+                    f"/etc/openclash/config/{production_name}",
+                ),
+                host=args.host,
+                core_path=args.core_path,
+            )
+            print(f"remote_config={remote}")
+            print("activated=true")
             return 0
 
         parser.error("Unknown command")

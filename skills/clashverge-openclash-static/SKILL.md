@@ -1,6 +1,22 @@
 ---
 name: clashverge-openclash-static
-summary: Probe imported Clash Verge nodes, merge calibrated last-known-good service candidates, generate the accepted simple static OpenClash profile, and deploy it safely.
+description: >-
+  Probe imported Clash Verge nodes, merge calibrated last-known-good service
+  candidates, generate the accepted simple static OpenClash profile, upload and
+  test isolated candidates, and activate or roll back production OpenClash
+  transactionally. Use when updating OpenClash from a Clash Verge effective
+  configuration on ImmortalWrt/OpenWrt with Mihomo.
+version: 2.1.0
+author: Hermes Agent
+license: MIT
+platforms: [macos, linux]
+metadata:
+  hermes:
+    tags: [clash, openclash, clash-verge, proxy, network, openwrt, mihomo, static-config, sidecar, rollback]
+    category: networking
+    related_skills: [hermes-a-share-ta-chain]
+prerequisites:
+  commands: []
 ---
 
 # Clash Verge → OpenClash Static Configuration
@@ -22,6 +38,16 @@ Dependency:
 ```bash
 python3 -m pip install PyYAML
 ```
+
+## Upgrade record
+
+The front-matter `version` field is the only release-version source for this
+Skill. This backward-compatible minor release keeps `all --deploy --activate`,
+adds immutable candidate upload, GID-bypassed sidecar probing, explicit
+`upload-candidate`, `probe-candidate`, and `activate` stages, and makes
+production activation the sole transaction boundary. Rollback now restores and
+verifies config files, UCI, DNS, firewall, nft/policy routing, TUN, and service
+state.
 
 ## Accepted policy
 
@@ -70,7 +96,11 @@ python3 scripts/clashverge_to_openclash.py all \
   --activate
 ```
 
-Before generation, `all` probes current static nodes locally and updates the private LKG state. Deployment still uses the existing validated backup/health/rollback path.
+Before generation, a deploying `all` run probes static nodes through a temporary
+router-side Mihomo process. The process binds loopback only, runs as GID 65534,
+and relies on OpenClash's existing `meta skgid 65534 return` rule to avoid nesting
+inside production OpenClash. Only the explicit activation phase may change the
+production service or data plane.
 
 ### “更新 OpenClash 节点，但不要启用”
 
@@ -81,7 +111,9 @@ python3 scripts/clashverge_to_openclash.py all \
   --deploy
 ```
 
-This still performs the local probe and LKG merge, but remote activation and restart remain disabled.
+This probes through the isolated router sidecar, uploads an immutable candidate,
+and leaves UCI, the selected production YAML, service state, firewall, policy
+routes, DNS, and TUN untouched. `--no-activate` is an equivalent explicit spelling.
 
 ### “测试 OpenClash 节点”
 
@@ -135,31 +167,33 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 - State and report contain node names, polymorphic service results, timestamps, LKG decisions, and redacted egress signatures only. They never contain node connection parameters or a full egress IP.
 - The first state is seeded from the three service groups produced by the current baseline transform; no second hard-coded seed list exists.
 - Selector PUT must be followed by controller GET and exact full-name confirmation. Unconfirmed selection is `NODE_SWITCH_UNCONFIRMED`, not service failure.
-- Run the temporary core in `rule` mode with an independent `PROBE` selector and final `MATCH,PROBE`; bind it to active `en0`, or a verified active physical default interface when `en0` is unavailable. Reject loopback, `utun`, and virtual interfaces with `BLOCKED_NO_PHYSICAL_INTERFACE`.
+- For local-only probe commands, run the temporary core in `rule` mode with an independent `PROBE` selector and final `MATCH,PROBE`; bind it to active `en0`, or a verified active physical default interface when `en0` is unavailable. Treat this path as diagnostic because a router transparent proxy can still capture it.
+- For every deploying `all` run, run the temporary core on the router instead: fixed loopback-only ports, no TUN/listeners/tunnels/routing mark, UID/GID 65534, and an SSH loopback tunnel for controller and mixed-port access. If production OpenClash is running, require the nft GID-65534 bypass before starting the sidecar. Hash production UCI/service/rule/table-354/nft/TUN state before and after and fail if it changes.
 - Validate the temporary YAML with the selected Mihomo core before startup. After startup, confirm runtime mode and final rule through the controller and read `GLOBAL`; `GLOBAL.now=DIRECT` is harmless in rule mode because requests explicitly use the temporary mixed proxy and `MATCH` targets `PROBE`.
 - Requests are serial per node, use a fresh curl process, connect timeout 3 seconds, total timeout 8 seconds, at most two attempts, and a 15-minute round deadline. The selector wait is 0.75 seconds.
 - GPT 403 challenge evidence is `CHALLENGE_UNKNOWN`, never `FAIL_REGION` without explicit region text.
 - Manual calibration matches only an exact raw node name or the exact name after removing a leading flag and spaces.
 - Egress persistence is limited to country, ASN, and a run-keyed HMAC prefix. Mark `PROBABLE_TUN_OR_UPSTREAM_RECAPTURE` only when at least three `BASE_PASS` nodes span at least two declared regions and every eligible node has the same complete signature. Transport failures do not participate; a guarded run cannot change LKG or service groups.
-- Temporary YAML, response bodies, headers, logs, and Mihomo are cleaned in `finally`. The probe never changes Clash Verge, TUN, system proxy, OpenClash, or router state.
+- Temporary YAML, response bodies, headers, logs, Mihomo, PID, SSH tunnel, and lock are cleaned in `finally`. Candidate-probe failure must occur before the activation transaction and must never invoke production rollback.
 
 ## Deployment contract
 
 1. Use SSH BatchMode; never use `sshpass` or embed a password.
 2. Upload with `scp -O` for OpenWrt/Dropbear compatibility.
-3. Write to a temporary remote path.
+3. Write to a temporary remote path, validate its hash and Mihomo syntax, then move it to `/etc/openclash/config/.clashverge-candidates/`. This upload phase must not read production UCI/service state or start a rollback transaction.
 4. Run the installed core:
 
 ```bash
 /etc/openclash/core/clash_meta -t -d /etc/openclash -f <temporary-file>
 ```
 
-5. Before upload or replacement, read the real active YAML path from UCI. If it cannot be read, stop without guessing. Back up that active YAML when it exists, the destination YAML state, `/etc/config/openclash`, and the original enabled/running service state.
-6. Only after validation passes, atomically replace the remote YAML.
-7. Activation is opt-in. When requested, set the UCI config path, enable OpenClash, commit UCI, and restart the service.
+5. Sidecar-test the candidate before activation. Its DNS and proxy listeners are loopback-only and it must not enable TUN, TPROXY, policy routing, firewall integration, or LAN access.
+6. Activation is the transaction boundary. Only here read the real active YAML path from UCI and back up that active YAML, the destination state, `/etc/config/openclash`, `/etc/config/dhcp`, `/etc/config/firewall`, enabled/running/core state, and full diagnostic snapshots of IPv4/IPv6 rules, table 354, OpenClash nft state, and utun state.
+7. Atomically copy the immutable candidate into the production config path, set UCI, enable OpenClash, commit, and restart an originally running service or start an originally stopped service.
 8. After restart, retry health at most three times with a two-second interval. Each attempt verifies the service, validates the YAML currently selected by UCI with the installed core, discovers the mixed/HTTP proxy port from OpenClash UCI or the running/active YAML, verifies that port is listening, and requests `https://www.gstatic.com/generate_204` through that proxy with a three-second connect timeout and eight-second total timeout.
-9. On install, restart, or health failure, restore the destination and original active YAML states, UCI, and enabled/running service state. Re-read and validate the restored active YAML and service state; return an explicit `ROLLBACK_FAILED` status if restoration or verification fails.
-10. Never reboot the router.
+9. On install, restart, or health failure, first stop OpenClash while its live DNS/firewall rollback bookkeeping still exists. In a rollback `finally` path, restore the destination and original active YAML states, OpenClash/DHCP/firewall UCI, reload firewall and dnsmasq, and restore the original enabled/running service state. A procd `service delete: Not found` must not skip later recovery steps.
+10. Post-rollback health is layered: actual OpenClash core process state (Layer 0), restored Mihomo config test (Layer 1), proxy listener or absence of stale fwmark/table 354/nft redirect state (Layer 2), and transparent egress from the LAN machine running the deployment (Layer 3). `curl --noproxy '*'` disables explicit proxy variables only; it is deliberately not claimed to bypass router transparent interception. Return an explicit `ROLLBACK_FAILED` status if any required layer fails.
+11. Never reboot the router.
 
 ## Stop conditions
 
