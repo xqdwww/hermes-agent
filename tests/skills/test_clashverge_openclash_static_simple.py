@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import shutil
 import stat
 import subprocess
 import sys
@@ -64,11 +66,11 @@ def test_accepted_simple_profile() -> None:
     assert len(MODULE.GPT_CANDIDATES) == 11
     assert len(groups) == 12
     assert all("优先│" not in name and "优先｜" not in name for name in groups)
-    assert groups["GPT自动"]["type"] == "fallback"
-    assert "🇯🇵日本aws高速02" in groups["GPT自动"]["proxies"]
-    assert groups["GPT手动"]["proxies"] == ["GPT自动", *groups["GPT自动"]["proxies"]]
-    assert groups["Gemini手动"]["proxies"] == ["Gemini自动", *groups["Gemini自动"]["proxies"]]
-    assert groups["迪士尼手动"]["proxies"] == ["迪士尼自动", *groups["迪士尼自动"]["proxies"]]
+    assert groups["GPT候选"]["type"] == "fallback"
+    assert "🇯🇵日本aws高速02" in groups["GPT候选"]["proxies"]
+    assert groups["GPT手动"]["proxies"] == ["GPT候选", *groups["GPT候选"]["proxies"]]
+    assert groups["Gemini手动"]["proxies"] == ["Gemini候选", *groups["Gemini候选"]["proxies"]]
+    assert groups["迪士尼手动"]["proxies"] == ["迪士尼候选", *groups["迪士尼候选"]["proxies"]]
     assert result["rules"][-1] == "MATCH,默认代理"
     assert sum(rule.startswith("MATCH,") for rule in result["rules"]) == 1
     assert "external-controller-unix" not in result
@@ -411,7 +413,15 @@ def test_node_probe_failure_never_contacts_router(tmp_path, monkeypatch) -> None
     source.write_text("proxies: []\n", encoding="utf-8")
     router_calls: list[str] = []
 
-    monkeypatch.setattr(MODULE, "export_source", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(
+        MODULE,
+        "prepare_source_snapshot",
+        lambda **_kwargs: (
+            {"source_snapshot_id": "snapshot-test", "source_hash": "a" * 64},
+            source,
+            {"manifest_path": str(tmp_path / "snapshot.json")},
+        ),
+    )
     monkeypatch.setattr(MODULE, "load_yaml", lambda _path: {})
 
     def failed_probe(*_args, **_kwargs):
@@ -536,26 +546,144 @@ def lkg_entry() -> dict[str, object]:
     }
 
 
-def test_v2_challenge_and_exact_manual_overrides() -> None:
+def test_v3_challenge_and_structured_manual_results() -> None:
     challenge = MODULE.classify_service_evidence(
         "gpt",
         http_evidence(403, body="Cloudflare cf-chl verify you are human", host="chatgpt.com"),
         http_evidence(404, host="cdn.oaistatic.com"),
     )
     assert challenge == "CHALLENGE_UNKNOWN"
-    assert MODULE.apply_manual_override("gpt", "🇯🇵日本aws高速02", challenge) == {
-        "raw_result": "CHALLENGE_UNKNOWN",
-        "override": "MANUAL_OVERRIDE_PASS",
-        "final_result": "MANUAL_OVERRIDE_PASS",
+    report = {
+        "run_timestamp": "2026-07-19T10:40:49+08:00",
+        "nodes": [
+            probe_node("🇯🇵日本aws高速02", gpt=service_result(challenge)),
+        ],
     }
-
-    assert MODULE.manual_override_for("gemini", "🇺🇸美国-住宅") == "MANUAL_OVERRIDE_FAIL"
-    assert MODULE.manual_override_for("gemini", "美国迈阿密-hy2") == "MANUAL_OVERRIDE_PASS"
-    assert MODULE.manual_override_for("gemini", "🇺🇸美国拉斯维加斯-hy2") == "MANUAL_OVERRIDE_PASS"
-    assert MODULE.manual_override_for("gemini", "🇺🇸美国-住宅-备用") is None
+    updated = MODULE.apply_manual_results_to_report(
+        report,
+        [
+            {
+                "service": "gpt",
+                "node": "日本aws高速02",
+                "result": "PASS",
+                "tested_at": "2026-07-20T00:00:00+08:00",
+                "method": "logged_in_browser_actual_generation",
+            }
+        ],
+    )
+    result = updated["nodes"][0]["services"]["gpt"]
+    assert result["raw_result"] == "CHALLENGE_UNKNOWN"
+    assert result["final_result"] == "MANUAL_OVERRIDE_PASS"
+    assert result["manual_result"]["method"] == "logged_in_browser_actual_generation"
+    assert updated["manual_results"]["applied"] == 1
     assert MODULE.classify_service_evidence(
         "disney", http_evidence(401), http_evidence(404)
     ) == "AUTH_UNKNOWN"
+
+
+def test_v3_screening_is_not_definitive_service_pass() -> None:
+    main = http_evidence(200, host="gemini.google.com")
+    support = http_evidence(404, host="generativelanguage.googleapis.com")
+    assert MODULE.classify_service_evidence("gemini", main, support) == "GEMINI_SCREEN_PASS"
+    assert MODULE.classify_service_evidence(
+        "gemini",
+        http_evidence(200, body="service is not available in your country"),
+        support,
+    ) == "GEMINI_SCREEN_FAIL"
+    assert MODULE.classify_service_evidence(
+        "disney",
+        http_evidence(200, host="www.disneyplus.com"),
+        http_evidence(404, host="global.edge.bamgrid.com"),
+    ) == "UNKNOWN_INCOMPLETE_PROBE"
+    assert "GEMINI_SCREEN_PASS" not in MODULE.PASS_RESULTS
+    assert "GEMINI_SCREEN_FAIL" in MODULE.REMOVE_RESULTS
+    assert "UNKNOWN_INCOMPLETE_PROBE" not in MODULE.PASS_RESULTS
+
+
+def test_v3_stale_and_unmatched_manual_results_do_not_override() -> None:
+    report = {
+        "run_timestamp": "2026-07-20T12:00:00+08:00",
+        "nodes": [probe_node("node-a", gemini=service_result("PASS"))],
+    }
+    updated = MODULE.apply_manual_results_to_report(
+        report,
+        [
+            {
+                "service": "gemini",
+                "node": "node-a",
+                "result": "PASS",
+                "tested_at": "2026-07-19T12:00:00+08:00",
+                "method": "logged_in_browser_actual_generation",
+            },
+            {
+                "service": "gpt",
+                "node": "missing-node",
+                "result": "PASS",
+                "tested_at": "2026-07-21T12:00:00+08:00",
+                "method": "logged_in_browser_actual_generation",
+            },
+        ],
+    )
+    result = updated["nodes"][0]["services"]["gemini"]
+    assert result["raw_result"] == "GEMINI_SCREEN_PASS"
+    assert result["final_result"] == "GEMINI_SCREEN_PASS"
+    assert updated["manual_results"]["applied"] == 0
+    assert len(updated["manual_results"]["unmatched_or_stale"]) == 2
+
+
+def test_v3_reconcile_adds_current_source_node_without_faking_probe(tmp_path) -> None:
+    old_name = "🇯🇵日本aws高速02"
+    new_name = "🇯🇵日本-流媒体01"
+    data = {"proxies": [proxy(old_name), proxy(new_name)], "rules": []}
+    state = {
+        "schema_version": 1,
+        "updated_at": "2026-07-19T10:40:49+08:00",
+        "nodes": {
+            old_name: {service: lkg_entry() for service in MODULE.SERVICE_KEYS},
+        },
+    }
+    report = {
+        "schema_version": 1,
+        "probe_version": "2",
+        "run_timestamp": "2026-07-19T10:40:49+08:00",
+        "probable_tun_or_upstream_recapture": False,
+        "nodes": [probe_node(old_name)],
+    }
+    manual = {
+        "schema_version": 1,
+        "results": [
+            {
+                "service": "gpt",
+                "node": new_name,
+                "result": "PASS",
+                "tested_at": "2026-07-20T00:00:00+08:00",
+                "method": "logged_in_browser_actual_generation",
+            }
+        ],
+    }
+    state_path = tmp_path / "state.json"
+    report_path = tmp_path / "report.json"
+    manual_path = tmp_path / "manual.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    manual_path.write_text(json.dumps(manual), encoding="utf-8")
+    selections, written = MODULE.reconcile_existing_probe(
+        data,
+        state_path=state_path,
+        probe_report_path=report_path,
+        manual_results_path=manual_path,
+        report_output_path=tmp_path / "reconciled.json",
+        state_output_path=tmp_path / "reconciled-state.json",
+    )
+    new_node = next(node for node in written["nodes"] if node["name"] == new_name)
+    assert new_name in written["nodes_added_without_probe"]
+    assert new_node["base_result"] == "NOT_PROBED_CURRENT_SOURCE"
+    assert new_node["services"]["gpt"]["final_result"] == "MANUAL_OVERRIDE_PASS"
+    assert new_name in selections["gpt"]["automatic"]
+    assert written["definitive_pass_counts"]["gemini"] == 0
+    assert "GEMINI_DEFINITIVE_WEB_GENERATION_RESULT_MISSING" in written[
+        "activation_blocked_reasons"
+    ]
 
 
 def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
@@ -604,7 +732,7 @@ def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
                 "PASS", final="MANUAL_OVERRIDE_FAIL", override="MANUAL_OVERRIDE_FAIL"
             ),
         ),
-        probe_node(new_pass, gpt=service_result("PASS")),
+        probe_node(new_pass, gpt=service_result("DEFINITIVE_AUTOMATED_PASS")),
         probe_node(new_unknown, gpt=service_result("UNKNOWN")),
     ]
     selections, new_state, enriched = MODULE.merge_lkg_results(
@@ -632,9 +760,9 @@ def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
     )
     generated_groups = {group["name"]: group for group in generated["proxy-groups"]}
     assert len(generated_groups) == 12
-    assert generated_groups["GPT自动"]["proxies"] == selections["gpt"]["automatic"]
+    assert generated_groups["GPT候选"]["proxies"] == selections["gpt"]["automatic"]
     assert generated_groups["GPT手动"]["proxies"] == [
-        "GPT自动",
+        "GPT候选",
         *selections["gpt"]["automatic"],
         *selections["gpt"]["manual_candidates"],
     ]
@@ -791,7 +919,7 @@ def test_v2_fake_selector_and_http_runner() -> None:
     assert slept == [MODULE.PROBE_SWITCH_WAIT_SECONDS]
     first, second = report["nodes"]
     assert first["services"]["gpt"]["raw_result"] == "CHALLENGE_UNKNOWN"
-    assert first["services"]["gpt"]["final_result"] == "MANUAL_OVERRIDE_PASS"
+    assert first["services"]["gpt"]["final_result"] == "CHALLENGE_UNKNOWN"
     assert first["egress_ip_hash"] and first["egress_ip_hash"] != "198.51.100.7"
     assert second["base_result"] == "NODE_SWITCH_UNCONFIRMED"
     assert second["services"]["gpt"]["final_result"] == "NODE_SWITCH_UNCONFIRMED"
@@ -974,6 +1102,24 @@ def test_v2_dynamic_pipeline_writes_report_and_lkg_state(tmp_path) -> None:
     data = {"proxies": [proxy(name) for name in names], "rules": []}
     report_path = tmp_path / "probe-results.json"
     state_path = tmp_path / "state" / "service-probe-lkg.json"
+    manual_path = tmp_path / "manual-results.json"
+    manual_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "results": [
+                    {
+                        "service": "gpt",
+                        "node": "🇯🇵日本aws高速02",
+                        "result": "PASS",
+                        "tested_at": "2026-07-16T00:00:00+08:00",
+                        "method": "logged_in_browser_actual_generation",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def fake_probe(source, *, core_path=None):
         return {
@@ -1003,6 +1149,7 @@ def test_v2_dynamic_pipeline_writes_report_and_lkg_state(tmp_path) -> None:
         report_path=report_path,
         core_path=None,
         update_lkg=True,
+        manual_results_path=manual_path,
         probe_runner=fake_probe,
     )
     assert written == json.loads(report_path.read_text(encoding="utf-8"))
@@ -1062,3 +1209,423 @@ def test_wait_for_openclash_running_times_out_after_15_seconds(monkeypatch) -> N
 
     # Verify: at least 15 calls (could be 16 due to final check)
     assert call_count >= 15, f"Expected at least 15 calls, got {call_count}"
+
+
+def source_gate_fixture(tmp_path: Path, *, count: int = 4) -> tuple[Path, Path]:
+    base = tmp_path / "clash-verge"
+    base.mkdir()
+    source = base / "clash-verge.yaml"
+    MODULE.dump_yaml(
+        {
+            "proxies": [
+                {
+                    **proxy(f"node-{index}"),
+                    "server": f"node-{index}.example.invalid",
+                    "password": f"credential-{index}",
+                }
+                for index in range(count)
+            ],
+            "rules": [],
+        },
+        source,
+    )
+    MODULE.dump_yaml(
+        {
+            "current": "remote-main",
+            "items": [
+                {
+                    "uid": "remote-main",
+                    "type": "remote",
+                    "url": "https://subscription.invalid/path?fixture=redacted",
+                    "updated": 1,
+                    "selected": [{"name": "GLOBAL", "now": "node-0"}],
+                    "file": "remote.yaml",
+                },
+                {"uid": "merge", "type": "merge", "file": "Merge.yaml"},
+            ],
+        },
+        base / "profiles.yaml",
+    )
+    MODULE.dump_yaml(
+        {"enable_system_proxy": True, "enable_tun_mode": False}, base / "verge.yaml"
+    )
+    MODULE.dump_yaml({"mode": "rule"}, base / "config.yaml")
+    return source, tmp_path / "identity.key"
+
+
+def successful_refresh(monkeypatch, *, mutate=None, outcome="SUCCESS_CHANGED") -> None:
+    def run_adapter(_adapter, *, profile_uid, paths, timeout_seconds, staging_dir):
+        assert profile_uid == "remote-main"
+        assert timeout_seconds > 0
+        if mutate:
+            mutate(paths)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        enhanced = staging_dir / ".source-refresh-snapshot-testnonce.yaml"
+        shutil.copyfile(paths["effective"], enhanced)
+        enhanced.chmod(0o600)
+        content_before = "a" * 64
+        content_after = content_before if outcome == "SUCCESS_NOT_MODIFIED" else "b" * 64
+        return {
+            "outcome": outcome,
+            "profile_identity": hashlib.sha256(
+                profile_uid.encode()
+                + b"\0"
+                + b"https://subscription.invalid/path?fixture=redacted"
+            ).hexdigest()[:16],
+            "source_identity_verified": True,
+            "content_hash_before": content_before,
+            "content_hash_after": content_after,
+            "download_path_used": "DIRECT",
+            "parsed_node_count_before": 4,
+            "parsed_node_count_after": 5 if outcome == "SUCCESS_CHANGED" else 4,
+            "enhanced_snapshot_path": str(enhanced),
+            "enhanced_snapshot_hash": MODULE.sha256_file(enhanced),
+            "started_at": "2026-07-22T00:00:00+08:00",
+            "completed_at": "2026-07-22T00:00:01+08:00",
+        }
+
+    monkeypatch.setattr(MODULE, "run_source_refresh_adapter", run_adapter)
+
+
+def prepare_gate(tmp_path, monkeypatch, **kwargs):
+    source, key = source_gate_fixture(tmp_path, count=kwargs.pop("count", 4))
+    return MODULE.prepare_source_snapshot(
+        source=source,
+        workdir=tmp_path / "output",
+        refresh_adapter=tmp_path / "official-adapter",
+        no_refresh=False,
+        source_snapshot=None,
+        identity_key_path=key,
+        refresh_timeout=5,
+        min_node_retention_ratio=kwargs.pop("ratio", 0.5),
+        **kwargs,
+    )
+
+
+def test_source_refresh_changed_freezes_private_snapshot(tmp_path, monkeypatch) -> None:
+    def mutate(paths):
+        data = MODULE.load_yaml(paths["effective"])
+        data["proxies"].append(
+            {**proxy("node-new"), "server": "new.example.invalid", "password": "new-secret"}
+        )
+        MODULE.dump_yaml(data, paths["effective"])
+
+    successful_refresh(monkeypatch, mutate=mutate)
+    manifest, payload, runtime = prepare_gate(tmp_path, monkeypatch)
+    assert manifest["refresh_outcome"] == "SUCCESS_CHANGED"
+    assert manifest["node_count"] == 5
+    assert stat.S_IMODE(payload.stat().st_mode) == 0o600
+    assert runtime["router_contacted_before_snapshot"] is False
+    assert runtime["clash_verge_state_preserved"] is True
+    text = Path(runtime["manifest_path"]).read_text(encoding="utf-8")
+    assert "top-secret" not in text and "credential-" not in text
+    report_text = Path(runtime["report_path"]).read_text(encoding="utf-8")
+    assert "top-secret" not in report_text and "credential-" not in report_text
+    assert json.loads(report_text)["router_contacted_before_snapshot"] is False
+    assert json.loads(report_text)["download_path_used"] == "DIRECT"
+
+
+def test_source_refresh_not_modified_is_valid(tmp_path, monkeypatch) -> None:
+    successful_refresh(monkeypatch, outcome="SUCCESS_NOT_MODIFIED")
+    manifest, _payload, _runtime = prepare_gate(tmp_path, monkeypatch)
+    assert manifest["refresh_outcome"] == "SUCCESS_NOT_MODIFIED"
+    assert manifest["source_diff_summary"]["added"] == []
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["FAIL_AUTH", "FAIL_TRANSPORT", "FAIL_PARSE", "FAIL_TIMEOUT", "FAIL_EMPTY_RESULT"],
+)
+def test_source_refresh_failure_receipts_fail_closed(tmp_path, monkeypatch, outcome) -> None:
+    source, key = source_gate_fixture(tmp_path)
+    monkeypatch.setattr(
+        MODULE,
+        "run_source_refresh_adapter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MODULE.ConfigError(f"STOP_SOURCE_REFRESH_FAILED: {outcome}")
+        ),
+    )
+    router_calls: list[str] = []
+    monkeypatch.setattr(MODULE, "ssh_command", lambda *_a, **_k: router_calls.append("ssh"))
+    with pytest.raises(MODULE.ConfigError, match="STOP_SOURCE_REFRESH_FAILED"):
+        MODULE.prepare_source_snapshot(
+            source=source,
+            workdir=tmp_path / "output",
+            refresh_adapter=tmp_path / "adapter",
+            no_refresh=False,
+            source_snapshot=None,
+            identity_key_path=key,
+            refresh_timeout=1,
+            min_node_retention_ratio=0.5,
+        )
+    assert router_calls == []
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [("not: [valid", "STOP_SOURCE_PARSE_FAILED"), ("proxies: []\n", "STOP_SOURCE_EMPTY")],
+)
+def test_refreshed_source_parse_and_empty_gate(tmp_path, monkeypatch, replacement, message) -> None:
+    def mutate(paths):
+        paths["effective"].write_text(replacement, encoding="utf-8")
+
+    successful_refresh(monkeypatch, mutate=mutate)
+    with pytest.raises(MODULE.ConfigError, match=message):
+        prepare_gate(tmp_path, monkeypatch)
+
+
+def test_source_identity_drift_and_node_collapse_gate(tmp_path, monkeypatch) -> None:
+    def drift(paths):
+        data = MODULE.load_yaml(paths["profiles"])
+        data["current"] = "other"
+        data["items"].append(
+            {"uid": "other", "type": "remote", "url": "https://other.invalid/sub"}
+        )
+        MODULE.dump_yaml(data, paths["profiles"])
+
+    successful_refresh(monkeypatch, mutate=drift)
+    with pytest.raises(MODULE.ConfigError, match="STOP_SOURCE_IDENTITY_DRIFT"):
+        prepare_gate(tmp_path, monkeypatch)
+
+    other = tmp_path / "collapse"
+    other.mkdir()
+
+    def collapse(paths):
+        data = MODULE.load_yaml(paths["effective"])
+        data["proxies"] = data["proxies"][:1]
+        MODULE.dump_yaml(data, paths["effective"])
+
+    successful_refresh(monkeypatch, mutate=collapse)
+    with pytest.raises(MODULE.ConfigError, match="abnormal node-count collapse"):
+        prepare_gate(other, monkeypatch, count=10, ratio=0.5)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("current", "other"),
+        ("selected", [{"name": "GLOBAL", "now": "node-2"}]),
+        ("system_proxy", False),
+        ("tun", True),
+    ],
+)
+def test_clash_verge_runtime_state_drift_stops(tmp_path, monkeypatch, field, value) -> None:
+    def mutate(paths):
+        if field == "current":
+            data = MODULE.load_yaml(paths["profiles"])
+            data["current"] = value
+            data["items"].append(
+                {"uid": "other", "type": "remote", "url": "https://other.invalid/sub"}
+            )
+            MODULE.dump_yaml(data, paths["profiles"])
+        elif field == "selected":
+            data = MODULE.load_yaml(paths["profiles"])
+            data["items"][0]["selected"] = value
+            MODULE.dump_yaml(data, paths["profiles"])
+        else:
+            data = MODULE.load_yaml(paths["verge"])
+            data["enable_system_proxy" if field == "system_proxy" else "enable_tun_mode"] = value
+            MODULE.dump_yaml(data, paths["verge"])
+
+    successful_refresh(monkeypatch, mutate=mutate)
+    expected = "STOP_SOURCE_IDENTITY_DRIFT" if field == "current" else "STOP_CLASH_VERGE_STATE_DRIFT"
+    with pytest.raises(MODULE.ConfigError, match=expected):
+        prepare_gate(tmp_path, monkeypatch)
+
+
+def test_snapshot_replay_never_rereads_changed_live_source(tmp_path, monkeypatch) -> None:
+    successful_refresh(monkeypatch, outcome="SUCCESS_NOT_MODIFIED")
+    manifest, payload, runtime = prepare_gate(tmp_path, monkeypatch)
+    frozen = payload.read_bytes()
+    source = tmp_path / "clash-verge" / "clash-verge.yaml"
+    source.write_text("proxies: []\n", encoding="utf-8")
+    replay, replay_payload, replay_runtime = MODULE.prepare_source_snapshot(
+        source=source,
+        workdir=tmp_path / "unused",
+        refresh_adapter=None,
+        no_refresh=False,
+        source_snapshot=Path(runtime["manifest_path"]),
+        identity_key_path=tmp_path / "unused.key",
+        refresh_timeout=1,
+        min_node_retention_ratio=0.5,
+    )
+    assert replay["source_snapshot_id"] == manifest["source_snapshot_id"]
+    assert replay_payload.read_bytes() == frozen
+    assert replay_runtime["live_source_reread_after_snapshot"] is False
+
+
+def test_explicit_no_refresh_and_freshness_gate(tmp_path) -> None:
+    source, key = source_gate_fixture(tmp_path)
+    manifest, _payload, runtime = MODULE.prepare_source_snapshot(
+        source=source,
+        workdir=tmp_path / "output",
+        refresh_adapter=None,
+        no_refresh=True,
+        source_snapshot=None,
+        identity_key_path=key,
+        refresh_timeout=1,
+        min_node_retention_ratio=0.5,
+    )
+    assert runtime["refresh_result"] == "SOURCE_REFRESH_SKIPPED_EXPLICITLY"
+    stale = deepcopy(manifest)
+    stale["created_at"] = "2020-01-01T00:00:00+00:00"
+    with pytest.raises(MODULE.ConfigError, match="STALE_SOURCE_SNAPSHOT"):
+        MODULE.validate_snapshot_for_activation(stale, freshness_ttl=60, allow_stale=False)
+    MODULE.validate_snapshot_for_activation(stale, freshness_ttl=60, allow_stale=True)
+
+
+def test_same_name_changed_identity_does_not_inherit_lkg() -> None:
+    name = "same-name"
+    node = probe_node(name)
+    node["exact_node_id"] = "node-new"
+    state = {
+        "schema_version": 1,
+        "updated_at": "old",
+        "nodes": {
+            name: {
+                service: {**lkg_entry(), "exact_node_id": "node-old"}
+                for service in MODULE.SERVICE_KEYS
+            }
+        },
+    }
+    with pytest.raises(MODULE.ConfigError, match="BLOCKED_NO_LKG_GPT_NODES"):
+        MODULE.merge_lkg_results(
+            [name],
+            {name: 0},
+            state,
+            [node],
+            probable_recapture=False,
+            observed_at="2026-07-20T12:00:00+08:00",
+        )
+
+
+def test_evidence_matrix_binds_snapshot_and_definitive_counts_remain_zero() -> None:
+    report = {
+        "run_timestamp": "2026-07-20T12:00:00+08:00",
+        "service_groups": {
+            service: {"automatic": ["node-a"], "manual_candidates": []}
+            for service in MODULE.SERVICE_KEYS
+        },
+        "nodes": [
+            probe_node(
+                "node-a",
+                gpt=service_result("PASS", final="MANUAL_OVERRIDE_PASS", override="MANUAL_OVERRIDE_PASS"),
+                gemini=service_result("GEMINI_SCREEN_PASS"),
+                disney=service_result("UNKNOWN_INCOMPLETE_PROBE"),
+            )
+        ],
+    }
+    report["nodes"][0]["services"]["gpt"]["manual_result"] = {
+        "tested_at": "2026-07-20T12:00:00+08:00",
+        "method": "logged_in_browser_actual_generation",
+    }
+    MODULE.annotate_probe_semantics(report, report["nodes"])
+    assert report["definitive_automated_pass_counts"] == {
+        "gpt": 0,
+        "gemini": 0,
+        "disney": 0,
+    }
+    assert report["nodes"][0]["services"]["gpt"]["evidence_type"] == "MANUAL_FUNCTIONAL_PASS"
+    assert report["nodes"][0]["services"]["gemini"]["evidence_type"] == "SCREEN_PASS"
+    assert report["nodes"][0]["services"]["disney"]["evidence_type"] == "LKG_FALLBACK"
+
+
+def test_refresh_adapter_protocol_identity_and_timeout(tmp_path, monkeypatch) -> None:
+    adapter = tmp_path / "adapter"
+    adapter.write_text("#!/bin/sh\n", encoding="utf-8")
+    adapter.chmod(0o700)
+    paths = {"profiles": tmp_path / "profiles.yaml", "effective": tmp_path / "source.yaml"}
+    MODULE.dump_yaml(
+        {
+            "current": "uid",
+            "items": [
+                {
+                    "uid": "uid",
+                    "type": "remote",
+                    "url": "https://subscription.invalid/source",
+                    "file": "remote.yaml",
+                }
+            ],
+        },
+        paths["profiles"],
+    )
+    expected_identity = hashlib.sha256(
+        b"uid\0https://subscription.invalid/source"
+    ).hexdigest()[:16]
+    monkeypatch.setattr(
+        MODULE.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "outcome": "SUCCESS_NOT_MODIFIED",
+                    "profile_identity": expected_identity,
+                    "source_identity_verified": True,
+                }
+            ),
+        ),
+    )
+    receipt = MODULE.run_source_refresh_adapter(
+        adapter,
+        profile_uid="uid",
+        paths=paths,
+        timeout_seconds=1,
+        staging_dir=tmp_path / "staging",
+    )
+    assert receipt["outcome"] == "SUCCESS_NOT_MODIFIED"
+
+    monkeypatch.setattr(
+        MODULE.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(str(adapter), 1)
+        ),
+    )
+    with pytest.raises(MODULE.ConfigError, match="FAIL_TIMEOUT"):
+        MODULE.run_source_refresh_adapter(
+            adapter,
+            profile_uid="uid",
+            paths=paths,
+            timeout_seconds=1,
+            staging_dir=tmp_path / "staging",
+        )
+
+
+def test_snapshot_identity_propagates_into_probe_report(tmp_path) -> None:
+    name = "🇨🇳台湾-住宅"
+    data = {"proxies": [proxy(name)], "rules": []}
+    manifest = {
+        "source_snapshot_id": "snapshot-exact",
+        "source_hash": "a" * 64,
+        "nodes": [{"exact_node_name": name, "exact_node_id": "node-exact"}],
+    }
+    state_path = tmp_path / "state.json"
+    report_path = tmp_path / "report.json"
+
+    def runner(_data, *, core_path=None):
+        return {
+            "schema_version": 1,
+            "probe_version": MODULE.PROBE_VERSION,
+            "run_timestamp": "2026-07-20T12:00:00+08:00",
+            "probable_tun_or_upstream_recapture": False,
+            "nodes": [probe_node(name)],
+        }
+
+    _groups, report = MODULE.dynamic_probe_and_select(
+        data,
+        state_path=state_path,
+        report_path=report_path,
+        core_path=None,
+        update_lkg=False,
+        snapshot_manifest=manifest,
+        probe_runner=runner,
+    )
+    assert report["source_snapshot_id"] == "snapshot-exact"
+    assert report["source_hash"] == "a" * 64
+    assert report["nodes"][0]["exact_node_id"] == "node-exact"
+    assert all(
+        result["probe_method_version"] == MODULE.PROBE_VERSION
+        for result in report["nodes"][0]["services"].values()
+    )

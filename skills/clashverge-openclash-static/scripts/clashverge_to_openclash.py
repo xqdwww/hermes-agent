@@ -141,13 +141,13 @@ MANAGED_GROUP_NAMES = (
     "自动选择",
     "GPT专用",
     "GPT手动",
-    "GPT自动",
+    "GPT候选",
     "Gemini专用",
     "Gemini手动",
-    "Gemini自动",
+    "Gemini候选",
     "迪士尼",
     "迪士尼手动",
-    "迪士尼自动",
+    "迪士尼候选",
 )
 
 BUILTIN_TARGETS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"}
@@ -193,7 +193,15 @@ REMOTE_SIDECAR_GID = 65534
 REMOTE_CANDIDATE_DIR = "/etc/openclash/config/.clashverge-candidates"
 LKG_SCHEMA_VERSION = 1
 PROBE_SCHEMA_VERSION = 1
-PROBE_VERSION = "2"
+PROBE_VERSION = "3"
+MANUAL_RESULT_SCHEMA_VERSION = 1
+SOURCE_SNAPSHOT_SCHEMA_VERSION = 1
+SOURCE_REFRESH_PROTOCOL_VERSION = 1
+DEFAULT_SOURCE_FRESHNESS_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_MIN_NODE_RETENTION_RATIO = 0.50
+DEFAULT_SOURCE_IDENTITY_KEY = (
+    Path.home() / ".hermes/state/clashverge-openclash-static/source-identity.key"
+)
 PROBE_CONNECT_TIMEOUT_SECONDS = 3
 PROBE_TOTAL_TIMEOUT_SECONDS = 8
 PROBE_REQUEST_ATTEMPTS = 2
@@ -210,13 +218,57 @@ PROBE_CORE_CANDIDATES = (
     Path("/usr/local/bin/mihomo"),
 )
 SERVICE_KEYS = ("gpt", "gemini", "disney")
-PASS_RESULTS = {"PASS", "MANUAL_OVERRIDE_PASS"}
-PENDING_RESULTS = {"CHALLENGE_UNKNOWN", "AUTH_UNKNOWN", "UNKNOWN"}
-REMOVE_RESULTS = {"FAIL_REGION", "MANUAL_OVERRIDE_FAIL"}
+PASS_RESULTS = {
+    "DEFINITIVE_AUTOMATED_PASS",
+    "MANUAL_OVERRIDE_PASS",
+    "PASS_SUPPORTED_REGION",
+}
+PENDING_RESULTS = {
+    "CHALLENGE_UNKNOWN",
+    "AUTH_UNKNOWN",
+    "UNKNOWN",
+    "GEMINI_SCREEN_PASS",
+    "UNKNOWN_INCOMPLETE_PROBE",
+    "UNKNOWN_RESPONSE_SCHEMA",
+}
+REMOVE_RESULTS = {
+    "FAIL_REGION",
+    "MANUAL_OVERRIDE_FAIL",
+    "FAIL_FORBIDDEN_LOCATION",
+    "FAIL_IP_BANNED",
+    "FAIL_UNAVAILABLE",
+    "GEMINI_SCREEN_FAIL",
+}
 SERVICE_GROUP_NAMES = {
-    "gpt": ("GPT自动", "GPT手动"),
-    "gemini": ("Gemini自动", "Gemini手动"),
-    "disney": ("迪士尼自动", "迪士尼手动"),
+    "gpt": ("GPT候选", "GPT手动"),
+    "gemini": ("Gemini候选", "Gemini手动"),
+    "disney": ("迪士尼候选", "迪士尼手动"),
+}
+EVIDENCE_TYPES = {
+    "DEFINITIVE_AUTOMATED_PASS",
+    "MANUAL_FUNCTIONAL_PASS",
+    "MANUAL_FUNCTIONAL_FAIL",
+    "SCREEN_PASS",
+    "LKG_FALLBACK",
+    "UNKNOWN",
+}
+SOURCE_REFRESH_OUTCOMES = {
+    "SUCCESS_CHANGED",
+    "SUCCESS_NOT_MODIFIED",
+    "FAIL_AUTH",
+    "FAIL_TRANSPORT",
+    "FAIL_PARSE",
+    "FAIL_TIMEOUT",
+    "FAIL_SOURCE_IDENTITY",
+    "FAIL_EMPTY_RESULT",
+    "FAIL_PROFILE_NOT_FOUND",
+    "FAIL_DOWNLOAD_DIRECT",
+    "FAIL_DOWNLOAD_ALL_PATHS",
+    "FAIL_SAVE",
+    "FAIL_NONCE_REPLAY",
+    "FAIL_NONCE_MISMATCH",
+    "FAIL_APP_RUNNING_WITHOUT_ADAPTER",
+    "FAIL_ADAPTER_BINARY_MISSING",
 }
 SERVICE_ENDPOINTS = {
     "gpt": ("https://chatgpt.com/", "https://cdn.oaistatic.com/"),
@@ -231,17 +283,10 @@ EGRESS_METADATA_ENDPOINTS = (
     "https://ipwho.is/",
     "https://ipapi.co/json/",
 )
-GPT_MANUAL_OVERRIDES = {"🇯🇵日本aws高速02": "MANUAL_OVERRIDE_PASS"}
-GEMINI_MANUAL_OVERRIDES = {
-    "🇺🇸美国-住宅": "MANUAL_OVERRIDE_FAIL",
-    "🇺🇸美国迈阿密-hy2": "MANUAL_OVERRIDE_PASS",
-    "🇺🇸美国拉斯维加斯-hy2": "MANUAL_OVERRIDE_PASS",
-}
-DISNEY_MANUAL_OVERRIDES: dict[str, str] = {}
-MANUAL_OVERRIDES = {
-    "gpt": GPT_MANUAL_OVERRIDES,
-    "gemini": GEMINI_MANUAL_OVERRIDES,
-    "disney": DISNEY_MANUAL_OVERRIDES,
+DEFINITIVE_MANUAL_METHODS = {
+    "logged_in_browser_actual_generation",
+    "logged_in_app_actual_generation",
+    "logged_in_browser_actual_playback",
 }
 REGION_FAILURE_MARKERS = (
     "not available in your country",
@@ -485,6 +530,16 @@ def iso_now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def parse_aware_timestamp(value: str, *, field: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigError(f"Invalid {field} timestamp.") from exc
+    if parsed.tzinfo is None:
+        raise ConfigError(f"{field} timestamp must include a timezone.")
+    return parsed
+
+
 def atomic_write_json(
     data: dict[str, Any], path: Path, *, private_parent: bool = False
 ) -> None:
@@ -526,6 +581,484 @@ def load_json_object(path: Path) -> dict[str, Any]:
     return data
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_or_create_identity_key(path: Path) -> bytes:
+    path = path.expanduser().resolve()
+    if path.exists():
+        key = path.read_bytes()
+        if len(key) < 32:
+            raise ConfigError("STOP_SOURCE_SNAPSHOT_FAILED: identity key is too short")
+        return key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    key = secrets.token_bytes(32)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, key)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return key
+
+
+def identity_hmac(key: bytes, value: Any) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def stable_node_identity(proxy: dict[str, Any], key: bytes) -> str:
+    # The display name is deliberately excluded. Connection credentials remain only
+    # inside the HMAC input and never enter manifests or logs.
+    identity = {k: v for k, v in proxy.items() if k not in {"name", "udp"}}
+    return "node_" + identity_hmac(key, identity)[:24]
+
+
+def clash_verge_paths(source: Path | None = None) -> dict[str, Path]:
+    effective = (source or find_default_source()).expanduser().resolve()
+    base = effective.parent
+    return {
+        "effective": effective,
+        "profiles": base / "profiles.yaml",
+        "verge": base / "verge.yaml",
+        "config": base / "config.yaml",
+    }
+
+
+def load_optional_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    value = load_yaml(path)
+    return value if isinstance(value, dict) else {}
+
+
+def capture_clash_verge_state(paths: dict[str, Path], key: bytes) -> dict[str, Any]:
+    profiles = load_optional_yaml(paths["profiles"])
+    verge = load_optional_yaml(paths["verge"])
+    config = load_optional_yaml(paths["config"])
+    current = profiles.get("current")
+    items = profiles.get("items") if isinstance(profiles.get("items"), list) else []
+    current_item = next(
+        (
+            item
+            for item in items
+            if isinstance(item, dict) and item.get("uid") == current
+        ),
+        None,
+    )
+    remote_items = [
+        item for item in items if isinstance(item, dict) and item.get("type") == "remote"
+    ]
+    selection_hash = (
+        identity_hmac(key, current_item.get("selected"))[:24]
+        if current_item and current_item.get("selected") is not None
+        else None
+    )
+    try:
+        with socket.create_connection(("127.0.0.1", 33331), timeout=0.2):
+            running = True
+    except OSError:
+        running = False
+    try:
+        route = subprocess.run(
+            ["/usr/sbin/netstat", "-rn", "-f", "inet"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+        default_route = next(
+            (
+                line.split()[:4]
+                for line in route.stdout.splitlines()
+                if line.split() and line.split()[0] == "default"
+            ),
+            None,
+        )
+        network_exit_hash = (
+            identity_hmac(key, default_route)[:24]
+            if route.returncode == 0 and default_route
+            else None
+        )
+    except (OSError, subprocess.SubprocessError):
+        network_exit_hash = None
+    try:
+        proxy_state = subprocess.run(
+            ["/usr/sbin/scutil", "--proxy"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+        proxy_enabled = any(
+            line.strip().endswith(": 1")
+            for line in proxy_state.stdout.splitlines()
+            if any(
+                line.strip().startswith(name)
+                for name in ("HTTPEnable", "HTTPSEnable", "SOCKSEnable")
+            )
+        )
+    except (OSError, subprocess.SubprocessError):
+        proxy_enabled = None
+    mihomo_running = False
+    for name in ("verge-mihomo", "mihomo"):
+        try:
+            result = subprocess.run(
+                ["/usr/bin/pgrep", "-x", name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            mihomo_running = mihomo_running or result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return {
+        "running": running,
+        "active_profile_id": identity_hmac(key, current)[:16] if current else None,
+        "active_profile_type": current_item.get("type") if current_item else None,
+        "active_profile_updated": current_item.get("updated") if current_item else None,
+        "proxy_mode": config.get("mode"),
+        "selected_node_state_hash": selection_hash,
+        "system_proxy": verge.get("enable_system_proxy"),
+        "system_proxy_effective": proxy_enabled,
+        "tun": verge.get("enable_tun_mode"),
+        "mihomo_running": mihomo_running,
+        "mac_network_exit_state_hash": network_exit_hash,
+        "bound_subscription_ids": [
+            identity_hmac(key, item.get("uid"))[:16]
+            for item in remote_items
+            if item.get("uid") == current
+        ],
+        "profile_count": len(items),
+    }
+
+
+def active_remote_profile(paths: dict[str, Path]) -> dict[str, Any]:
+    profiles = load_optional_yaml(paths["profiles"])
+    current = profiles.get("current")
+    items = profiles.get("items") if isinstance(profiles.get("items"), list) else []
+    matches = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and item.get("uid") == current
+        and item.get("type") == "remote"
+    ]
+    if len(matches) != 1 or not matches[0].get("url"):
+        raise ConfigError("STOP_SOURCE_IDENTITY_DRIFT: active profile is not one remote subscription")
+    return matches[0]
+
+
+def safe_source_summary(source: Path, key: bytes) -> dict[str, Any]:
+    data = load_yaml(source)
+    proxies = static_proxy_objects(data)
+    node_ids: dict[str, str] = {}
+    nodes: list[dict[str, Any]] = []
+    for proxy in proxies:
+        name = str(proxy["name"])
+        node_id = stable_node_identity(proxy, key)
+        if node_id in node_ids and node_ids[node_id] != name:
+            raise ConfigError("STOP_SOURCE_SNAPSHOT_FAILED: stable node ID collision")
+        node_ids[node_id] = name
+        nodes.append(
+            {
+                "exact_node_name": name,
+                "exact_node_id": node_id,
+                "protocol": str(proxy.get("type", "unknown")),
+            }
+        )
+    if not nodes:
+        raise ConfigError("STOP_SOURCE_EMPTY")
+    return {
+        "source_hash": sha256_file(source),
+        "node_count": len(nodes),
+        "nodes": nodes,
+    }
+
+
+def run_source_refresh_adapter(
+    adapter: Path,
+    *,
+    profile_uid: str,
+    paths: dict[str, Path],
+    timeout_seconds: int,
+    staging_dir: Path,
+) -> dict[str, Any]:
+    adapter = adapter.expanduser().resolve()
+    if not adapter.is_file() or not os.access(adapter, os.X_OK):
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: refresh adapter is not executable")
+    request = {
+        "protocol_version": SOURCE_REFRESH_PROTOCOL_VERSION,
+        "action": "update_profile_source",
+        "profile_uid": profile_uid,
+        "profiles_path": str(paths["profiles"]),
+        "effective_path": str(paths["effective"]),
+        "snapshot_staging_dir": str(staging_dir),
+    }
+    try:
+        completed = subprocess.run(
+            [str(adapter)],
+            input=json.dumps(request),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: FAIL_TIMEOUT") from exc
+    if completed.returncode != 0:
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: refresh adapter failed")
+    try:
+        response = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: invalid adapter receipt") from exc
+    if not isinstance(response, dict):
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: invalid adapter receipt")
+    outcome = response.get("outcome")
+    if outcome not in SOURCE_REFRESH_OUTCOMES:
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: unknown refresh outcome")
+    if outcome not in {"SUCCESS_CHANGED", "SUCCESS_NOT_MODIFIED"}:
+        raise ConfigError(f"STOP_SOURCE_REFRESH_FAILED: {outcome}")
+    profile = active_remote_profile(paths)
+    expected_identity = hashlib.sha256(
+        profile_uid.encode() + b"\0" + str(profile["url"]).encode()
+    ).hexdigest()[:16]
+    if response.get("profile_identity") != expected_identity:
+        raise ConfigError("STOP_SOURCE_IDENTITY_DRIFT")
+    if response.get("source_identity_verified") is not True:
+        raise ConfigError("STOP_SOURCE_IDENTITY_DRIFT")
+    return response
+
+
+def freeze_source_snapshot(
+    source: Path,
+    *,
+    output_dir: Path,
+    key: bytes,
+    source_identity: str,
+    refresh: dict[str, Any],
+) -> tuple[Path, Path, dict[str, Any]]:
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = safe_source_summary(source, key)
+    snapshot_id = "snapshot_" + hashlib.sha256(
+        (summary["source_hash"] + source_identity + str(refresh["completed_at"])).encode()
+    ).hexdigest()[:24]
+    payload_path = output_dir / f"{snapshot_id}.private.yaml"
+    manifest_path = output_dir / f"{snapshot_id}.json"
+    shutil.copyfile(source, payload_path)
+    os.chmod(payload_path, 0o600)
+    manifest = {
+        "schema_version": SOURCE_SNAPSHOT_SCHEMA_VERSION,
+        "source_snapshot_id": snapshot_id,
+        "created_at": iso_now(),
+        "refresh_started_at": refresh["started_at"],
+        "refresh_completed_at": refresh["completed_at"],
+        "source_identity": source_identity,
+        "source_hash": summary["source_hash"],
+        "source_snapshot_hash": summary["source_hash"],
+        "node_count": summary["node_count"],
+        "nodes": summary["nodes"],
+        "source_diff_summary": refresh["diff_summary"],
+        "refresh_outcome": refresh["outcome"],
+        "source_age_seconds_at_snapshot": refresh.get("source_age_seconds", 0),
+        "source_payload": payload_path.name,
+    }
+    atomic_write_json(manifest, manifest_path)
+    return manifest_path, payload_path, manifest
+
+
+def verify_source_snapshot(manifest_path: Path) -> tuple[dict[str, Any], Path]:
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest = load_json_object(manifest_path)
+    if manifest.get("schema_version") != SOURCE_SNAPSHOT_SCHEMA_VERSION:
+        raise ConfigError("STOP_SOURCE_SNAPSHOT_FAILED: unsupported schema")
+    payload = (manifest_path.parent / str(manifest.get("source_payload", ""))).resolve()
+    if payload.parent != manifest_path.parent or not payload.is_file():
+        raise ConfigError("STOP_SOURCE_SNAPSHOT_FAILED: missing private payload")
+    if sha256_file(payload) != manifest.get("source_hash"):
+        raise ConfigError("STOP_SOURCE_SNAPSHOT_FAILED: payload hash mismatch")
+    return manifest, payload
+
+
+def prepare_source_snapshot(
+    *,
+    source: Path | None,
+    workdir: Path,
+    refresh_adapter: Path | None,
+    no_refresh: bool,
+    source_snapshot: Path | None,
+    identity_key_path: Path,
+    refresh_timeout: int,
+    min_node_retention_ratio: float,
+) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    if source_snapshot:
+        manifest, payload = verify_source_snapshot(source_snapshot)
+        return manifest, payload, {"live_source_reread_after_snapshot": False}
+    key = load_or_create_identity_key(identity_key_path)
+    paths = clash_verge_paths(source)
+    profile = active_remote_profile(paths)
+    before_state = capture_clash_verge_state(paths, key)
+    before = safe_source_summary(paths["effective"], key)
+    started_at = iso_now()
+    if no_refresh:
+        outcome = "SOURCE_REFRESH_SKIPPED_EXPLICITLY"
+        receipt: dict[str, Any] = {}
+    else:
+        if refresh_adapter is None:
+            raise ConfigError(
+                "STOP_SOURCE_REFRESH_FAILED: Clash Verge 2.5.1 exposes update_profile only "
+                "inside Tauri; configure the authenticated custom source-refresh bridge"
+            )
+        receipt = run_source_refresh_adapter(
+            refresh_adapter,
+            profile_uid=str(profile["uid"]),
+            paths=paths,
+            timeout_seconds=refresh_timeout,
+            staging_dir=workdir / "source-refresh-staging",
+        )
+        outcome = str(receipt["outcome"])
+    completed_at = iso_now()
+    current_profile = active_remote_profile(paths)
+    if current_profile.get("uid") != profile.get("uid"):
+        raise ConfigError("STOP_SOURCE_IDENTITY_DRIFT")
+    refreshed_snapshot: Path | None = None
+    if no_refresh:
+        snapshot_source = paths["effective"]
+    else:
+        refreshed_snapshot = Path(str(receipt.get("enhanced_snapshot_path", ""))).resolve()
+        if refreshed_snapshot.parent != (workdir / "source-refresh-staging").resolve():
+            raise ConfigError("STOP_SOURCE_REFRESH_FAILED: invalid enhanced snapshot path")
+        if sha256_file(refreshed_snapshot) != receipt.get("enhanced_snapshot_hash"):
+            raise ConfigError("STOP_SOURCE_REFRESH_FAILED: enhanced snapshot hash mismatch")
+        snapshot_source = refreshed_snapshot
+    try:
+        after = safe_source_summary(snapshot_source, key)
+    except ConfigError as exc:
+        message = str(exc)
+        if "No static nodes" in message or message == "STOP_SOURCE_EMPTY":
+            raise ConfigError("STOP_SOURCE_EMPTY") from exc
+        raise ConfigError("STOP_SOURCE_PARSE_FAILED") from exc
+    if before["node_count"] and (
+        after["node_count"] / before["node_count"] < min_node_retention_ratio
+    ):
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: abnormal node-count collapse")
+    if outcome == "SUCCESS_NOT_MODIFIED" and receipt.get("content_hash_before") != receipt.get(
+        "content_hash_after"
+    ):
+        raise ConfigError("STOP_SOURCE_REFRESH_FAILED: NOT_MODIFIED receipt conflicts with source hash")
+    after_state = capture_clash_verge_state(paths, key)
+    preserved_keys = {
+        "running",
+        "active_profile_id",
+        "active_profile_type",
+        "proxy_mode",
+        "selected_node_state_hash",
+        "system_proxy",
+        "system_proxy_effective",
+        "tun",
+        "mihomo_running",
+        "bound_subscription_ids",
+        "mac_network_exit_state_hash",
+    }
+    if {k: before_state.get(k) for k in preserved_keys} != {
+        k: after_state.get(k) for k in preserved_keys
+    }:
+        raise ConfigError("STOP_CLASH_VERGE_STATE_DRIFT")
+    source_identity = identity_hmac(key, profile.get("uid"))[:24]
+    diff_summary = {
+        "node_count_before": before["node_count"],
+        "node_count_after": after["node_count"],
+        "added": sorted(
+            {n["exact_node_id"] for n in after["nodes"]}
+            - {n["exact_node_id"] for n in before["nodes"]}
+        ),
+        "removed": sorted(
+            {n["exact_node_id"] for n in before["nodes"]}
+            - {n["exact_node_id"] for n in after["nodes"]}
+        ),
+    }
+    manifest_path, payload, manifest = freeze_source_snapshot(
+        snapshot_source,
+        output_dir=workdir / "source-snapshots",
+        key=key,
+        source_identity=source_identity,
+        refresh={
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "outcome": outcome,
+            "diff_summary": diff_summary,
+            "source_age_seconds": max(
+                0, int(time.time() - snapshot_source.stat().st_mtime)
+            ),
+        },
+    )
+    runtime = {
+        "manifest_path": str(manifest_path),
+        "refresh_result": outcome,
+        "clash_verge_state_before": before_state,
+        "clash_verge_state_after": after_state,
+        "clash_verge_state_preserved": True,
+        "live_source_reread_after_snapshot": False,
+        "router_contacted_before_snapshot": False,
+        "source_hash_before": before["source_hash"],
+        "source_hash_after": after["source_hash"],
+        "download_path_used": receipt.get("download_path_used") if receipt else None,
+    }
+    refresh_report = {
+        "source_refresh_implemented": True,
+        "source_refresh_method": "custom_authenticated_loopback_bridge_reusing_clash_verge_profile_semantics",
+        "bound_subscriptions": before_state["bound_subscription_ids"],
+        "refresh_result": outcome,
+        "refresh_started_at": started_at,
+        "refresh_completed_at": completed_at,
+        "source_identity_verified": (
+            receipt.get("source_identity_verified") is True if receipt else True
+        ),
+        "adapter_profile_identity": receipt.get("profile_identity") if receipt else None,
+        "download_path_used": receipt.get("download_path_used") if receipt else None,
+        "raw_source_hash_before": receipt.get("content_hash_before") if receipt else None,
+        "raw_source_hash_after": receipt.get("content_hash_after") if receipt else None,
+        "raw_node_count_before": receipt.get("parsed_node_count_before") if receipt else None,
+        "raw_node_count_after": receipt.get("parsed_node_count_after") if receipt else None,
+        "adapter_started_at": receipt.get("started_at") if receipt else None,
+        "adapter_completed_at": receipt.get("completed_at") if receipt else None,
+        "source_hash_before": before["source_hash"],
+        "source_hash_after": after["source_hash"],
+        "node_count_before": before["node_count"],
+        "node_count_after": after["node_count"],
+        "source_diff_summary": diff_summary,
+        "clash_verge_state_before": before_state,
+        "clash_verge_state_after": after_state,
+        "clash_verge_state_preserved": True,
+        "source_snapshot_created": True,
+        "source_snapshot_id": manifest["source_snapshot_id"],
+        "source_snapshot_hash": manifest["source_snapshot_hash"],
+        "source_snapshot_manifest": str(manifest_path),
+        "live_source_reread_after_snapshot": False,
+        "router_contacted_before_snapshot": False,
+        "sensitive_data_scan": "STRUCTURAL_REDACTION_ENFORCED",
+        "version": "2.2.0",
+        "production_touched": False,
+        "activation_recommendation": "BLOCKED_PENDING_DEFINITIVE_FUNCTIONAL_EVIDENCE",
+    }
+    refresh_report_path = workdir / f"source-refresh-report-{manifest['source_snapshot_id']}.json"
+    atomic_write_json(refresh_report, refresh_report_path)
+    if refreshed_snapshot is not None:
+        refreshed_snapshot.unlink(missing_ok=True)
+    runtime["report_path"] = str(refresh_report_path)
+    return manifest, payload, runtime
+
+
 def legacy_service_members(config: dict[str, Any]) -> dict[str, list[str]]:
     groups = {
         str(group.get("name")): group
@@ -533,8 +1066,9 @@ def legacy_service_members(config: dict[str, Any]) -> dict[str, list[str]]:
         if isinstance(group, dict)
     }
     result: dict[str, list[str]] = {}
+    old_names = {"gpt": "GPT自动", "gemini": "Gemini自动", "disney": "迪士尼自动"}
     for service, (automatic_name, _) in SERVICE_GROUP_NAMES.items():
-        group = groups.get(automatic_name)
+        group = groups.get(automatic_name) or groups.get(old_names[service])
         proxies = group.get("proxies") if isinstance(group, dict) else None
         if not isinstance(proxies, list) or not proxies:
             raise ConfigError(f"BLOCKED_NO_LKG_{service.upper()}_NODES")
@@ -586,11 +1120,154 @@ def exact_or_flag_normalized_match(name: str, expected: str) -> bool:
     return name == expected or normalize_node_name(name) == normalize_node_name(expected)
 
 
-def manual_override_for(service: str, node_name: str) -> str | None:
-    for expected, result in MANUAL_OVERRIDES[service].items():
-        if exact_or_flag_normalized_match(node_name, expected):
-            return result
-    return None
+def load_manual_results(path: Path | None) -> list[dict[str, str]]:
+    if path is None:
+        return []
+    payload = load_json_object(path.expanduser().resolve())
+    if payload.get("schema_version") != MANUAL_RESULT_SCHEMA_VERSION:
+        raise ConfigError(f"Unsupported manual-result schema: {path}")
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        raise ConfigError("Manual-result file must contain a results list.")
+    accepted: list[dict[str, str]] = []
+    forbidden = {"cookie", "cookies", "prompt", "response", "answer", "body", "token"}
+    for index, item in enumerate(raw_results):
+        if not isinstance(item, dict):
+            raise ConfigError(f"Manual result {index} must be an object.")
+        if forbidden.intersection(str(key).lower() for key in item):
+            raise ConfigError(f"Manual result {index} contains sensitive content.")
+        service = str(item.get("service", ""))
+        node = str(item.get("node", ""))
+        result = str(item.get("result", ""))
+        tested_at = str(item.get("tested_at", ""))
+        method = str(item.get("method", ""))
+        exact_node_id = str(item.get("exact_node_id", ""))
+        source_snapshot_id = str(item.get("source_snapshot_id", ""))
+        if service not in SERVICE_KEYS:
+            raise ConfigError(f"Manual result {index} has an invalid service.")
+        if not node or result not in {"PASS", "FAIL"} or not tested_at:
+            raise ConfigError(f"Manual result {index} is incomplete.")
+        parse_aware_timestamp(tested_at, field=f"manual result {index}")
+        if method not in DEFINITIVE_MANUAL_METHODS:
+            raise ConfigError(f"Manual result {index} is not a definitive use test.")
+        accepted.append(
+            {
+                "service": service,
+                "node": node,
+                "result": result,
+                "tested_at": tested_at,
+                "method": method,
+                "exact_node_id": exact_node_id,
+                "source_snapshot_id": source_snapshot_id,
+            }
+        )
+    return accepted
+
+
+def apply_manual_results_to_report(
+    report: dict[str, Any],
+    manual_results: Sequence[dict[str, str]],
+    snapshot_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply only definitive, time-qualified human use results to a probe report."""
+    updated = deepcopy(report)
+    probe_at = str(updated.get("run_timestamp", ""))
+    probe_timestamp = parse_aware_timestamp(probe_at, field="probe run")
+    nodes = updated.get("nodes", [])
+    matched: set[int] = set()
+    snapshot_id = str((snapshot_manifest or {}).get("source_snapshot_id", ""))
+    identity_by_name = {
+        str(item.get("exact_node_name")): str(item.get("exact_node_id"))
+        for item in (snapshot_manifest or {}).get("nodes", [])
+        if isinstance(item, dict)
+    }
+
+    # Reports produced before structured calibration may contain hard-coded overrides.
+    # Restore their raw result before applying the auditable result file.
+    for node in nodes:
+        for service in SERVICE_KEYS:
+            service_result = node.get("services", {}).get(service, {})
+            raw_result = str(service_result.get("raw_result", "UNKNOWN"))
+            if service == "gemini" and raw_result == "PASS":
+                raw_result = "GEMINI_SCREEN_PASS"
+            elif service == "disney" and raw_result == "PASS":
+                raw_result = "UNKNOWN_INCOMPLETE_PROBE"
+            service_result["raw_result"] = raw_result
+            service_result["override"] = None
+            service_result["final_result"] = raw_result
+            service_result.pop("manual_result", None)
+
+    for node in nodes:
+        node_name = str(node.get("name", ""))
+        node_id = identity_by_name.get(node_name, "")
+        if snapshot_manifest:
+            node["source_snapshot_id"] = snapshot_id
+            node["source_hash"] = snapshot_manifest.get("source_hash")
+            node["exact_node_id"] = node_id
+            node["exact_node_name"] = node_name
+        for service in SERVICE_KEYS:
+            candidates = [
+                (index, item)
+                for index, item in enumerate(manual_results)
+                if item["service"] == service
+                and (
+                    (
+                        snapshot_manifest is not None
+                        and bool(node_id)
+                        and item.get("exact_node_id") == node_id
+                        and item.get("source_snapshot_id") == snapshot_id
+                        and item["node"] == node_name
+                    )
+                    or (
+                        snapshot_manifest is None
+                        and exact_or_flag_normalized_match(node_name, item["node"])
+                    )
+                )
+                and parse_aware_timestamp(item["tested_at"], field="manual result")
+                >= probe_timestamp
+            ]
+            if not candidates:
+                continue
+            index, latest = max(
+                candidates,
+                key=lambda pair: parse_aware_timestamp(
+                    pair[1]["tested_at"], field="manual result"
+                ),
+            )
+            matched.add(index)
+            override = (
+                "MANUAL_OVERRIDE_PASS"
+                if latest["result"] == "PASS"
+                else "MANUAL_OVERRIDE_FAIL"
+            )
+            service_result = node["services"][service]
+            service_result["override"] = override
+            service_result["final_result"] = override
+            service_result["manual_result"] = {
+                "result": latest["result"],
+                "tested_at": latest["tested_at"],
+                "method": latest["method"],
+                "source_snapshot_id": latest.get("source_snapshot_id"),
+                "exact_node_id": latest.get("exact_node_id"),
+            }
+
+    updated["manual_results"] = {
+        "applied": len(matched),
+        "unmatched_or_stale": [
+            {
+                "service": item["service"],
+                "node": item["node"],
+                "result": item["result"],
+                "tested_at": item["tested_at"],
+                "method": item["method"],
+                "source_snapshot_id": item.get("source_snapshot_id"),
+                "exact_node_id": item.get("exact_node_id"),
+            }
+            for index, item in enumerate(manual_results)
+            if index not in matched
+        ],
+    }
+    return updated
 
 
 def evidence_transport_result(evidence: dict[str, Any]) -> str | None:
@@ -630,7 +1307,7 @@ def classify_service_evidence(
         )
     )
     if any(marker in combined for marker in REGION_FAILURE_MARKERS):
-        return "FAIL_REGION"
+        return "GEMINI_SCREEN_FAIL" if service == "gemini" else "FAIL_REGION"
     if any(marker in combined for marker in CHALLENGE_MARKERS):
         return "CHALLENGE_UNKNOWN"
     statuses = {main.get("http_status"), support.get("http_status")}
@@ -644,19 +1321,14 @@ def classify_service_evidence(
         main_http_signal = True
     support_http_signal = isinstance(support_status, int) and 200 <= support_status < 500
     if main_http_signal and support_http_signal:
+        if service == "gemini":
+            return "GEMINI_SCREEN_PASS"
+        if service == "disney":
+            return "UNKNOWN_INCOMPLETE_PROBE"
         return "PASS"
     if 403 in statuses:
         return "UNKNOWN"
     return "UNKNOWN"
-
-
-def apply_manual_override(service: str, node_name: str, raw_result: str) -> dict[str, Any]:
-    override = manual_override_for(service, node_name)
-    return {
-        "raw_result": raw_result,
-        "override": override,
-        "final_result": override or raw_result,
-    }
 
 
 def declared_region(name: str) -> str:
@@ -682,6 +1354,7 @@ def declared_region(name: str) -> str:
         ("英国", "GB"),
         ("德国", "DE"),
         ("韩国", "KR"),
+        ("马来西亚", "MY"),
     ):
         if marker in normalized:
             return code
@@ -738,7 +1411,10 @@ def merge_lkg_results(
             service_result = item["services"][service]
             final_result = str(service_result["final_result"])
             prior = state.get("nodes", {}).get(name, {}).get(service, {})
-            prior_lkg = bool(prior.get("lkg"))
+            exact_node_id = str(item.get("exact_node_id", ""))
+            prior_node_id = str(prior.get("exact_node_id", ""))
+            identity_matches = not exact_node_id or not prior_node_id or exact_node_id == prior_node_id
+            prior_lkg = bool(prior.get("lkg")) and identity_matches
 
             if probable_recapture:
                 lkg = prior_lkg
@@ -760,13 +1436,16 @@ def merge_lkg_results(
                 node_state = state_nodes.setdefault(name, {})
                 confirmed_at = prior.get("last_confirmed_pass_at")
                 if final_result in PASS_RESULTS:
-                    confirmed_at = observed_at
+                    confirmed_at = service_result.get("manual_result", {}).get(
+                        "tested_at", observed_at
+                    )
                 node_state[service] = {
                     "last_raw_result": service_result["raw_result"],
                     "last_final_result": final_result,
                     "last_confirmed_pass_at": confirmed_at,
                     "source": "manual_override" if service_result.get("override") else "probe",
                     "lkg": lkg,
+                    "exact_node_id": exact_node_id or prior_node_id or None,
                 }
 
             item["lkg_merge"][service] = action
@@ -783,6 +1462,12 @@ def merge_lkg_results(
             name
             for name in current_names
             if bool(effective_state.get("nodes", {}).get(name, {}).get(service, {}).get("lkg"))
+            and (
+                not probe_by_name.get(name, {}).get("exact_node_id")
+                or not effective_state.get("nodes", {}).get(name, {}).get(service, {}).get("exact_node_id")
+                or probe_by_name[name]["exact_node_id"]
+                == effective_state["nodes"][name][service]["exact_node_id"]
+            )
         ]
         pending = [
             str(item["name"])
@@ -1061,9 +1746,10 @@ def probe_nodes_with_runner(
                 main = probe_url_with_retries(main_url, request_url)
                 support = probe_url_with_retries(support_url, request_url)
                 raw_result = classify_service_evidence(service, main, support)
-            calibrated = apply_manual_override(service, name, raw_result)
             item["services"][service] = {
-                **calibrated,
+                "raw_result": raw_result,
+                "override": None,
+                "final_result": raw_result,
                 "evidence": {
                     "main": safe_evidence_summary(main) if main else {},
                     "support": safe_evidence_summary(support) if support else {},
@@ -1618,6 +2304,86 @@ def validate_probe_report_safe(report: dict[str, Any]) -> None:
     walk(report)
 
 
+def annotate_probe_semantics(
+    report: dict[str, Any], nodes: Sequence[dict[str, Any]]
+) -> None:
+    report["service_semantics"] = {
+        "gpt": "screening_plus_timestamped_definitive_manual_use",
+        "gemini": "screening_only_without_logged_in_generation",
+        "disney": "incomplete_without_devices_token_graphql_redirect_chain",
+    }
+    groups = report.get("service_groups", {})
+    summaries: dict[str, dict[str, int]] = {}
+    for service in SERVICE_KEYS:
+        candidate_names = set(groups.get(service, {}).get("automatic", []))
+        counts = {evidence: 0 for evidence in EVIDENCE_TYPES}
+        candidate_count = 0
+        for node in nodes:
+            node_name = str(node.get("name", ""))
+            result = node.get("services", {}).get(service, {})
+            final_result = str(result.get("final_result", "UNKNOWN"))
+            if final_result == "MANUAL_OVERRIDE_PASS":
+                evidence_type = "MANUAL_FUNCTIONAL_PASS"
+            elif final_result == "MANUAL_OVERRIDE_FAIL":
+                evidence_type = "MANUAL_FUNCTIONAL_FAIL"
+            elif final_result in {"DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION"}:
+                evidence_type = "DEFINITIVE_AUTOMATED_PASS"
+            elif final_result in {"PASS", "GEMINI_SCREEN_PASS"}:
+                evidence_type = "SCREEN_PASS"
+            elif node_name in candidate_names:
+                evidence_type = "LKG_FALLBACK"
+            else:
+                evidence_type = "UNKNOWN"
+            result["evidence_type"] = evidence_type
+            result["probe_method_version"] = PROBE_VERSION
+            result["tested_at"] = (
+                result.get("manual_result", {}).get("tested_at")
+                or node.get("observed_at")
+                or report.get("run_timestamp")
+            )
+            counts[evidence_type] += 1
+            if node_name in candidate_names:
+                candidate_count += 1
+        summaries[service] = {
+            "candidates": candidate_count,
+            "definitive_automated": sum(
+                1
+                for node in nodes
+                if node.get("name") in candidate_names
+                and node.get("services", {}).get(service, {}).get("evidence_type")
+                == "DEFINITIVE_AUTOMATED_PASS"
+            ),
+            "manual_functional_pass": sum(
+                1
+                for node in nodes
+                if node.get("name") in candidate_names
+                and node.get("services", {}).get(service, {}).get("evidence_type")
+                == "MANUAL_FUNCTIONAL_PASS"
+            ),
+            "lkg_only": sum(
+                1
+                for node in nodes
+                if node.get("name") in candidate_names
+                and node.get("services", {}).get(service, {}).get("evidence_type")
+                == "LKG_FALLBACK"
+            ),
+        }
+    report["candidate_evidence_summary"] = summaries
+    report["definitive_automated_pass_counts"] = {
+        service: summaries[service]["definitive_automated"] for service in SERVICE_KEYS
+    }
+    # Compatibility field now has one unambiguous meaning: automated functional proof only.
+    report["definitive_pass_counts"] = dict(report["definitive_automated_pass_counts"])
+    blockers: list[str] = []
+    if report["definitive_automated_pass_counts"]["gpt"] == 0:
+        blockers.append("GPT_DEFINITIVE_WEB_GENERATION_RESULT_MISSING")
+    if report["definitive_automated_pass_counts"]["gemini"] == 0:
+        blockers.append("GEMINI_DEFINITIVE_WEB_GENERATION_RESULT_MISSING")
+    if report["definitive_automated_pass_counts"]["disney"] == 0:
+        blockers.append("DISNEY_FULL_REGION_CHAIN_RESULT_MISSING")
+    report["activation_blocked_reasons"] = blockers
+
+
 def dynamic_probe_and_select(
     data: dict[str, Any],
     *,
@@ -1625,13 +2391,19 @@ def dynamic_probe_and_select(
     report_path: Path,
     core_path: str | None,
     update_lkg: bool,
+    manual_results_path: Path | None = None,
+    snapshot_manifest: dict[str, Any] | None = None,
     probe_runner: Any = run_local_service_probe,
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
     legacy_config = transform(data)
     state, seed_source = load_or_seed_lkg_state(
         state_path, legacy_config, persist_seed=update_lkg
     )
-    report = probe_runner(data, core_path=core_path)
+    report = apply_manual_results_to_report(
+        probe_runner(data, core_path=core_path),
+        load_manual_results(manual_results_path),
+        snapshot_manifest,
+    )
     proxies = static_proxy_objects(data)
     current_names = [str(proxy["name"]) for proxy in proxies]
     source_order = {name: index for index, name in enumerate(current_names)}
@@ -1648,6 +2420,10 @@ def dynamic_probe_and_select(
     report["lkg_seed_source"] = seed_source
     report["lkg_state_updated"] = update_lkg and not probable_recapture
     report["service_groups"] = selections
+    if snapshot_manifest:
+        report["source_snapshot_id"] = snapshot_manifest["source_snapshot_id"]
+        report["source_hash"] = snapshot_manifest["source_hash"]
+    annotate_probe_semantics(report, enriched)
     validate_probe_report_safe(report)
     atomic_write_json(report, report_path)
     written_report = load_json_object(report_path)
@@ -1655,6 +2431,81 @@ def dynamic_probe_and_select(
         atomic_write_json(new_state, state_path, private_parent=True)
         load_json_object(state_path)
     return selections, written_report
+
+
+def reconcile_existing_probe(
+    data: dict[str, Any],
+    *,
+    state_path: Path,
+    probe_report_path: Path,
+    manual_results_path: Path,
+    report_output_path: Path,
+    state_output_path: Path,
+    snapshot_manifest: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
+    """Reconcile an existing report without starting Mihomo, curl, SSH, or deployment."""
+    legacy_config = transform(data)
+    state, seed_source = load_or_seed_lkg_state(
+        state_path, legacy_config, persist_seed=False
+    )
+    proxies = static_proxy_objects(data)
+    current_names = [str(proxy["name"]) for proxy in proxies]
+    report = load_json_object(probe_report_path)
+    reported_names = {
+        str(node.get("name", "")) for node in report.get("nodes", [])
+    }
+    for name in current_names:
+        if name in reported_names:
+            continue
+        report.setdefault("nodes", []).append(
+            {
+                "name": name,
+                "selector_confirmed": None,
+                "observed_at": report.get("run_timestamp"),
+                "base_result": "NOT_PROBED_CURRENT_SOURCE",
+                "services": {
+                    service: {
+                        "raw_result": "UNKNOWN",
+                        "override": None,
+                        "final_result": "UNKNOWN",
+                        "evidence": {},
+                    }
+                    for service in SERVICE_KEYS
+                },
+                "reason_code": "NOT_PROBED_CURRENT_SOURCE",
+            }
+        )
+    report = apply_manual_results_to_report(
+        report, load_manual_results(manual_results_path), snapshot_manifest
+    )
+    source_order = {name: index for index, name in enumerate(current_names)}
+    reconciled_at = iso_now()
+    selections, new_state, enriched = merge_lkg_results(
+        current_names,
+        source_order,
+        state,
+        report.get("nodes", []),
+        probable_recapture=bool(report.get("probable_tun_or_upstream_recapture")),
+        observed_at=reconciled_at,
+    )
+    report["nodes"] = enriched
+    report["probe_version"] = PROBE_VERSION
+    report["reconciled_at"] = reconciled_at
+    report["lkg_seed_source"] = seed_source
+    report["lkg_state_updated"] = True
+    report["current_source_node_count"] = len(current_names)
+    report["nodes_added_without_probe"] = [
+        name for name in current_names if name not in reported_names
+    ]
+    report["service_groups"] = selections
+    if snapshot_manifest:
+        report["source_snapshot_id"] = snapshot_manifest["source_snapshot_id"]
+        report["source_hash"] = snapshot_manifest["source_hash"]
+    annotate_probe_semantics(report, enriched)
+    validate_probe_report_safe(report)
+    atomic_write_json(report, report_output_path)
+    atomic_write_json(new_state, state_output_path, private_parent=True)
+    return selections, load_json_object(report_output_path)
 
 
 def fallback_group(name: str, proxies: list[str]) -> dict[str, Any]:
@@ -1680,15 +2531,15 @@ def build_groups(
         {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
         {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
         fallback_group("自动选择", all_nodes),
-        {"name": "GPT专用", "type": "select", "proxies": ["GPT手动", "GPT自动"]},
-        {"name": "GPT手动", "type": "select", "proxies": ["GPT自动", *gpt_nodes]},
-        fallback_group("GPT自动", gpt_nodes),
-        {"name": "Gemini专用", "type": "select", "proxies": ["Gemini手动", "Gemini自动"]},
-        {"name": "Gemini手动", "type": "select", "proxies": ["Gemini自动", *gemini_nodes]},
-        fallback_group("Gemini自动", gemini_nodes),
-        {"name": "迪士尼", "type": "select", "proxies": ["迪士尼手动", "迪士尼自动"]},
-        {"name": "迪士尼手动", "type": "select", "proxies": ["迪士尼自动", *disney_nodes]},
-        fallback_group("迪士尼自动", disney_nodes),
+        {"name": "GPT专用", "type": "select", "proxies": ["GPT手动", "GPT候选"]},
+        {"name": "GPT手动", "type": "select", "proxies": ["GPT候选", *gpt_nodes]},
+        fallback_group("GPT候选", gpt_nodes),
+        {"name": "Gemini专用", "type": "select", "proxies": ["Gemini手动", "Gemini候选"]},
+        {"name": "Gemini手动", "type": "select", "proxies": ["Gemini候选", *gemini_nodes]},
+        fallback_group("Gemini候选", gemini_nodes),
+        {"name": "迪士尼", "type": "select", "proxies": ["迪士尼手动", "迪士尼候选"]},
+        {"name": "迪士尼手动", "type": "select", "proxies": ["迪士尼候选", *disney_nodes]},
+        fallback_group("迪士尼候选", disney_nodes),
     ]
 
 
@@ -2558,9 +3409,9 @@ def print_summary(data: dict[str, Any], output: Path, audit_output: Path | None)
     print(f"static_nodes={len(data['proxies'])}")
     print(f"managed_groups={len(data['proxy-groups'])}")
     print("priority_wrappers=0")
-    print(f"gpt_nodes={len(groups['GPT自动']['proxies'])}")
-    print(f"gemini_nodes={len(groups['Gemini自动']['proxies'])}")
-    print(f"disney_nodes={len(groups['迪士尼自动']['proxies'])}")
+    print(f"gpt_candidates={len(groups['GPT候选']['proxies'])}")
+    print(f"gemini_candidates={len(groups['Gemini候选']['proxies'])}")
+    print(f"disney_candidates={len(groups['迪士尼候选']['proxies'])}")
     print("final_match=MATCH,默认代理")
     print("secrets_printed=false")
 
@@ -2588,6 +3439,10 @@ def print_probe_summary(report_path: Path) -> None:
         )
         final_count = len(report.get("service_groups", {}).get(service, {}).get("automatic", []))
         print(f"{service}_raw_pass={raw_pass}")
+        print(
+            f"{service}_definitive_pass="
+            f"{report.get('definitive_pass_counts', {}).get(service, 0)}"
+        )
         print(f"{service}_final_group_count={final_count}")
 
 
@@ -2595,6 +3450,73 @@ def add_probe_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--probe-core")
     parser.add_argument("--state-path", type=Path, default=DEFAULT_LKG_STATE_PATH)
     parser.add_argument("--probe-report", type=Path, default=DEFAULT_PROBE_REPORT_PATH)
+    parser.add_argument(
+        "--manual-results",
+        type=Path,
+        help="Structured, timestamped definitive manual use results (no cookies or content).",
+    )
+
+
+def add_source_args(parser: argparse.ArgumentParser, *, include_source: bool = True) -> None:
+    if include_source:
+        parser.add_argument("--source", type=Path)
+    parser.add_argument(
+        "--source-snapshot",
+        type=Path,
+        help="Replay one verified immutable source snapshot; never reread the live source.",
+    )
+    refresh = parser.add_mutually_exclusive_group()
+    refresh.add_argument(
+        "--refresh-source",
+        dest="no_refresh_source",
+        action="store_false",
+        help="Refresh the bound subscription before freezing the source (default).",
+    )
+    refresh.add_argument(
+        "--no-refresh-source",
+        dest="no_refresh_source",
+        action="store_true",
+        help="Explicitly freeze the current live source without claiming it is fresh.",
+    )
+    parser.set_defaults(no_refresh_source=False)
+    parser.add_argument(
+        "--refresh-adapter",
+        type=Path,
+        help=(
+            "Executable custom bridge that calls the authenticated loopback source-only "
+            "endpoint and reuses Clash Verge profile update semantics."
+        ),
+    )
+    parser.add_argument("--refresh-timeout", type=int, default=120)
+    parser.add_argument(
+        "--min-node-retention-ratio",
+        type=float,
+        default=DEFAULT_MIN_NODE_RETENTION_RATIO,
+    )
+    parser.add_argument(
+        "--source-identity-key",
+        type=Path,
+        default=DEFAULT_SOURCE_IDENTITY_KEY,
+    )
+    parser.add_argument(
+        "--source-freshness-ttl",
+        type=int,
+        default=DEFAULT_SOURCE_FRESHNESS_TTL_SECONDS,
+    )
+    parser.add_argument(
+        "--allow-stale-source-activate",
+        action="store_true",
+        help="Explicit human approval to activate a snapshot older than the configured TTL.",
+    )
+
+
+def validate_snapshot_for_activation(
+    manifest: dict[str, Any], *, freshness_ttl: int, allow_stale: bool
+) -> None:
+    created = parse_aware_timestamp(str(manifest.get("created_at", "")), field="snapshot")
+    age = (dt.datetime.now().astimezone() - created).total_seconds()
+    if age > freshness_ttl and not allow_stale:
+        raise ConfigError("BLOCKED_ACTIVATION_STALE_SOURCE_SNAPSHOT")
 
 
 def add_deploy_args(parser: argparse.ArgumentParser) -> None:
@@ -2623,19 +3545,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    export_p = sub.add_parser("export", help="Copy the current effective Clash Verge YAML.")
+    export_p = sub.add_parser("export", help="Deprecated; use snapshot-source.")
     export_p.add_argument("--source", type=Path)
     export_p.add_argument(
         "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
     )
 
     transform_p = sub.add_parser("transform", help="Transform an effective YAML locally.")
-    transform_p.add_argument("--input", type=Path, required=True)
+    transform_p.add_argument("--source-snapshot", type=Path, required=True)
     transform_p.add_argument("--output", type=Path, required=True)
     transform_p.add_argument("--audit-output", type=Path)
 
     all_p = sub.add_parser("all", help="Export and transform; optionally deploy.")
-    all_p.add_argument("--source", type=Path)
+    add_source_args(all_p)
     all_p.add_argument(
         "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
     )
@@ -2645,8 +3567,28 @@ def build_parser() -> argparse.ArgumentParser:
     add_probe_args(all_p)
     add_deploy_args(all_p)
 
+    refresh_p = sub.add_parser(
+        "refresh-source",
+        help="Refresh the bound Clash Verge subscription and freeze an immutable snapshot.",
+    )
+    refresh_p.add_argument(
+        "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
+    )
+    add_source_args(refresh_p)
+
+    snapshot_p = sub.add_parser(
+        "snapshot-source",
+        help="Freeze the current source without refresh and mark the skip explicitly.",
+    )
+    snapshot_p.add_argument(
+        "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
+    )
+    add_source_args(snapshot_p)
+    snapshot_p.set_defaults(no_refresh_source=True)
+
     deploy_p = sub.add_parser("deploy", help="Validate and install an existing full YAML.")
     deploy_p.add_argument("--file", type=Path, required=True)
+    deploy_p.add_argument("--source-snapshot", type=Path, required=True)
     add_deploy_args(deploy_p)
 
     upload_p = sub.add_parser(
@@ -2654,6 +3596,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upload and validate an immutable candidate without reading production state.",
     )
     upload_p.add_argument("--file", type=Path, required=True)
+    upload_p.add_argument("--source-snapshot", type=Path, required=True)
     upload_p.add_argument("--host", default="root@192.168.10.1")
     upload_p.add_argument("--remote-name")
     upload_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
@@ -2663,6 +3606,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Test a candidate in an isolated router sidecar without TUN/firewall changes.",
     )
     candidate_probe_p.add_argument("--file", type=Path, required=True)
+    candidate_probe_p.add_argument("--source-snapshot", type=Path, required=True)
     candidate_probe_p.add_argument("--candidate-path")
     candidate_probe_p.add_argument("--host", default="root@192.168.10.1")
     candidate_probe_p.add_argument(
@@ -2674,15 +3618,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     activate_p.add_argument("--candidate-path", required=True)
     activate_p.add_argument("--production-name", required=True)
+    activate_p.add_argument("--source-snapshot", type=Path, required=True)
+    activate_p.add_argument(
+        "--source-freshness-ttl", type=int, default=DEFAULT_SOURCE_FRESHNESS_TTL_SECONDS
+    )
+    activate_p.add_argument("--allow-stale-source-activate", action="store_true")
     activate_p.add_argument("--host", default="root@192.168.10.1")
     activate_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
 
     probe_p = sub.add_parser(
         "probe", help="Test static nodes locally without generating or deploying OpenClash."
     )
-    probe_p.add_argument("--source", type=Path)
+    probe_p.add_argument(
+        "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
+    )
+    add_source_args(probe_p)
     probe_p.add_argument("--update-lkg", action="store_true")
     add_probe_args(probe_p)
+
+    reconcile_p = sub.add_parser(
+        "reconcile-probe",
+        help="Apply timestamped manual results to an existing report without network access.",
+    )
+    reconcile_p.add_argument(
+        "--source-snapshot", type=Path, required=True, help="Verified frozen source manifest."
+    )
+    reconcile_p.add_argument("--probe-report", type=Path, required=True)
+    reconcile_p.add_argument("--state-path", type=Path, required=True)
+    reconcile_p.add_argument("--manual-results", type=Path, required=True)
+    reconcile_p.add_argument("--report-output", type=Path, required=True)
+    reconcile_p.add_argument("--state-output", type=Path, required=True)
+    reconcile_p.add_argument("--output", type=Path, required=True)
+    reconcile_p.add_argument("--audit-output", type=Path)
 
     return parser
 
@@ -2693,20 +3660,30 @@ def main() -> int:
 
     try:
         if args.command == "export":
-            exported = export_source(args.source, args.workdir.expanduser().resolve())
-            print(f"exported={exported}")
-            return 0
+            raise ConfigError("SOURCE_EXPORT_REPLACED_BY_SNAPSHOT_SOURCE")
 
         if args.command == "transform":
+            _manifest, frozen_source = verify_source_snapshot(args.source_snapshot)
             output = args.output.expanduser().resolve()
             audit_output = args.audit_output.expanduser().resolve() if args.audit_output else None
-            data = transform_file(args.input.expanduser().resolve(), output, audit_output)
+            data = transform_file(frozen_source, output, audit_output)
             print_summary(data, output, audit_output)
             return 0
 
         if args.command == "all":
             workdir = args.workdir.expanduser().resolve()
-            exported = export_source(args.source, workdir)
+            if not 0 < args.min_node_retention_ratio <= 1:
+                raise ConfigError("--min-node-retention-ratio must be in (0, 1].")
+            snapshot_manifest, exported, source_runtime = prepare_source_snapshot(
+                source=args.source,
+                workdir=workdir,
+                refresh_adapter=args.refresh_adapter,
+                no_refresh=args.no_refresh_source,
+                source_snapshot=args.source_snapshot,
+                identity_key_path=args.source_identity_key,
+                refresh_timeout=args.refresh_timeout,
+                min_node_retention_ratio=args.min_node_retention_ratio,
+            )
             output = workdir / args.output_name
             audit_output = workdir / args.audit_name
             source_data = load_yaml(exported)
@@ -2715,17 +3692,35 @@ def main() -> int:
                 probe_runner = lambda data, *, core_path: run_remote_service_probe(
                     data, host=args.host, core_path=args.core_path
                 )
-            selections, _ = dynamic_probe_and_select(
+            selections, probe_report = dynamic_probe_and_select(
                 source_data,
                 state_path=args.state_path,
                 report_path=args.probe_report,
                 core_path=args.probe_core,
                 update_lkg=True,
+                manual_results_path=args.manual_results,
+                snapshot_manifest=snapshot_manifest,
                 probe_runner=probe_runner,
             )
+            if args.activate and probe_report.get("activation_blocked_reasons"):
+                raise ConfigError(
+                    "BLOCKED_ACTIVATION_NON_DEFINITIVE_SERVICE_RESULTS: "
+                    + ",".join(probe_report["activation_blocked_reasons"])
+                )
+            if args.activate:
+                validate_snapshot_for_activation(
+                    snapshot_manifest,
+                    freshness_ttl=args.source_freshness_ttl,
+                    allow_stale=args.allow_stale_source_activate,
+                )
             transform_file(exported, output, audit_output, selections)
             data = load_yaml(output)
-            print(f"source_copy={exported}")
+            print(f"source_snapshot={source_runtime.get('manifest_path', args.source_snapshot)}")
+            print(f"source_snapshot_id={snapshot_manifest['source_snapshot_id']}")
+            print(f"source_hash={snapshot_manifest['source_hash']}")
+            print(f"source_age_seconds={snapshot_manifest.get('source_age_seconds_at_snapshot', 0)}")
+            if source_runtime.get("report_path"):
+                print(f"source_refresh_report={source_runtime['report_path']}")
             print_summary(data, output, audit_output)
             print_probe_summary(args.probe_report)
             if args.deploy:
@@ -2740,8 +3735,47 @@ def main() -> int:
                 print(f"activated={str(args.activate).lower()}")
             return 0
 
+        if args.command in {"refresh-source", "snapshot-source"}:
+            if args.command == "refresh-source" and args.no_refresh_source:
+                raise ConfigError("refresh-source cannot be combined with --no-refresh-source")
+            if args.command == "refresh-source" and args.source_snapshot:
+                raise ConfigError("refresh-source cannot replay an existing snapshot")
+            if args.command == "snapshot-source" and not args.no_refresh_source:
+                raise ConfigError("snapshot-source cannot be combined with --refresh-source")
+            if not 0 < args.min_node_retention_ratio <= 1:
+                raise ConfigError("--min-node-retention-ratio must be in (0, 1].")
+            manifest, _payload, runtime = prepare_source_snapshot(
+                source=args.source,
+                workdir=args.workdir.expanduser().resolve(),
+                refresh_adapter=args.refresh_adapter,
+                no_refresh=args.no_refresh_source,
+                source_snapshot=args.source_snapshot,
+                identity_key_path=args.source_identity_key,
+                refresh_timeout=args.refresh_timeout,
+                min_node_retention_ratio=args.min_node_retention_ratio,
+            )
+            print(f"source_snapshot={runtime.get('manifest_path', args.source_snapshot)}")
+            print(f"source_snapshot_id={manifest['source_snapshot_id']}")
+            print(f"source_hash={manifest['source_hash']}")
+            print(f"source_age_seconds={manifest.get('source_age_seconds_at_snapshot', 0)}")
+            if runtime.get("report_path"):
+                print(f"source_refresh_report={runtime['report_path']}")
+            print(f"refresh_result={runtime.get('refresh_result', 'SNAPSHOT_REPLAY')}")
+            print("router_contacted=false")
+            print("openclash_touched=false")
+            return 0
+
         if args.command == "probe":
-            source = (args.source or find_default_source()).expanduser().resolve()
+            snapshot_manifest, source, _runtime = prepare_source_snapshot(
+                source=args.source,
+                workdir=args.workdir.expanduser().resolve(),
+                refresh_adapter=args.refresh_adapter,
+                no_refresh=args.no_refresh_source,
+                source_snapshot=args.source_snapshot,
+                identity_key_path=args.source_identity_key,
+                refresh_timeout=args.refresh_timeout,
+                min_node_retention_ratio=args.min_node_retention_ratio,
+            )
             source_data = load_yaml(source)
             dynamic_probe_and_select(
                 source_data,
@@ -2749,13 +3783,40 @@ def main() -> int:
                 report_path=args.probe_report,
                 core_path=args.probe_core,
                 update_lkg=args.update_lkg,
+                manual_results_path=args.manual_results,
+                snapshot_manifest=snapshot_manifest,
             )
             print_probe_summary(args.probe_report)
             print(f"lkg_updated={str(args.update_lkg).lower()}")
             print("router_contacted=false")
             return 0
 
+        if args.command == "reconcile-probe":
+            snapshot_manifest, source = verify_source_snapshot(args.source_snapshot)
+            source_data = load_yaml(source)
+            selections, _ = reconcile_existing_probe(
+                source_data,
+                state_path=args.state_path.expanduser().resolve(),
+                probe_report_path=args.probe_report.expanduser().resolve(),
+                manual_results_path=args.manual_results.expanduser().resolve(),
+                report_output_path=args.report_output.expanduser().resolve(),
+                state_output_path=args.state_output.expanduser().resolve(),
+                snapshot_manifest=snapshot_manifest,
+            )
+            output = args.output.expanduser().resolve()
+            audit_output = (
+                args.audit_output.expanduser().resolve() if args.audit_output else None
+            )
+            transform_file(source, output, audit_output, selections)
+            print_summary(load_yaml(output), output, audit_output)
+            print_probe_summary(args.report_output)
+            print("network_probe_run=false")
+            print("router_contacted=false")
+            print("activated=false")
+            return 0
+
         if args.command == "deploy":
+            manifest, _ = verify_source_snapshot(args.source_snapshot)
             remote = deploy(
                 args.file,
                 host=args.host,
@@ -2764,10 +3825,12 @@ def main() -> int:
                 activate=args.activate,
             )
             print(f"remote_config={remote}")
+            print(f"source_snapshot_id={manifest['source_snapshot_id']}")
             print(f"activated={str(args.activate).lower()}")
             return 0
 
         if args.command == "upload-candidate":
+            manifest, _ = verify_source_snapshot(args.source_snapshot)
             candidate = upload_candidate(
                 args.file,
                 host=args.host,
@@ -2776,10 +3839,12 @@ def main() -> int:
             )
             print(f"candidate_config={candidate.candidate_path}")
             print(f"production_config={candidate.production_path}")
+            print(f"source_snapshot_id={manifest['source_snapshot_id']}")
             print("production_state_read=false")
             return 0
 
         if args.command == "probe-candidate":
+            manifest, _ = verify_source_snapshot(args.source_snapshot)
             if args.candidate_path and not args.candidate_path.startswith(
                 REMOTE_CANDIDATE_DIR + "/"
             ):
@@ -2791,10 +3856,17 @@ def main() -> int:
                 candidate_path=args.candidate_path,
             )
             print("candidate_probe=pass")
+            print(f"source_snapshot_id={manifest['source_snapshot_id']}")
             print("production_state_changed=false")
             return 0
 
         if args.command == "activate":
+            manifest, _ = verify_source_snapshot(args.source_snapshot)
+            validate_snapshot_for_activation(
+                manifest,
+                freshness_ttl=args.source_freshness_ttl,
+                allow_stale=args.allow_stale_source_activate,
+            )
             production_name = args.production_name
             if "/" in production_name or production_name in {".", ".."}:
                 raise ConfigError("--production-name must be a plain filename.")
@@ -2810,6 +3882,7 @@ def main() -> int:
                 core_path=args.core_path,
             )
             print(f"remote_config={remote}")
+            print(f"source_snapshot_id={manifest['source_snapshot_id']}")
             print("activated=true")
             return 0
 
