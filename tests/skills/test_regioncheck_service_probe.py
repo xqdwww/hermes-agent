@@ -149,3 +149,33 @@ def test_control_geo_retries_once_then_succeeds(monkeypatch) -> None:
     monkeypatch.setattr(RRC.subprocess, "run", lambda *_args, **_kwargs: next(responses))
     assert RRC.control_geo(1234, sleep_fn=calls.append) == ("203.0.113.8", "JP")
     assert calls == [1]
+
+
+def test_node_transport_failure_records_all_services_without_ip() -> None:
+    report = {"results": []}
+    manifest = {
+        "source_snapshot_id": "snapshot_test",
+        "source_hash": "a" * 64,
+    }
+    tool = {
+        "tool_version": "1.0.1",
+        "script_sha256": "b" * 64,
+    }
+    RRC.append_service_results(
+        report,
+        manifest=manifest,
+        identities={"node-a": "node_abc"},
+        node_name="node-a",
+        exit_hmac="",
+        country="UNKNOWN",
+        tool=tool,
+        raw_values={
+            service: "Failed (Network Connection)"
+            for service in RRC.SERVICE_LABELS
+        },
+    )
+
+    assert [item["service"] for item in report["results"]] == ["gpt", "gemini", "disney"]
+    assert {item["result"] for item in report["results"]} == {"FAIL_TRANSPORT"}
+    assert {item["exit_ip_hmac"] for item in report["results"]} == {""}
+    assert {item["exit_country"] for item in report["results"]} == {"UNKNOWN"}

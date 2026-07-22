@@ -131,6 +131,40 @@ def hmac_prefix(key: bytes, value: str) -> str:
     return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()[:20]
 
 
+def append_service_results(
+    report: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    identities: dict[str, str],
+    node_name: str,
+    exit_hmac: str,
+    country: str,
+    tool: dict[str, Any],
+    raw_values: dict[str, str],
+) -> None:
+    for service, raw in raw_values.items():
+        normalized, evidence = normalize_result(service, raw)
+        report["results"].append(
+            {
+                "service": service,
+                "exact_node_id": identities[node_name],
+                "exact_node_name": node_name,
+                "source_snapshot_id": manifest["source_snapshot_id"],
+                "source_hash": manifest["source_hash"],
+                "exit_ip_hmac": exit_hmac,
+                "exit_country": country,
+                "tool_version": tool["tool_version"],
+                "tool_sha256": tool["script_sha256"],
+                "tested_at": iso_now(),
+                "probe_method_version": METHOD_VERSION,
+                "raw_screen_result": raw,
+                "normalized_result": normalized,
+                "result": normalized,
+                "evidence_type": evidence,
+            }
+        )
+
+
 def inspect_tool(skill: Any, host: str) -> dict[str, Any]:
     command = (
         "set -e; c=$(command -v regioncheck); "
@@ -291,7 +325,28 @@ def main() -> int:
                     sidecar.controller_port, "/connections", method="DELETE"
                 )
                 time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
-                control_ip, country = control_geo(sidecar.mixed_port)
+                try:
+                    control_ip, country = control_geo(sidecar.mixed_port)
+                except ProbeError as exc:
+                    if str(exc) != "STOP_RRC_PROXY_ATTRIBUTION_FAILED":
+                        raise
+                    append_service_results(
+                        report,
+                        manifest=manifest,
+                        identities=identities,
+                        node_name=name,
+                        exit_hmac="",
+                        country="UNKNOWN",
+                        tool=tool,
+                        raw_values={
+                            service: "Failed (Network Connection)"
+                            for service in SERVICE_LABELS
+                        },
+                    )
+                    report["nodes_completed"] = node_index
+                    safe_atomic_json(args.output, report)
+                    time.sleep(args.node_interval)
+                    continue
                 exit_hmac = hmac_prefix(run_key, control_ip)
                 returncode, output = run_regioncheck(skill, args.host, args.timeout)
                 raw_values = extract_service_values(output)
@@ -312,27 +367,16 @@ def main() -> int:
                 masked = extract_masked_ip(output)
                 if returncode != 124 and not masked_ip_matches(control_ip, masked):
                     raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
-                for service, raw in raw_values.items():
-                    normalized, evidence = normalize_result(service, raw)
-                    report["results"].append(
-                        {
-                            "service": service,
-                            "exact_node_id": identities[name],
-                            "exact_node_name": name,
-                            "source_snapshot_id": manifest["source_snapshot_id"],
-                            "source_hash": manifest["source_hash"],
-                            "exit_ip_hmac": exit_hmac,
-                            "exit_country": country,
-                            "tool_version": tool["tool_version"],
-                            "tool_sha256": tool["script_sha256"],
-                            "tested_at": iso_now(),
-                            "probe_method_version": METHOD_VERSION,
-                            "raw_screen_result": raw,
-                            "normalized_result": normalized,
-                            "result": normalized,
-                            "evidence_type": evidence,
-                        }
-                    )
+                append_service_results(
+                    report,
+                    manifest=manifest,
+                    identities=identities,
+                    node_name=name,
+                    exit_hmac=exit_hmac,
+                    country=country,
+                    tool=tool,
+                    raw_values=raw_values,
+                )
                 report["nodes_completed"] = node_index
                 safe_atomic_json(args.output.resolve(), report)
                 skill.controller_json_request(
