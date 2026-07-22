@@ -166,6 +166,7 @@ def control_geo(proxy_port: int) -> tuple[str, str]:
     completed = subprocess.run(
         [
             "curl", "--proxy", f"http://127.0.0.1:{proxy_port}",
+            "--ipv4",
             "--connect-timeout", "4", "--max-time", "12", "--silent", "--show-error",
             "https://ipinfo.io/json",
         ],

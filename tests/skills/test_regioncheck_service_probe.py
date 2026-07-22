@@ -116,3 +116,19 @@ def test_regioncheck_invocation_is_noninteractive_and_explicit_proxy(monkeypatch
     assert "-P http://127.0.0.1:7891" in remote
     assert "</dev/null" in remote
     assert observed["kwargs"]["timeout"] == 30
+
+
+def test_control_geo_is_forced_to_same_ipv4_family_as_regioncheck(monkeypatch) -> None:
+    observed = {}
+
+    class Completed:
+        returncode = 0
+        stdout = '{"ip":"203.0.113.8","country":"JP"}'
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        return Completed()
+
+    monkeypatch.setattr(RRC.subprocess, "run", fake_run)
+    assert RRC.control_geo(1234) == ("203.0.113.8", "JP")
+    assert "--ipv4" in observed["command"]
