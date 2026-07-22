@@ -719,9 +719,9 @@ def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
     nodes = [
         probe_node(
             anchor,
-            gpt=service_result("PASS"),
-            gemini=service_result("PASS"),
-            disney=service_result("PASS"),
+            gpt=service_result("DEFINITIVE_AUTOMATED_PASS"),
+            gemini=service_result("DEFINITIVE_AUTOMATED_PASS"),
+            disney=service_result("PASS_SUPPORTED_REGION"),
         ),
         probe_node(existing_unknown, gpt=service_result("UNKNOWN")),
         probe_node(transport_lkg, gpt=service_result("FAIL_TRANSPORT")),
@@ -744,8 +744,8 @@ def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
         observed_at="2026-07-15T12:00:00+08:00",
     )
 
-    assert existing_unknown in selections["gpt"]["automatic"]
-    assert transport_lkg in selections["gpt"]["automatic"]
+    assert existing_unknown in selections["gpt"]["historical_lkg"]
+    assert transport_lkg in selections["gpt"]["historical_lkg"]
     assert new_pass in selections["gpt"]["automatic"]
     assert region_fail not in selections["gpt"]["automatic"]
     assert manual_fail not in selections["gemini"]["automatic"]
@@ -759,11 +759,14 @@ def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
         {"proxies": [proxy(name) for name in names], "rules": []}, selections
     )
     generated_groups = {group["name"]: group for group in generated["proxy-groups"]}
-    assert len(generated_groups) == 12
+    assert "GPT历史LKG" in generated_groups
+    assert "Gemini历史LKG" not in generated_groups
+    assert "迪士尼历史LKG" not in generated_groups
     assert generated_groups["GPT候选"]["proxies"] == selections["gpt"]["automatic"]
     assert generated_groups["GPT手动"]["proxies"] == [
         "GPT候选",
         *selections["gpt"]["automatic"],
+        "GPT历史LKG",
         *selections["gpt"]["manual_candidates"],
     ]
 
@@ -823,7 +826,8 @@ def test_v2_probable_recapture_does_not_update_lkg() -> None:
         observed_at="new",
     )
     assert new_state == state
-    assert selections["gpt"]["automatic"] == [anchor]
+    assert selections["gpt"]["automatic"] == []
+    assert selections["gpt"]["historical_lkg"] == [anchor]
     assert new_node not in selections["gpt"]["automatic"]
 
 
@@ -856,25 +860,26 @@ def test_v2_state_seed_atomic_write_and_mode(tmp_path) -> None:
             temp_root_state.unlink(missing_ok=True)
 
 
-def test_v2_empty_service_group_blocks() -> None:
+def test_v2_empty_current_service_group_blocks_generation() -> None:
     name = "🇯🇵only-node"
     state = {"schema_version": 1, "updated_at": "old", "nodes": {}}
-    with pytest.raises(MODULE.ConfigError, match="BLOCKED_NO_LKG_GPT_NODES"):
-        MODULE.merge_lkg_results(
-            [name],
-            {name: 0},
-            state,
-            [
-                probe_node(
-                    name,
-                    gpt=service_result("FAIL_REGION"),
-                    gemini=service_result("FAIL_REGION"),
-                    disney=service_result("FAIL_REGION"),
-                )
-            ],
-            probable_recapture=False,
-            observed_at="now",
-        )
+    selections, _, _ = MODULE.merge_lkg_results(
+        [name],
+        {name: 0},
+        state,
+        [
+            probe_node(
+                name,
+                gpt=service_result("FAIL_REGION"),
+                gemini=service_result("FAIL_REGION"),
+                disney=service_result("FAIL_REGION"),
+            )
+        ],
+        probable_recapture=False,
+        observed_at="now",
+    )
+    with pytest.raises(MODULE.ConfigError, match="BLOCKED_NO_CURRENT_SERVICE_CANDIDATES"):
+        MODULE.transform({"proxies": [proxy(name)], "rules": []}, selections)
 
 
 def test_v2_probe_report_rejects_credentials_and_full_ip() -> None:
@@ -1488,22 +1493,26 @@ def test_same_name_changed_identity_does_not_inherit_lkg() -> None:
             }
         },
     }
-    with pytest.raises(MODULE.ConfigError, match="BLOCKED_NO_LKG_GPT_NODES"):
-        MODULE.merge_lkg_results(
-            [name],
-            {name: 0},
-            state,
-            [node],
-            probable_recapture=False,
-            observed_at="2026-07-20T12:00:00+08:00",
-        )
+    selections, _, _ = MODULE.merge_lkg_results(
+        [name],
+        {name: 0},
+        state,
+        [node],
+        probable_recapture=False,
+        observed_at="2026-07-20T12:00:00+08:00",
+    )
+    assert selections["gpt"]["historical_lkg"] == []
 
 
 def test_evidence_matrix_binds_snapshot_and_definitive_counts_remain_zero() -> None:
     report = {
         "run_timestamp": "2026-07-20T12:00:00+08:00",
         "service_groups": {
-            service: {"automatic": ["node-a"], "manual_candidates": []}
+            service: {
+                "automatic": ["node-a"] if service == "gpt" else [],
+                "manual_candidates": [],
+                "historical_lkg": ["node-a"] if service != "gpt" else [],
+            }
             for service in MODULE.SERVICE_KEYS
         },
         "nodes": [

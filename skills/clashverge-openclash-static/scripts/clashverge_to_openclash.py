@@ -149,6 +149,7 @@ MANAGED_GROUP_NAMES = (
     "迪士尼手动",
     "迪士尼候选",
 )
+OPTIONAL_HISTORY_GROUP_NAMES = ("GPT历史LKG", "Gemini历史LKG", "迪士尼历史LKG")
 
 BUILTIN_TARGETS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"}
 SENSITIVE_KEYS = {
@@ -232,6 +233,8 @@ PENDING_RESULTS = {
     "UNKNOWN_RESPONSE_SCHEMA",
 }
 REMOVE_RESULTS = {
+    "DEFINITIVE_AUTOMATED_FAIL",
+    "EVIDENCE_CONFLICT",
     "FAIL_REGION",
     "MANUAL_OVERRIDE_FAIL",
     "FAIL_FORBIDDEN_LOCATION",
@@ -246,12 +249,14 @@ SERVICE_GROUP_NAMES = {
 }
 EVIDENCE_TYPES = {
     "DEFINITIVE_AUTOMATED_PASS",
+    "DEFINITIVE_AUTOMATED_FAIL",
     "MANUAL_FUNCTIONAL_PASS",
     "MANUAL_FUNCTIONAL_FAIL",
     "SCREEN_PASS",
     "LKG_FALLBACK",
     "UNKNOWN",
 }
+FUNCTIONAL_RESULT_SCHEMA_VERSION = 1
 SOURCE_REFRESH_OUTCOMES = {
     "SUCCESS_CHANGED",
     "SUCCESS_NOT_MODIFIED",
@@ -1047,7 +1052,6 @@ def prepare_source_snapshot(
         "live_source_reread_after_snapshot": False,
         "router_contacted_before_snapshot": False,
         "sensitive_data_scan": "STRUCTURAL_REDACTION_ENFORCED",
-        "version": "2.2.0",
         "production_touched": False,
         "activation_recommendation": "BLOCKED_PENDING_DEFINITIVE_FUNCTIONAL_EVIDENCE",
     }
@@ -1164,6 +1168,146 @@ def load_manual_results(path: Path | None) -> list[dict[str, str]]:
     return accepted
 
 
+def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]]:
+    """Load safe snapshot-bound browser and Disney functional results."""
+    accepted: list[dict[str, str]] = []
+    forbidden = {
+        "authorization", "cookie", "cookies", "localstorage", "sessionstorage",
+        "prompt", "response", "answer", "body", "token", "assertion", "refresh_token",
+    }
+    def contains_sensitive(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                lowered = str(key).lower()
+                safe_token_stage = lowered == "token" and isinstance(child, dict) and set(child) <= {
+                    "curl_code", "http_status", "attempts"
+                }
+                if (lowered in forbidden and not safe_token_stage) or contains_sensitive(child):
+                    return True
+            return False
+        if isinstance(value, list):
+            return any(contains_sensitive(child) for child in value)
+        if isinstance(value, str):
+            return "GPT_NODE_TEST_" in value or "GEMINI_NODE_TEST_" in value
+        return False
+    for path in paths or ():
+        payload = load_json_object(path.expanduser().resolve())
+        if payload.get("schema_version") != FUNCTIONAL_RESULT_SCHEMA_VERSION:
+            raise ConfigError(f"Unsupported functional-result schema: {path}")
+        if contains_sensitive(payload):
+            raise ConfigError(f"Functional-result file contains sensitive content: {path}")
+        service_hint = str(payload.get("service", ""))
+        raw_results = payload.get("results")
+        if raw_results is None and service_hint == "disney":
+            raw_results = payload.get("nodes")
+        if not isinstance(raw_results, list):
+            raise ConfigError(f"Functional-result file must contain results or nodes: {path}")
+        for index, item in enumerate(raw_results):
+            if not isinstance(item, dict):
+                raise ConfigError(f"Functional result {index} must be an object.")
+            service = str(item.get("service") or service_hint)
+            node = str(item.get("exact_node_name", ""))
+            node_id = str(item.get("exact_node_id", ""))
+            snapshot_id = str(item.get("source_snapshot_id", ""))
+            source_hash = str(item.get("source_hash") or payload.get("source_hash", ""))
+            tested_at = str(item.get("tested_at", ""))
+            method = str(item.get("probe_method_version") or payload.get("probe_method_version", ""))
+            raw_result = str(item.get("result", ""))
+            error = str(item.get("error_category") or item.get("failure_stage") or "")
+            if service not in SERVICE_KEYS or not all(
+                (node, node_id, snapshot_id, source_hash, tested_at, method, raw_result)
+            ):
+                raise ConfigError(f"Functional result {index} is incomplete.")
+            parse_aware_timestamp(tested_at, field=f"functional result {index}")
+            if service == "disney":
+                if raw_result == "PASS_SUPPORTED_REGION":
+                    result = "PASS"
+                elif raw_result in {
+                    "FAIL_FORBIDDEN_LOCATION", "FAIL_IP_BANNED", "FAIL_UNAVAILABLE"
+                }:
+                    result = "FAIL"
+                    error = raw_result
+                elif raw_result in {"FAIL_TRANSPORT", "UNKNOWN_RESPONSE_SCHEMA"}:
+                    result = "UNKNOWN"
+                    error = raw_result
+                else:
+                    raise ConfigError(f"Functional result {index} has an invalid Disney result.")
+            elif raw_result in {"PASS", "FAIL", "UNKNOWN"}:
+                result = raw_result
+            else:
+                raise ConfigError(f"Functional result {index} has an invalid result.")
+            accepted.append(
+                {
+                    "service": service,
+                    "node": node,
+                    "exact_node_id": node_id,
+                    "source_snapshot_id": snapshot_id,
+                    "source_hash": source_hash,
+                    "tested_at": tested_at,
+                    "method": method,
+                    "result": result,
+                    "error_category": error,
+                }
+            )
+    return accepted
+
+
+def apply_functional_results_to_report(
+    report: dict[str, Any],
+    functional_results: Sequence[dict[str, str]],
+    snapshot_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply exact-identity automated results; UNKNOWN never becomes a pass."""
+    updated = deepcopy(report)
+    probe_timestamp = parse_aware_timestamp(str(updated.get("run_timestamp", "")), field="probe run")
+    snapshot_id = str(snapshot_manifest.get("source_snapshot_id", ""))
+    source_hash = str(snapshot_manifest.get("source_hash", ""))
+    identity_by_name = {
+        str(item.get("exact_node_name")): str(item.get("exact_node_id"))
+        for item in snapshot_manifest.get("nodes", []) if isinstance(item, dict)
+    }
+    matched: set[int] = set()
+    for node in updated.get("nodes", []):
+        name = str(node.get("name", ""))
+        node_id = identity_by_name.get(name, "")
+        node["source_snapshot_id"] = snapshot_id
+        node["source_hash"] = source_hash
+        node["exact_node_id"] = node_id
+        node["exact_node_name"] = name
+        for service in SERVICE_KEYS:
+            candidates = [
+                (index, item) for index, item in enumerate(functional_results)
+                if item["service"] == service and item["node"] == name
+                and item["exact_node_id"] == node_id
+                and item["source_snapshot_id"] == snapshot_id
+                and item["source_hash"] == source_hash
+                and parse_aware_timestamp(item["tested_at"], field="functional result") >= probe_timestamp
+            ]
+            if not candidates:
+                continue
+            index, latest = max(
+                candidates,
+                key=lambda pair: parse_aware_timestamp(pair[1]["tested_at"], field="functional result"),
+            )
+            matched.add(index)
+            service_result = node["services"][service]
+            service_result["functional_result"] = {
+                key: latest[key] for key in (
+                    "result", "tested_at", "method", "source_snapshot_id",
+                    "source_hash", "exact_node_id", "error_category"
+                )
+            }
+            if latest["result"] == "PASS":
+                service_result["final_result"] = "DEFINITIVE_AUTOMATED_PASS"
+            elif latest["result"] == "FAIL":
+                service_result["final_result"] = "DEFINITIVE_AUTOMATED_FAIL"
+    updated["functional_results"] = {
+        "applied": len(matched),
+        "unmatched_or_stale_count": len(functional_results) - len(matched),
+    }
+    return updated
+
+
 def apply_manual_results_to_report(
     report: dict[str, Any],
     manual_results: Sequence[dict[str, str]],
@@ -1194,7 +1338,13 @@ def apply_manual_results_to_report(
                 raw_result = "UNKNOWN_INCOMPLETE_PROBE"
             service_result["raw_result"] = raw_result
             service_result["override"] = None
-            service_result["final_result"] = raw_result
+            functional = service_result.get("functional_result", {})
+            if functional.get("result") == "PASS":
+                service_result["final_result"] = "DEFINITIVE_AUTOMATED_PASS"
+            elif functional.get("result") == "FAIL":
+                service_result["final_result"] = "DEFINITIVE_AUTOMATED_FAIL"
+            else:
+                service_result["final_result"] = raw_result
             service_result.pop("manual_result", None)
 
     for node in nodes:
@@ -1242,7 +1392,17 @@ def apply_manual_results_to_report(
             )
             service_result = node["services"][service]
             service_result["override"] = override
-            service_result["final_result"] = override
+            functional_result = str(service_result.get("functional_result", {}).get("result", ""))
+            if functional_result and functional_result != latest["result"]:
+                service_result["final_result"] = "EVIDENCE_CONFLICT"
+                service_result["evidence_conflict"] = True
+            elif functional_result:
+                service_result["final_result"] = (
+                    "DEFINITIVE_AUTOMATED_PASS"
+                    if functional_result == "PASS" else "DEFINITIVE_AUTOMATED_FAIL"
+                )
+            else:
+                service_result["final_result"] = override
             service_result["manual_result"] = {
                 "result": latest["result"],
                 "tested_at": latest["tested_at"],
@@ -1449,7 +1609,11 @@ def merge_lkg_results(
                 }
 
             item["lkg_merge"][service] = action
-            item["enters_auto"][service] = lkg
+            is_current_candidate = (
+                final_result in {"DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION"}
+                or (service == "gpt" and final_result == "MANUAL_OVERRIDE_PASS")
+            )
+            item["enters_auto"][service] = is_current_candidate
             item["enters_manual_candidate"][service] = (
                 not probable_recapture and not lkg and final_result in PENDING_RESULTS
             )
@@ -1459,9 +1623,14 @@ def merge_lkg_results(
     effective_state = state if probable_recapture else new_state
     for service in SERVICE_KEYS:
         automatic = [
-            name
-            for name in current_names
-            if bool(effective_state.get("nodes", {}).get(name, {}).get(service, {}).get("lkg"))
+            str(item["name"])
+            for item in enriched
+            if item["enters_auto"][service]
+        ]
+        historical = [
+            name for name in current_names
+            if name not in automatic
+            and bool(effective_state.get("nodes", {}).get(name, {}).get(service, {}).get("lkg"))
             and (
                 not probe_by_name.get(name, {}).get("exact_node_id")
                 or not effective_state.get("nodes", {}).get(name, {}).get(service, {}).get("exact_node_id")
@@ -1479,9 +1648,12 @@ def merge_lkg_results(
             automatic, source_order, gemini=service == "gemini"
         )
         pending = stable_region_sort(pending, source_order, gemini=service == "gemini")
-        if not automatic:
-            raise ConfigError(f"BLOCKED_NO_LKG_{service.upper()}_NODES")
-        selections[service] = {"automatic": automatic, "manual_candidates": pending}
+        historical = stable_region_sort(historical, source_order, gemini=service == "gemini")
+        selections[service] = {
+            "automatic": automatic,
+            "manual_candidates": pending,
+            "historical_lkg": historical,
+        }
 
     if not probable_recapture:
         new_state["updated_at"] = observed_at
@@ -2308,14 +2480,15 @@ def annotate_probe_semantics(
     report: dict[str, Any], nodes: Sequence[dict[str, Any]]
 ) -> None:
     report["service_semantics"] = {
-        "gpt": "screening_plus_timestamped_definitive_manual_use",
-        "gemini": "screening_only_without_logged_in_generation",
-        "disney": "incomplete_without_devices_token_graphql_redirect_chain",
+        "gpt": "logged_in_web_generation_or_timestamped_manual_use",
+        "gemini": "logged_in_web_generation_only_for_primary_candidates",
+        "disney": "devices_token_graphql_supported_location_redirect_chain",
     }
     groups = report.get("service_groups", {})
     summaries: dict[str, dict[str, int]] = {}
     for service in SERVICE_KEYS:
         candidate_names = set(groups.get(service, {}).get("automatic", []))
+        historical_names = set(groups.get(service, {}).get("historical_lkg", []))
         counts = {evidence: 0 for evidence in EVIDENCE_TYPES}
         candidate_count = 0
         for node in nodes:
@@ -2328,15 +2501,19 @@ def annotate_probe_semantics(
                 evidence_type = "MANUAL_FUNCTIONAL_FAIL"
             elif final_result in {"DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION"}:
                 evidence_type = "DEFINITIVE_AUTOMATED_PASS"
+            elif final_result == "DEFINITIVE_AUTOMATED_FAIL":
+                evidence_type = "DEFINITIVE_AUTOMATED_FAIL"
             elif final_result in {"PASS", "GEMINI_SCREEN_PASS"}:
                 evidence_type = "SCREEN_PASS"
-            elif node_name in candidate_names:
+            elif node_name in historical_names:
                 evidence_type = "LKG_FALLBACK"
             else:
                 evidence_type = "UNKNOWN"
             result["evidence_type"] = evidence_type
             result["probe_method_version"] = PROBE_VERSION
             result["tested_at"] = (
+                result.get("functional_result", {}).get("tested_at")
+                or
                 result.get("manual_result", {}).get("tested_at")
                 or node.get("observed_at")
                 or report.get("run_timestamp")
@@ -2363,9 +2540,15 @@ def annotate_probe_semantics(
             "lkg_only": sum(
                 1
                 for node in nodes
-                if node.get("name") in candidate_names
+                if node.get("name") in historical_names
                 and node.get("services", {}).get(service, {}).get("evidence_type")
                 == "LKG_FALLBACK"
+            ),
+            "manual_functional_fail": counts["MANUAL_FUNCTIONAL_FAIL"],
+            "unknown": counts["UNKNOWN"],
+            "evidence_conflict": sum(
+                node.get("services", {}).get(service, {}).get("final_result") == "EVIDENCE_CONFLICT"
+                for node in nodes
             ),
         }
     report["candidate_evidence_summary"] = summaries
@@ -2375,12 +2558,15 @@ def annotate_probe_semantics(
     # Compatibility field now has one unambiguous meaning: automated functional proof only.
     report["definitive_pass_counts"] = dict(report["definitive_automated_pass_counts"])
     blockers: list[str] = []
-    if report["definitive_automated_pass_counts"]["gpt"] == 0:
-        blockers.append("GPT_DEFINITIVE_WEB_GENERATION_RESULT_MISSING")
-    if report["definitive_automated_pass_counts"]["gemini"] == 0:
+    if summaries["gpt"]["candidates"] == 0:
+        blockers.append("GPT_CURRENT_FUNCTIONAL_CANDIDATE_MISSING")
+    if summaries["gemini"]["candidates"] == 0:
         blockers.append("GEMINI_DEFINITIVE_WEB_GENERATION_RESULT_MISSING")
-    if report["definitive_automated_pass_counts"]["disney"] == 0:
+    if summaries["disney"]["candidates"] == 0:
         blockers.append("DISNEY_FULL_REGION_CHAIN_RESULT_MISSING")
+    conflicts = sum(summaries[service]["evidence_conflict"] for service in SERVICE_KEYS)
+    if conflicts:
+        blockers.append("EVIDENCE_CONFLICT_PRESENT")
     report["activation_blocked_reasons"] = blockers
 
 
@@ -2392,6 +2578,7 @@ def dynamic_probe_and_select(
     core_path: str | None,
     update_lkg: bool,
     manual_results_path: Path | None = None,
+    functional_results_paths: Sequence[Path] | None = None,
     snapshot_manifest: dict[str, Any] | None = None,
     probe_runner: Any = run_local_service_probe,
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
@@ -2399,8 +2586,13 @@ def dynamic_probe_and_select(
     state, seed_source = load_or_seed_lkg_state(
         state_path, legacy_config, persist_seed=update_lkg
     )
+    report = probe_runner(data, core_path=core_path)
+    if snapshot_manifest:
+        report = apply_functional_results_to_report(
+            report, load_functional_results(functional_results_paths), snapshot_manifest
+        )
     report = apply_manual_results_to_report(
-        probe_runner(data, core_path=core_path),
+        report,
         load_manual_results(manual_results_path),
         snapshot_manifest,
     )
@@ -2442,6 +2634,7 @@ def reconcile_existing_probe(
     report_output_path: Path,
     state_output_path: Path,
     snapshot_manifest: dict[str, Any] | None = None,
+    functional_results_paths: Sequence[Path] | None = None,
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
     """Reconcile an existing report without starting Mihomo, curl, SSH, or deployment."""
     legacy_config = transform(data)
@@ -2474,6 +2667,10 @@ def reconcile_existing_probe(
                 },
                 "reason_code": "NOT_PROBED_CURRENT_SOURCE",
             }
+        )
+    if snapshot_manifest:
+        report = apply_functional_results_to_report(
+            report, load_functional_results(functional_results_paths), snapshot_manifest
         )
     report = apply_manual_results_to_report(
         report, load_manual_results(manual_results_path), snapshot_manifest
@@ -2526,8 +2723,9 @@ def build_groups(
     gpt_nodes: list[str],
     gemini_nodes: list[str],
     disney_nodes: list[str],
+    historical_lkg: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    return [
+    groups = [
         {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
         {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
         fallback_group("自动选择", all_nodes),
@@ -2541,6 +2739,18 @@ def build_groups(
         {"name": "迪士尼手动", "type": "select", "proxies": ["迪士尼候选", *disney_nodes]},
         fallback_group("迪士尼候选", disney_nodes),
     ]
+    for service, group_name, selector_name in (
+        ("gpt", "GPT历史LKG", "GPT手动"),
+        ("gemini", "Gemini历史LKG", "Gemini手动"),
+        ("disney", "迪士尼历史LKG", "迪士尼手动"),
+    ):
+        members = list((historical_lkg or {}).get(service, []))
+        if not members:
+            continue
+        groups.append(fallback_group(group_name, members))
+        selector = next(group for group in groups if group["name"] == selector_name)
+        selector["proxies"].append(group_name)
+    return groups
 
 
 def rule_target(rule: str) -> str | None:
@@ -2585,9 +2795,13 @@ def validate_config(data: dict[str, Any]) -> None:
     if not isinstance(groups, list):
         raise ConfigError("'proxy-groups' must be a list.")
     group_names = [group.get("name") for group in groups if isinstance(group, dict)]
-    if group_names != list(MANAGED_GROUP_NAMES):
+    expected_prefix = list(MANAGED_GROUP_NAMES)
+    optional_tail = group_names[len(expected_prefix):]
+    if group_names[:len(expected_prefix)] != expected_prefix or any(
+        name not in OPTIONAL_HISTORY_GROUP_NAMES for name in optional_tail
+    ) or optional_tail != [name for name in OPTIONAL_HISTORY_GROUP_NAMES if name in optional_tail]:
         raise ConfigError(
-            "Managed groups do not match the accepted 12-group structure: "
+            "Managed groups do not match the accepted candidate/history structure: "
             + ", ".join(str(name) for name in group_names)
         )
     if len(set(group_names)) != len(group_names):
@@ -2681,8 +2895,25 @@ def transform(
         gpt_nodes = list(service_selections["gpt"]["automatic"])
         gemini_nodes = list(service_selections["gemini"]["automatic"])
         disney_nodes = list(service_selections["disney"]["automatic"])
+        missing = [
+            service.upper()
+            for service, nodes in (
+                ("gpt", gpt_nodes), ("gemini", gemini_nodes), ("disney", disney_nodes)
+            )
+            if not nodes
+        ]
+        if missing:
+            raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES: " + ",".join(missing))
 
-    output["proxy-groups"] = build_groups(all_nodes, gpt_nodes, gemini_nodes, disney_nodes)
+    history = None
+    if service_selections is not None:
+        history = {
+            service: list(service_selections[service].get("historical_lkg", []))
+            for service in SERVICE_KEYS
+        }
+    output["proxy-groups"] = build_groups(
+        all_nodes, gpt_nodes, gemini_nodes, disney_nodes, history
+    )
     if service_selections is not None:
         groups_by_name = {group["name"]: group for group in output["proxy-groups"]}
         for service, (_, manual_name) in SERVICE_GROUP_NAMES.items():
@@ -3455,6 +3686,13 @@ def add_probe_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="Structured, timestamped definitive manual use results (no cookies or content).",
     )
+    parser.add_argument(
+        "--functional-results",
+        type=Path,
+        action="append",
+        default=[],
+        help="Snapshot-bound definitive browser or Disney result JSON (repeatable).",
+    )
 
 
 def add_source_args(parser: argparse.ArgumentParser, *, include_source: bool = True) -> None:
@@ -3646,6 +3884,9 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_p.add_argument("--probe-report", type=Path, required=True)
     reconcile_p.add_argument("--state-path", type=Path, required=True)
     reconcile_p.add_argument("--manual-results", type=Path, required=True)
+    reconcile_p.add_argument(
+        "--functional-results", type=Path, action="append", default=[]
+    )
     reconcile_p.add_argument("--report-output", type=Path, required=True)
     reconcile_p.add_argument("--state-output", type=Path, required=True)
     reconcile_p.add_argument("--output", type=Path, required=True)
@@ -3699,6 +3940,7 @@ def main() -> int:
                 core_path=args.probe_core,
                 update_lkg=True,
                 manual_results_path=args.manual_results,
+                functional_results_paths=args.functional_results,
                 snapshot_manifest=snapshot_manifest,
                 probe_runner=probe_runner,
             )
@@ -3784,6 +4026,7 @@ def main() -> int:
                 core_path=args.probe_core,
                 update_lkg=args.update_lkg,
                 manual_results_path=args.manual_results,
+                functional_results_paths=args.functional_results,
                 snapshot_manifest=snapshot_manifest,
             )
             print_probe_summary(args.probe_report)
@@ -3799,6 +4042,7 @@ def main() -> int:
                 state_path=args.state_path.expanduser().resolve(),
                 probe_report_path=args.probe_report.expanduser().resolve(),
                 manual_results_path=args.manual_results.expanduser().resolve(),
+                functional_results_paths=args.functional_results,
                 report_output_path=args.report_output.expanduser().resolve(),
                 state_output_path=args.state_output.expanduser().resolve(),
                 snapshot_manifest=snapshot_manifest,

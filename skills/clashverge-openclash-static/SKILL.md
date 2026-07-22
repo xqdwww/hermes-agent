@@ -1,12 +1,7 @@
 ---
 name: clashverge-openclash-static
-description: >-
-  Refresh the explicitly bound Clash Verge subscription, freeze an immutable
-  source snapshot, maintain service-specific evidence, generate the accepted
-  static OpenClash profile, test isolated candidates, and activate or roll back
-  production transactionally. Use when updating OpenClash from Clash Verge on
-  ImmortalWrt/OpenWrt with Mihomo.
-version: 2.2.0
+description: Safely refresh and deploy static OpenClash profiles.
+version: 2.3.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -42,16 +37,16 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the only release-version source for this
-Skill. Version 2.2.0 keeps the 2.1 candidate-isolation and rollback boundary,
-renames ambiguous automatic service groups to candidate groups, adds explicit
-service evidence types, and binds every result to an immutable refreshed source
-snapshot. It also adds offline `reconcile-probe`. HTTP reachability is screening,
-not functional proof; activation remains blocked while GPT/Gemini logged-in Web
-generation and the complete Disney region chain lack definitive automated proof.
+Skill. Version 2.3.0 keeps the 2.2 immutable source and evidence contract and adds
+a dedicated persistent-browser bridge for logged-in GPT/Gemini generation, fixed
+loopback proxy attribution through the candidate sidecar, the complete Disney
+devices/token/GraphQL/redirect probe with current session-level schema, and
+snapshot-bound functional-result reconciliation. No browser authentication data
+is exported. Production activation remains a separate transaction.
 
 ## Accepted policy
 
-The generated profile must contain exactly these 12 managed groups:
+The generated profile contains these 12 primary managed groups:
 
 1. 默认代理
 2. 手动选择
@@ -66,6 +61,10 @@ The generated profile must contain exactly these 12 managed groups:
 11. 迪士尼手动
 12. 迪士尼候选
 
+Identity-bound LKG-only members, when present, are exposed separately as
+`GPT历史LKG`, `Gemini历史LKG`, or `迪士尼历史LKG`; they never enter a primary
+candidate group merely because they passed historically.
+
 Rules:
 
 - Never generate `全局优先│...`, `GPT优先│...`, `Gemini优先│...`, `迪士尼优先│...`, or their full-width-bar variants.
@@ -77,12 +76,12 @@ Rules:
 - Remove the placeholder node named `使用前先更新订阅`.
 - The historical GPT/Gemini/Disney candidate sets seed last-known-good state on the first run. Do not restore the old binary GPT probe.
 - New imports use one temporary loopback Mihomo instance, serial selector switching with controller read-back, multi-signal service probes, exact manual calibration, and LKG merging.
-- Use only `DEFINITIVE_AUTOMATED_PASS`, `MANUAL_FUNCTIONAL_PASS`, `MANUAL_FUNCTIONAL_FAIL`, `SCREEN_PASS`, `LKG_FALLBACK`, and `UNKNOWN` as evidence types. Display LKG-only membership separately from current proof.
-- Definitive automated functional PASS and newer structured manual PASS may enter candidate and manual groups. Existing identity-bound LKG survives challenge, auth uncertainty, screening-only results, unknown, and transport failure. Explicit region/forbidden-location/IP-ban/unavailable failure or a newer manual FAIL removes it.
+- Use `DEFINITIVE_AUTOMATED_PASS`, `DEFINITIVE_AUTOMATED_FAIL`, `MANUAL_FUNCTIONAL_PASS`, `MANUAL_FUNCTIONAL_FAIL`, `SCREEN_PASS`, `LKG_FALLBACK`, and `UNKNOWN` as evidence types. Display conflicts and LKG-only membership separately from current proof.
+- GPT candidates require current automated generation PASS or current identity-bound manual functional PASS. Gemini candidates require current conflict-free automated Web generation PASS. Disney candidates require current full-chain `PASS_SUPPORTED_REGION`. LKG is historical fallback only.
 - Never treat Google reachability, Gemini HTTP 200, a login redirect, an API response, old LKG, or an old override as definitive Gemini Web generation proof.
 - Never treat a Disney homepage, TLS, CDN, or HTTP 200 response as Disney support proof.
 - New UNKNOWN nodes may appear only at the tail of the corresponding manual group; they never enter the candidate group.
-- If a service has no LKG nodes, stop with `BLOCKED_NO_LKG_<SERVICE>_NODES`; never delete its group or rules and never silently route it through the default group.
+- If a primary service group is empty, stop candidate generation with `BLOCKED_NO_CURRENT_SERVICE_CANDIDATES`; never silently substitute LKG or default routing.
 - Preserve ordinary source rules, rename the old target `顺畅网络` to `默认代理`, regenerate narrow GPT/Gemini/Disney rules, and finish with exactly `MATCH,默认代理`.
 - Remove Clash Verge-only controller/listener/profile fields, temporary probe/controller fields, and `/tmp/verge` paths if present. Preserve a general top-level `tun` section because it may carry user network semantics.
 - Validate group references, rule targets, cycles, duplicate names, and the final MATCH before writing or deploying.
@@ -157,6 +156,38 @@ Each manual record contains `service`, exact `node`, `exact_node_id`,
 logged-in generation/playback methods. Never store cookies, tokens, prompts,
 answers, or response bodies. Ignore stale results and any name, node identity,
 service, method, or snapshot mismatch.
+
+Run logged-in GPT and Gemini Web generation through the fixed browser-to-sidecar
+bridge. The dedicated profile is created in a private directory and is never
+inspected or copied:
+
+```bash
+python3 scripts/browser_service_probe.py \
+  --skill-script scripts/clashverge_to_openclash.py \
+  --source-snapshot /path/to/source-snapshot.json \
+  --browser-executable "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --profile-dir /private/path/browser-service-profile \
+  --output /private/path/browser-functional-results.json
+```
+
+The browser instance alone uses the fixed loopback proxy. Remote debugging binds
+to `127.0.0.1`. Exit attribution must match a control request through the same
+sidecar proxy. If login, challenge, rate limiting, selector read-back, or proxy
+attribution fails, stop without definitive PASS or candidate generation.
+
+The Disney probe performs devices → token → GraphQL → supported-location → final
+redirect. It stores neither transient credentials nor response bodies:
+
+```bash
+python3 scripts/disney_service_probe.py \
+  --skill-script scripts/clashverge_to_openclash.py \
+  --source-snapshot /path/to/source-snapshot.json \
+  --output /private/path/disney-functional-results.json
+```
+
+Pass one or more result files to `all`, `probe`, or `reconcile-probe` with
+repeatable `--functional-results`. Each result must match the snapshot ID/hash,
+stable node ID, exact node name, service, timestamp, and method version.
 
 ### Local generation only
 
