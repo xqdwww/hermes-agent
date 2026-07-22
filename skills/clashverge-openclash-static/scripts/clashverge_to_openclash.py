@@ -234,6 +234,7 @@ PENDING_RESULTS = {
 }
 REMOVE_RESULTS = {
     "DEFINITIVE_AUTOMATED_FAIL",
+    "DEFINITIVE_AUTOMATED_FAIL_UNSUPPORTED_REGION",
     "EVIDENCE_CONFLICT",
     "FAIL_REGION",
     "MANUAL_OVERRIDE_FAIL",
@@ -1300,7 +1301,11 @@ def apply_functional_results_to_report(
             if latest["result"] == "PASS":
                 service_result["final_result"] = "DEFINITIVE_AUTOMATED_PASS"
             elif latest["result"] == "FAIL":
-                service_result["final_result"] = "DEFINITIVE_AUTOMATED_FAIL"
+                service_result["final_result"] = (
+                    "DEFINITIVE_AUTOMATED_FAIL_UNSUPPORTED_REGION"
+                    if latest.get("error_category") == "FAIL_UNSUPPORTED_REGION"
+                    else "DEFINITIVE_AUTOMATED_FAIL"
+                )
     updated["functional_results"] = {
         "applied": len(matched),
         "unmatched_or_stale_count": len(functional_results) - len(matched),
@@ -2501,7 +2506,7 @@ def annotate_probe_semantics(
                 evidence_type = "MANUAL_FUNCTIONAL_FAIL"
             elif final_result in {"DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION"}:
                 evidence_type = "DEFINITIVE_AUTOMATED_PASS"
-            elif final_result == "DEFINITIVE_AUTOMATED_FAIL":
+            elif final_result.startswith("DEFINITIVE_AUTOMATED_FAIL"):
                 evidence_type = "DEFINITIVE_AUTOMATED_FAIL"
             elif final_result in {"PASS", "GEMINI_SCREEN_PASS"}:
                 evidence_type = "SCREEN_PASS"

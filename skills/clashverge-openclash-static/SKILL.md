@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.3.0
+version: 2.3.1
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,12 +37,16 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the only release-version source for this
-Skill. Version 2.3.0 keeps the 2.2 immutable source and evidence contract and adds
+Skill. Version 2.3.1 keeps the 2.2 immutable source and evidence contract and adds
 a dedicated persistent-browser bridge for logged-in GPT/Gemini generation, fixed
 loopback proxy attribution through the candidate sidecar, the complete Disney
 devices/token/GraphQL/redirect probe with current session-level schema, and
-snapshot-bound functional-result reconciliation. No browser authentication data
-is exported. Production activation remains a separate transaction.
+snapshot-bound functional-result reconciliation. Browser login and persistence
+are established first on the normal Mac baseline network; the candidate sidecar
+is used only for node-attributed functional probes. A single node restriction or
+reauth response is a node result and does not invalidate the baseline session.
+No browser authentication data is exported. Production activation remains a
+separate transaction.
 
 ## Accepted policy
 
@@ -165,15 +169,23 @@ inspected or copied:
 python3 scripts/browser_service_probe.py \
   --skill-script scripts/clashverge_to_openclash.py \
   --source-snapshot /path/to/source-snapshot.json \
+  --baseline-session-proof /private/path/baseline-session-proof.json \
   --browser-executable "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --profile-dir /private/path/browser-service-profile \
   --output /private/path/browser-functional-results.json
 ```
 
-The browser instance alone uses the fixed loopback proxy. Remote debugging binds
-to `127.0.0.1`. Exit attribution must match a control request through the same
-sidecar proxy. If login, challenge, rate limiting, selector read-back, or proxy
-attribution fails, stop without definitive PASS or candidate generation.
+The proof must attest that the same private profile was logged into and survived
+a restart on the normal Mac baseline network, without a sidecar and without
+exporting authentication data. The probe never creates or logs into a profile.
+The browser instance alone then uses the fixed loopback proxy. Remote debugging
+binds to `127.0.0.1`. Exit attribution must match a control request through the
+same sidecar proxy for every node. An unsupported-region response is a node FAIL
+and probing continues. One node-level reauthentication or challenge response is
+recorded for that node; repeated responses stop that service as
+`UNKNOWN_SESSION_INVALIDATED`. Account rate limiting stops only the affected
+service. Proxy attribution failure stops the entire probe without definitive
+results for the mismatched node.
 
 The Disney probe performs devices → token → GraphQL → supported-location → final
 redirect. It stores neither transient credentials nor response bodies:

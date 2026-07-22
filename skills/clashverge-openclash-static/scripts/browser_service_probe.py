@@ -33,11 +33,12 @@ from typing import Any, Iterator
 
 
 SCHEMA_VERSION = 1
-METHOD_VERSION = "browser-sidecar-functional-v1"
+METHOD_VERSION = "browser-sidecar-functional-v2"
 EXIT_URL = "https://api.ipify.org?format=json"
 DEFAULT_NODE_INTERVAL_SECONDS = 8.0
 DEFAULT_RESPONSE_TIMEOUT_SECONDS = 90.0
-DEFAULT_LOGIN_WAIT_SECONDS = 30.0
+BASELINE_SESSION_STATUS = "PASS_BASELINE_BROWSER_LOGIN_PERSISTED_READY_FOR_SIDECAR_PROBE"
+SESSION_RISK_THRESHOLD = 2
 SENSITIVE_KEYS = {
     "authorization",
     "cookie",
@@ -101,8 +102,7 @@ def build_chrome_command(
 
 @contextmanager
 def exclusive_profile_lock(profile_dir: Path) -> Iterator[None]:
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(profile_dir, 0o700)
+    validate_existing_profile(profile_dir)
     lock_path = profile_dir.parent / f".{profile_dir.name}.probe.lock"
     with lock_path.open("a+", encoding="utf-8") as handle:
         os.chmod(lock_path, 0o600)
@@ -115,6 +115,45 @@ def exclusive_profile_lock(profile_dir: Path) -> Iterator[None]:
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             lock_path.unlink(missing_ok=True)
+
+
+def validate_existing_profile(profile_dir: Path) -> None:
+    """Require the already-authenticated private profile without inspecting it."""
+    if not profile_dir.is_dir() or not (profile_dir / "Local State").is_file():
+        raise ProbeError("BROWSER_PERSISTENT_PROFILE_MISSING")
+    if profile_dir.stat().st_mode & 0o077:
+        raise ProbeError("BROWSER_PROFILE_PERMISSIONS_NOT_PRIVATE")
+
+
+def load_baseline_session_proof(
+    path: Path,
+    *,
+    source_snapshot_id: str,
+    source_hash: str,
+) -> dict[str, Any]:
+    """Validate the non-sensitive baseline-login gate before router contact."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProbeError("BASELINE_SESSION_PROOF_INVALID") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ProbeError("BASELINE_SESSION_PROOF_INVALID")
+    required = {
+        "status": BASELINE_SESSION_STATUS,
+        "source_snapshot_id": source_snapshot_id,
+        "source_hash": source_hash,
+        "browser_profile_reused": True,
+        "browser_profile_recreated": False,
+        "cookies_exported": False,
+        "credentials_accessed": False,
+        "system_proxy_changed": False,
+        "tun_changed": False,
+        "sidecar_started": False,
+    }
+    if any(payload.get(key) != value for key, value in required.items()):
+        raise ProbeError("BASELINE_SESSION_PROOF_MISMATCH")
+    validate_safe_report(payload)
+    return payload
 
 
 def http_json(url: str, *, method: str = "GET", timeout: float = 2.0) -> Any:
@@ -547,14 +586,38 @@ def map_outcome(outcome: str) -> tuple[str, str | None]:
     if outcome == "PASS":
         return "PASS", None
     mapping = {
-        "LOGIN_REQUIRED": "UNKNOWN_LOGIN_REQUIRED",
+        "LOGIN_REQUIRED": "FAIL_NODE_SESSION_REAUTH",
         "CHALLENGE": "UNKNOWN_CHALLENGE",
         "RATE_LIMIT": "UNKNOWN_ACCOUNT_RATE_LIMIT",
         "AUTOMATION_UNAVAILABLE": "UNKNOWN_AUTOMATION_UNAVAILABLE",
         "NO_NEW_ANSWER": "FAIL_NO_NEW_ANSWER",
         "UNSUPPORTED_REGION": "FAIL_UNSUPPORTED_REGION",
+        "TRANSPORT_FAILURE": "FAIL_TRANSPORT",
     }
-    return "FAIL" if outcome in {"NO_NEW_ANSWER", "UNSUPPORTED_REGION"} else "UNKNOWN", mapping.get(outcome, "UNKNOWN_AUTOMATION_UNAVAILABLE")
+    return (
+        "FAIL"
+        if outcome in {
+            "NO_NEW_ANSWER", "UNSUPPORTED_REGION", "LOGIN_REQUIRED", "TRANSPORT_FAILURE"
+        }
+        else "UNKNOWN",
+        mapping.get(outcome, "UNKNOWN_AUTOMATION_UNAVAILABLE"),
+    )
+
+
+def classify_node_outcome(
+    outcome: str,
+    consecutive_session_risks: int,
+) -> tuple[str, str | None, int, bool]:
+    """Classify one node; only repeated account/session symptoms stop a service."""
+    result, error = map_outcome(outcome)
+    if outcome in {"LOGIN_REQUIRED", "CHALLENGE"}:
+        consecutive_session_risks += 1
+        if consecutive_session_risks >= SESSION_RISK_THRESHOLD:
+            return "UNKNOWN", "UNKNOWN_SESSION_INVALIDATED", consecutive_session_risks, True
+        return result, error, consecutive_session_risks, False
+    if outcome in {"RATE_LIMIT", "AUTOMATION_UNAVAILABLE"}:
+        return result, error, 0, True
+    return result, error, 0, False
 
 
 def validate_safe_report(report: dict[str, Any]) -> None:
@@ -596,6 +659,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skill-script", type=Path, required=True)
     parser.add_argument("--source-snapshot", type=Path, required=True)
+    parser.add_argument("--baseline-session-proof", type=Path, required=True)
     parser.add_argument("--browser-executable", type=Path, required=True)
     parser.add_argument("--profile-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -603,12 +667,17 @@ def main() -> int:
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     parser.add_argument("--node-interval", type=float, default=DEFAULT_NODE_INTERVAL_SECONDS)
     parser.add_argument("--response-timeout", type=float, default=DEFAULT_RESPONSE_TIMEOUT_SECONDS)
-    parser.add_argument("--login-wait", type=float, default=DEFAULT_LOGIN_WAIT_SECONDS)
     parser.add_argument("--skip-gemini-node", action="append", default=[])
     args = parser.parse_args()
 
     skill = load_module(args.skill_script.resolve())
     manifest, payload_path = skill.verify_source_snapshot(args.source_snapshot.resolve())
+    load_baseline_session_proof(
+        args.baseline_session_proof.resolve(),
+        source_snapshot_id=str(manifest["source_snapshot_id"]),
+        source_hash=str(manifest["source_hash"]),
+    )
+    validate_existing_profile(args.profile_dir.resolve())
     data = skill.load_yaml(payload_path)
     proxies = skill.static_proxy_objects(data)
     identities = {
@@ -632,6 +701,9 @@ def main() -> int:
         "source_hash": manifest["source_hash"],
         "started_at": iso_now(),
         "browser_profile": "DEDICATED_PERSISTENT_PROFILE_REDACTED",
+        "baseline_session_proof": BASELINE_SESSION_STATUS,
+        "profile_reused": True,
+        "profile_recreated": False,
         "cookies_exported": False,
         "system_proxy_changed": False,
         "tun_changed": False,
@@ -658,80 +730,52 @@ def main() -> int:
             time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
             verify_proxy_attribution(browser, sidecar.mixed_port, run_key)
             report["browser_proxy_attribution"] = "CONTROL_AND_BROWSER_EGRESS_HMAC_MATCH"
-            preflight_states: dict[str, str] = {}
-            preflight_diagnostics: dict[str, dict[str, Any]] = {}
-            for service in ("gpt", "gemini"):
-                browser.navigate(str(SERVICE_SPECS[service]["url"]))
-                preflight_states[service] = wait_for_service_state(browser, service)
-                preflight_diagnostics[service] = safe_page_diagnostics(browser, service)
-            missing_login = [
-                service for service, state in preflight_states.items()
-                if state == "LOGIN_REQUIRED"
-            ]
-            if missing_login:
-                browser.navigate(str(SERVICE_SPECS[missing_login[0]]["url"]))
-                report["status"] = "STOP_BROWSER_LOGIN_REQUIRED"
-                report["login_required_services"] = missing_login
-                report["preflight_diagnostics"] = preflight_diagnostics
-                time.sleep(max(0.0, args.login_wait))
-            elif any(
-                state in {"CHALLENGE", "RATE_LIMIT", "AUTOMATION_UNAVAILABLE"}
-                for state in preflight_states.values()
-            ):
-                report["status"] = "STOP_BROWSER_PREFLIGHT_UNAVAILABLE"
-                report["preflight_states"] = preflight_states
-                report["preflight_diagnostics"] = preflight_diagnostics
-                unavailable = next(
-                    service for service, state in preflight_states.items()
-                    if state in {"CHALLENGE", "RATE_LIMIT", "AUTOMATION_UNAVAILABLE"}
+            stop_service: set[str] = set()
+            session_risks = {"gpt": 0, "gemini": 0}
+            for proxy in proxies:
+                name = str(proxy["name"])
+                node_id = identities[name]
+                if not skill.select_probe_node(sidecar.controller_port, name):
+                    raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+                time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
+                egress_hash = verify_proxy_attribution(
+                    browser, sidecar.mixed_port, run_key
                 )
-                browser.navigate(str(SERVICE_SPECS[unavailable]["url"]))
-                time.sleep(max(0.0, args.login_wait))
-            else:
-                stop_service: set[str] = set()
-                for proxy in proxies:
-                    name = str(proxy["name"])
-                    node_id = identities[name]
-                    if not skill.select_probe_node(sidecar.controller_port, name):
-                        raise ProbeError("NODE_SWITCH_UNCONFIRMED")
-                    time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
-                    egress_hash = verify_proxy_attribution(
-                        browser, sidecar.mixed_port, run_key
-                    )
-                    for service in ("gpt", "gemini"):
-                        if service in stop_service:
-                            continue
-                        if service == "gemini" and name in set(args.skip_gemini_node):
-                            continue
-                        nonce = f"{service.upper()}_NODE_TEST_{secrets.token_hex(8)}"
+                for service in ("gpt", "gemini"):
+                    if service in stop_service:
+                        continue
+                    if service == "gemini" and name in set(args.skip_gemini_node):
+                        continue
+                    nonce = f"{service.upper()}_NODE_TEST_{secrets.token_hex(8)}"
+                    try:
                         outcome = run_generation(
                             browser, service, nonce, args.response_timeout
                         )
-                        result, error = map_outcome(outcome)
-                        report["results"].append(
-                            {
-                                "service": service,
-                                "exact_node_id": node_id,
-                                "exact_node_name": name,
-                                "source_snapshot_id": manifest["source_snapshot_id"],
-                                "source_hash": manifest["source_hash"],
-                                "tested_at": iso_now(),
-                                "probe_method_version": METHOD_VERSION,
-                                "nonce_hmac": hmac_prefix(run_key, nonce),
-                                "egress_hmac": egress_hash,
-                                "result": result,
-                                "error_category": error,
-                            }
-                        )
-                        if error in {
-                            "UNKNOWN_ACCOUNT_RATE_LIMIT",
-                            "UNKNOWN_LOGIN_REQUIRED",
-                            "UNKNOWN_CHALLENGE",
-                            "UNKNOWN_AUTOMATION_UNAVAILABLE",
-                        }:
-                            stop_service.add(service)
-                    time.sleep(max(0.0, args.node_interval))
-                report["status"] = "COMPLETE"
+                    except (OSError, ProbeError, TimeoutError):
+                        outcome = "TRANSPORT_FAILURE"
+                    result, error, session_risks[service], stop = classify_node_outcome(
+                        outcome, session_risks[service]
+                    )
+                    report["results"].append(
+                        {
+                            "service": service,
+                            "exact_node_id": node_id,
+                            "exact_node_name": name,
+                            "source_snapshot_id": manifest["source_snapshot_id"],
+                            "source_hash": manifest["source_hash"],
+                            "tested_at": iso_now(),
+                            "probe_method_version": METHOD_VERSION,
+                            "nonce_hmac": hmac_prefix(run_key, nonce),
+                            "egress_hmac": egress_hash,
+                            "result": result,
+                            "error_category": error,
+                        }
+                    )
+                    if stop:
+                        stop_service.add(service)
+                time.sleep(max(0.0, args.node_interval))
+            report["stopped_services"] = sorted(stop_service)
+            report["status"] = "COMPLETE"
     report["production_fingerprint_preserved"] = True
     report["completed_at"] = iso_now()
     atomic_json(args.output.resolve(), report)

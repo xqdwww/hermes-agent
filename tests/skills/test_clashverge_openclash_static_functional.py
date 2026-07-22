@@ -90,10 +90,11 @@ def test_browser_proxy_attribution_requires_matching_egress(monkeypatch: pytest.
         ("PASS", "PASS", None),
         ("NO_NEW_ANSWER", "FAIL", "FAIL_NO_NEW_ANSWER"),
         ("UNSUPPORTED_REGION", "FAIL", "FAIL_UNSUPPORTED_REGION"),
-        ("LOGIN_REQUIRED", "UNKNOWN", "UNKNOWN_LOGIN_REQUIRED"),
+        ("LOGIN_REQUIRED", "FAIL", "FAIL_NODE_SESSION_REAUTH"),
         ("CHALLENGE", "UNKNOWN", "UNKNOWN_CHALLENGE"),
         ("RATE_LIMIT", "UNKNOWN", "UNKNOWN_ACCOUNT_RATE_LIMIT"),
         ("AUTOMATION_UNAVAILABLE", "UNKNOWN", "UNKNOWN_AUTOMATION_UNAVAILABLE"),
+        ("TRANSPORT_FAILURE", "FAIL", "FAIL_TRANSPORT"),
     ],
 )
 def test_browser_outcomes_are_not_promoted(raw: str, result: str, error: str | None) -> None:
@@ -105,6 +106,69 @@ def test_browser_report_rejects_cookie_and_raw_nonce() -> None:
         BROWSER.validate_safe_report({"nested": {"cookie": "x"}})
     with pytest.raises(BROWSER.ProbeError, match="RAW_NONCE"):
         BROWSER.validate_safe_report({"value": "GPT_NODE_TEST_abc"})
+
+
+def baseline_proof() -> dict:
+    return {
+        "schema_version": 1,
+        "status": BROWSER.BASELINE_SESSION_STATUS,
+        "source_snapshot_id": "snapshot-x",
+        "source_hash": "a" * 64,
+        "browser_profile_reused": True,
+        "browser_profile_recreated": False,
+        "cookies_exported": False,
+        "credentials_accessed": False,
+        "system_proxy_changed": False,
+        "tun_changed": False,
+        "sidecar_started": False,
+    }
+
+
+def test_baseline_session_proof_is_snapshot_bound_and_non_sensitive(tmp_path: Path) -> None:
+    path = tmp_path / "proof.json"
+    path.write_text(json.dumps(baseline_proof()), encoding="utf-8")
+    loaded = BROWSER.load_baseline_session_proof(
+        path, source_snapshot_id="snapshot-x", source_hash="a" * 64
+    )
+    assert loaded["status"] == BROWSER.BASELINE_SESSION_STATUS
+    altered = baseline_proof()
+    altered["source_hash"] = "b" * 64
+    path.write_text(json.dumps(altered), encoding="utf-8")
+    with pytest.raises(BROWSER.ProbeError, match="PROOF_MISMATCH"):
+        BROWSER.load_baseline_session_proof(
+            path, source_snapshot_id="snapshot-x", source_hash="a" * 64
+        )
+
+
+def test_browser_probe_requires_existing_private_profile(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    with pytest.raises(BROWSER.ProbeError, match="PROFILE_MISSING"):
+        BROWSER.validate_existing_profile(profile)
+    profile.mkdir(mode=0o700)
+    (profile / "Local State").write_text("", encoding="utf-8")
+    BROWSER.validate_existing_profile(profile)
+    profile.chmod(0o755)
+    with pytest.raises(BROWSER.ProbeError, match="PERMISSIONS_NOT_PRIVATE"):
+        BROWSER.validate_existing_profile(profile)
+
+
+def test_single_node_restriction_or_reauth_does_not_stop_service() -> None:
+    assert BROWSER.classify_node_outcome("UNSUPPORTED_REGION", 0) == (
+        "FAIL", "FAIL_UNSUPPORTED_REGION", 0, False
+    )
+    assert BROWSER.classify_node_outcome("LOGIN_REQUIRED", 0) == (
+        "FAIL", "FAIL_NODE_SESSION_REAUTH", 1, False
+    )
+
+
+def test_repeated_session_symptoms_stop_only_affected_service() -> None:
+    first = BROWSER.classify_node_outcome("CHALLENGE", 0)
+    assert first == ("UNKNOWN", "UNKNOWN_CHALLENGE", 1, False)
+    second = BROWSER.classify_node_outcome("LOGIN_REQUIRED", first[2])
+    assert second == ("UNKNOWN", "UNKNOWN_SESSION_INVALIDATED", 2, True)
+    assert BROWSER.classify_node_outcome("RATE_LIMIT", 0) == (
+        "UNKNOWN", "UNKNOWN_ACCOUNT_RATE_LIMIT", 0, True
+    )
 
 
 def test_disney_current_session_level_schema() -> None:
@@ -177,6 +241,14 @@ def test_functional_pass_and_fail_apply_by_exact_snapshot_identity() -> None:
     mismatch["exact_node_id"] = "other"
     report = SKILL.apply_functional_results_to_report(base_report(), [mismatch], manifest())
     assert report["functional_results"]["applied"] == 0
+
+
+def test_unsupported_region_keeps_specific_definitive_failure() -> None:
+    failed = functional("FAIL")
+    failed["error_category"] = "FAIL_UNSUPPORTED_REGION"
+    report = SKILL.apply_functional_results_to_report(base_report(), [failed], manifest())
+    result = report["nodes"][0]["services"]["gemini"]
+    assert result["final_result"] == "DEFINITIVE_AUTOMATED_FAIL_UNSUPPORTED_REGION"
 
 
 def test_manual_fail_conflicts_with_automated_pass_and_excludes_candidate() -> None:
