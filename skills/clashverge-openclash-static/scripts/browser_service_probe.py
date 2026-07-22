@@ -355,6 +355,22 @@ class ChromeProbe:
 """ % json.dumps(selectors)
         return bool(self.evaluate(expression))
 
+    def click_selector(self, selectors: list[str]) -> bool:
+        expression = """
+(() => {
+  const selectors = %s;
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    if (element && element.offsetParent !== null && !element.disabled) {
+      element.click();
+      return true;
+    }
+  }
+  return false;
+})()
+""" % json.dumps(selectors)
+        return bool(self.evaluate(expression))
+
     def insert_text(self, text: str) -> None:
         if self.cdp is None:
             raise ProbeError("BROWSER_NOT_CONNECTED")
@@ -383,6 +399,11 @@ SERVICE_SPECS = {
         "inputs": ["#prompt-textarea", "textarea", "div[contenteditable='true']"],
         "answers": "[data-message-author-role='assistant']",
         "stop": "[data-testid='stop-button']",
+        "send": [
+            "button[data-testid='send-button']",
+            "button[aria-label*='Send']",
+            "button[aria-label*='send']",
+        ],
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
@@ -395,6 +416,11 @@ SERVICE_SPECS = {
         ],
         "answers": "model-response, .model-response-text, [data-test-id='model-response']",
         "stop": "button[aria-label*='Stop'], button[aria-label*='stop']",
+        "send": [
+            "button[aria-label*='Send']",
+            "button[aria-label*='send']",
+            "button.send-button",
+        ],
     },
 }
 
@@ -589,7 +615,8 @@ def run_generation(
     if not browser.focus_selector(list(spec["inputs"])):
         return "AUTOMATION_UNAVAILABLE"
     browser.insert_text(f"只回复：{nonce}")
-    browser.press_enter()
+    if not browser.click_selector(list(spec["send"])):
+        browser.press_enter()
     return wait_for_answer(browser, service, nonce, baseline, timeout_seconds)
 
 
@@ -678,6 +705,7 @@ def main() -> int:
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     parser.add_argument("--node-interval", type=float, default=DEFAULT_NODE_INTERVAL_SECONDS)
     parser.add_argument("--response-timeout", type=float, default=DEFAULT_RESPONSE_TIMEOUT_SECONDS)
+    parser.add_argument("--max-nodes", type=int)
     parser.add_argument("--skip-gemini-node", action="append", default=[])
     args = parser.parse_args()
 
@@ -691,6 +719,10 @@ def main() -> int:
     validate_existing_profile(args.profile_dir.resolve())
     data = skill.load_yaml(payload_path)
     proxies = skill.static_proxy_objects(data)
+    if args.max_nodes is not None:
+        if args.max_nodes < 1:
+            raise ProbeError("MAX_NODES_INVALID")
+        proxies = proxies[:args.max_nodes]
     identities = {
         str(item["exact_node_name"]): str(item["exact_node_id"])
         for item in manifest["nodes"]
@@ -721,6 +753,8 @@ def main() -> int:
         "production_fingerprint_preserved": False,
         "browser_proxy_attribution": "PENDING",
         "status": "RUNNING",
+        "snapshot_node_count": len(manifest["nodes"]),
+        "selected_node_count": len(proxies),
         "results": [],
     }
     with tempfile.TemporaryDirectory(prefix="browser-service-sidecar-") as temporary:

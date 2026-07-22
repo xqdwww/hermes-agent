@@ -38,6 +38,42 @@ def test_gemini_current_rich_textarea_selectors_are_supported() -> None:
     selectors = BROWSER.SERVICE_SPECS["gemini"]["inputs"]
     assert "rich-textarea div[contenteditable='true']" in selectors
     assert ".ql-editor[contenteditable='true']" in selectors
+    assert "button[aria-label*='Send']" in BROWSER.SERVICE_SPECS["gemini"]["send"]
+
+
+def test_generation_clicks_visible_send_button_before_enter() -> None:
+    class FakeBrowser:
+        entered = False
+        clicked = False
+
+        def navigate(self, _url: str) -> None:
+            return None
+
+        def evaluate(self, expression: str):
+            return "READY" if "hasInput" in expression else 0
+
+        def focus_selector(self, _selectors: list[str]) -> bool:
+            return True
+
+        def insert_text(self, _text: str) -> None:
+            return None
+
+        def click_selector(self, _selectors: list[str]) -> bool:
+            self.clicked = True
+            return True
+
+        def press_enter(self) -> None:
+            self.entered = True
+
+    browser = FakeBrowser()
+    original = BROWSER.wait_for_answer
+    try:
+        BROWSER.wait_for_answer = lambda *_args: "PASS"
+        assert BROWSER.run_generation(browser, "gpt", "safe-nonce", 1) == "PASS"
+    finally:
+        BROWSER.wait_for_answer = original
+    assert browser.clicked is True
+    assert browser.entered is False
 
 
 def test_safe_page_diagnostics_never_requests_dom_text_values() -> None:
