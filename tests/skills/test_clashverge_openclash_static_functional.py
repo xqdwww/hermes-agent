@@ -40,6 +40,41 @@ def test_gemini_current_rich_textarea_selectors_are_supported() -> None:
     assert ".ql-editor[contenteditable='true']" in selectors
 
 
+def test_safe_page_diagnostics_never_requests_dom_text_values() -> None:
+    class FakeBrowser:
+        expression = ""
+
+        def evaluate(self, expression: str):
+            self.expression = expression
+            return {"origin": "https://gemini.google.com", "path": "/app"}
+
+    browser = FakeBrowser()
+    result = BROWSER.safe_page_diagnostics(browser, "gemini")
+    assert result["origin"] == "https://gemini.google.com"
+    assert "innerText:" not in browser.expression
+    assert "outerHTML" not in browser.expression
+
+
+def test_login_marker_has_priority_over_anonymous_prompt_box() -> None:
+    class FakeBrowser:
+        expression = ""
+
+        def evaluate(self, expression: str):
+            self.expression = expression
+            return "LOGIN_REQUIRED"
+
+    browser = FakeBrowser()
+    assert BROWSER.safe_page_state(browser, "gpt") == "LOGIN_REQUIRED"
+    assert "&& !hasInput" not in browser.expression
+
+
+def test_spa_hydration_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    states = iter(["AUTOMATION_UNAVAILABLE", "AUTOMATION_UNAVAILABLE", "READY"])
+    monkeypatch.setattr(BROWSER, "safe_page_state", lambda *_args: next(states))
+    monkeypatch.setattr(BROWSER.time, "sleep", lambda _seconds: None)
+    assert BROWSER.wait_for_service_state(object(), "gemini", 1) == "READY"
+
+
 def test_browser_proxy_attribution_requires_matching_egress(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(BROWSER, "control_exit_ip", lambda _port: "203.0.113.1")
     monkeypatch.setattr(BROWSER, "browser_exit_ip", lambda _browser: "203.0.113.1")

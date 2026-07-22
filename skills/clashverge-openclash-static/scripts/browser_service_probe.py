@@ -368,7 +368,7 @@ def safe_page_state(browser: ChromeProbe, service: str) -> str:
     const element = document.querySelector(selector);
     return Boolean(element && element.offsetParent !== null);
   });
-  if (url.includes('accounts.google.com') || url.includes('/auth') || url.includes('/login') || /(sign in|log in|登录|登入)/.test(text) && !hasInput) return 'LOGIN_REQUIRED';
+  if (url.includes('accounts.google.com') || url.includes('/auth') || url.includes('/login') || /(sign in|log in|登录|登入)/.test(text)) return 'LOGIN_REQUIRED';
   if (/captcha|verify you are human|cloudflare|unusual traffic|验证您是真人|异常流量/.test(text)) return 'CHALLENGE';
   if (/too many requests|rate limit|try again later|请求过多|稍后重试/.test(text)) return 'RATE_LIMIT';
   if (/unsupported country|not available in your country|not available in your region|地区目前不支持|所在地区不可用/.test(text)) return 'UNSUPPORTED_REGION';
@@ -376,6 +376,49 @@ def safe_page_state(browser: ChromeProbe, service: str) -> str:
 })()
 """ % json.dumps(spec["inputs"])
     return str(browser.evaluate(expression))
+
+
+def wait_for_service_state(
+    browser: ChromeProbe, service: str, timeout_seconds: float = 15.0
+) -> str:
+    """Allow SPA hydration, but never wait through an explicit terminal state."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        state = safe_page_state(browser, service)
+        if state != "AUTOMATION_UNAVAILABLE" or time.monotonic() >= deadline:
+            return state
+        time.sleep(0.25)
+
+
+def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
+    """Return structural booleans and counts, never DOM text or auth state."""
+    spec = SERVICE_SPECS[service]
+    expression = """
+(() => {
+  const text = (document.body?.innerText || '').toLowerCase();
+  const selectors = %s;
+  const counts = {};
+  const visible = {};
+  for (const selector of selectors) {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    counts[selector] = nodes.length;
+    visible[selector] = nodes.filter(node => node.offsetParent !== null).length;
+  }
+  return {
+    origin: location.origin,
+    path: location.pathname,
+    ready_state: document.readyState,
+    selector_counts: counts,
+    visible_selector_counts: visible,
+    iframe_count: document.querySelectorAll('iframe').length,
+    has_sign_in_marker: /(sign in|log in|登录|登入)/.test(text),
+    has_challenge_marker: /captcha|verify you are human|cloudflare|unusual traffic|验证您是真人|异常流量/.test(text),
+    has_unsupported_marker: /unsupported country|not available in your country|not available in your region|地区目前不支持|所在地区不可用/.test(text)
+  };
+})()
+""" % json.dumps(spec["inputs"])
+    value = browser.evaluate(expression)
+    return value if isinstance(value, dict) else {"diagnostic": "UNAVAILABLE"}
 
 
 def browser_exit_ip(browser: ChromeProbe) -> str:
@@ -616,9 +659,11 @@ def main() -> int:
             verify_proxy_attribution(browser, sidecar.mixed_port, run_key)
             report["browser_proxy_attribution"] = "CONTROL_AND_BROWSER_EGRESS_HMAC_MATCH"
             preflight_states: dict[str, str] = {}
+            preflight_diagnostics: dict[str, dict[str, Any]] = {}
             for service in ("gpt", "gemini"):
                 browser.navigate(str(SERVICE_SPECS[service]["url"]))
-                preflight_states[service] = safe_page_state(browser, service)
+                preflight_states[service] = wait_for_service_state(browser, service)
+                preflight_diagnostics[service] = safe_page_diagnostics(browser, service)
             missing_login = [
                 service for service, state in preflight_states.items()
                 if state == "LOGIN_REQUIRED"
@@ -627,6 +672,7 @@ def main() -> int:
                 browser.navigate(str(SERVICE_SPECS[missing_login[0]]["url"]))
                 report["status"] = "STOP_BROWSER_LOGIN_REQUIRED"
                 report["login_required_services"] = missing_login
+                report["preflight_diagnostics"] = preflight_diagnostics
                 time.sleep(max(0.0, args.login_wait))
             elif any(
                 state in {"CHALLENGE", "RATE_LIMIT", "AUTOMATION_UNAVAILABLE"}
@@ -634,6 +680,7 @@ def main() -> int:
             ):
                 report["status"] = "STOP_BROWSER_PREFLIGHT_UNAVAILABLE"
                 report["preflight_states"] = preflight_states
+                report["preflight_diagnostics"] = preflight_diagnostics
                 unavailable = next(
                     service for service, state in preflight_states.items()
                     if state in {"CHALLENGE", "RATE_LIMIT", "AUTOMATION_UNAVAILABLE"}
