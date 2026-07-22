@@ -162,29 +162,36 @@ def inspect_tool(skill: Any, host: str) -> dict[str, Any]:
     }
 
 
-def control_geo(proxy_port: int) -> tuple[str, str]:
-    completed = subprocess.run(
-        [
-            "curl", "--proxy", f"http://127.0.0.1:{proxy_port}",
-            "--ipv4",
-            "--connect-timeout", "4", "--max-time", "12", "--silent", "--show-error",
-            "https://ipinfo.io/json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
-    try:
-        payload = json.loads(completed.stdout)
-        ip = str(payload["ip"])
-        country = str(payload.get("country") or "UNKNOWN")
-        ipaddress.ip_address(ip)
-    except (KeyError, ValueError, json.JSONDecodeError) as exc:
-        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED") from exc
-    return ip, country
+def control_geo(proxy_port: int, *, sleep_fn: Any = time.sleep) -> tuple[str, str]:
+    last_error: BaseException | None = None
+    for attempt in range(2):
+        try:
+            completed = subprocess.run(
+                [
+                    "curl", "--proxy", f"http://127.0.0.1:{proxy_port}",
+                    "--ipv4", "--connect-timeout", "4", "--max-time", "12",
+                    "--silent", "--show-error", "https://ipinfo.io/json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise ProbeError("CONTROL_GEO_TRANSPORT")
+            payload = json.loads(completed.stdout)
+            ip = str(payload["ip"])
+            country = str(payload.get("country") or "UNKNOWN")
+            ipaddress.ip_address(ip)
+            return ip, country
+        except (
+            KeyError, ValueError, json.JSONDecodeError, OSError,
+            subprocess.TimeoutExpired, ProbeError,
+        ) as exc:
+            last_error = exc
+            if attempt == 0:
+                sleep_fn(1)
+    raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED") from last_error
 
 
 def run_regioncheck(skill: Any, host: str, timeout_seconds: int) -> tuple[int, str]:
@@ -288,6 +295,13 @@ def main() -> int:
                 exit_hmac = hmac_prefix(run_key, control_ip)
                 returncode, output = run_regioncheck(skill, args.host, args.timeout)
                 raw_values = extract_service_values(output)
+                if returncode != 0 or (
+                    raw_values
+                    and all("Network Connection" in raw for raw in raw_values.values())
+                ):
+                    time.sleep(1)
+                    returncode, output = run_regioncheck(skill, args.host, args.timeout)
+                    raw_values = extract_service_values(output)
                 if returncode == 124:
                     raw_values = {service: "Failed (Network Connection)" for service in SERVICE_LABELS}
                 elif not all(service in raw_values for service in SERVICE_LABELS):

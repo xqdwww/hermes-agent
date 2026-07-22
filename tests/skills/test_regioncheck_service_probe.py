@@ -130,5 +130,22 @@ def test_control_geo_is_forced_to_same_ipv4_family_as_regioncheck(monkeypatch) -
         return Completed()
 
     monkeypatch.setattr(RRC.subprocess, "run", fake_run)
-    assert RRC.control_geo(1234) == ("203.0.113.8", "JP")
+    assert RRC.control_geo(1234, sleep_fn=lambda _seconds: None) == ("203.0.113.8", "JP")
     assert "--ipv4" in observed["command"]
+
+
+def test_control_geo_retries_once_then_succeeds(monkeypatch) -> None:
+    calls = []
+
+    class Completed:
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    responses = iter([
+        Completed(7, ""),
+        Completed(0, '{"ip":"203.0.113.8","country":"JP"}'),
+    ])
+    monkeypatch.setattr(RRC.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    assert RRC.control_geo(1234, sleep_fn=calls.append) == ("203.0.113.8", "JP")
+    assert calls == [1]
