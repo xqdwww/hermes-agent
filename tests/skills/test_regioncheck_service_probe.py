@@ -179,3 +179,43 @@ def test_node_transport_failure_records_all_services_without_ip() -> None:
     assert {item["result"] for item in report["results"]} == {"FAIL_TRANSPORT"}
     assert {item["exit_ip_hmac"] for item in report["results"]} == {""}
     assert {item["exit_country"] for item in report["results"]} == {"UNKNOWN"}
+
+
+def test_regioncheck_values_are_completed_without_service_reuse() -> None:
+    output = "ChatGPT: Yes\nDisney+: No (IP Banned By Disney+ 1)\n"
+
+    assert RRC.normalize_regioncheck_values(0, output) == {
+        "gpt": "Yes",
+        "gemini": "Failed (Error: Unknown)",
+        "disney": "No (IP Banned By Disney+ 1)",
+    }
+    assert RRC.normalize_regioncheck_values(124, "") == {
+        "gpt": "Failed (Network Connection)",
+        "gemini": "Failed (Network Connection)",
+        "disney": "Failed (Network Connection)",
+    }
+
+
+def test_regioncheck_transport_retry_reruns_once(monkeypatch) -> None:
+    calls = []
+    responses = iter([
+        (1, "ChatGPT: Failed (Network Connection)\n"),
+        (0, "ChatGPT: Yes\nGoogle Gemini: No\nDisney+: Yes (Region: JP)\n"),
+    ])
+
+    def fake_run(_skill, _host, _timeout):
+        calls.append("run")
+        return next(responses)
+
+    monkeypatch.setattr(RRC, "run_regioncheck", fake_run)
+    code, _output, values = RRC.run_regioncheck_with_transport_retry(
+        object(), "router", 30, sleep_fn=lambda _seconds: calls.append("sleep")
+    )
+
+    assert code == 0
+    assert calls == ["run", "sleep", "run"]
+    assert values == {
+        "gpt": "Yes",
+        "gemini": "No",
+        "disney": "Yes (Region: JP)",
+    }

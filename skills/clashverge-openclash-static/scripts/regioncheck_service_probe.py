@@ -246,6 +246,38 @@ def run_regioncheck(skill: Any, host: str, timeout_seconds: int) -> tuple[int, s
     return completed.returncode, (completed.stdout or "") + "\n" + (completed.stderr or "")
 
 
+def normalize_regioncheck_values(
+    returncode: int,
+    output: str,
+) -> dict[str, str]:
+    raw_values = extract_service_values(output)
+    if returncode == 124:
+        return {service: "Failed (Network Connection)" for service in SERVICE_LABELS}
+    if not all(service in raw_values for service in SERVICE_LABELS):
+        return {
+            service: raw_values.get(service, "Failed (Error: Unknown)")
+            for service in SERVICE_LABELS
+        }
+    return raw_values
+
+
+def run_regioncheck_with_transport_retry(
+    skill: Any,
+    host: str,
+    timeout_seconds: int,
+    *,
+    sleep_fn: Any = time.sleep,
+) -> tuple[int, str, dict[str, str]]:
+    returncode, output = run_regioncheck(skill, host, timeout_seconds)
+    raw_values = extract_service_values(output)
+    if returncode != 0 or (
+        raw_values and all("Network Connection" in raw for raw in raw_values.values())
+    ):
+        sleep_fn(1)
+        returncode, output = run_regioncheck(skill, host, timeout_seconds)
+    return returncode, output, normalize_regioncheck_values(returncode, output)
+
+
 def safe_atomic_json(path: Path, payload: dict[str, Any]) -> None:
     serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if re.search(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])", serialized):
@@ -348,25 +380,23 @@ def main() -> int:
                     time.sleep(args.node_interval)
                     continue
                 exit_hmac = hmac_prefix(run_key, control_ip)
-                returncode, output = run_regioncheck(skill, args.host, args.timeout)
-                raw_values = extract_service_values(output)
-                if returncode != 0 or (
-                    raw_values
-                    and all("Network Connection" in raw for raw in raw_values.values())
-                ):
-                    time.sleep(1)
-                    returncode, output = run_regioncheck(skill, args.host, args.timeout)
-                    raw_values = extract_service_values(output)
-                if returncode == 124:
-                    raw_values = {service: "Failed (Network Connection)" for service in SERVICE_LABELS}
-                elif not all(service in raw_values for service in SERVICE_LABELS):
-                    raw_values = {
-                        service: raw_values.get(service, "Failed (Error: Unknown)")
-                        for service in SERVICE_LABELS
-                    }
+                returncode, output, raw_values = run_regioncheck_with_transport_retry(
+                    skill, args.host, args.timeout
+                )
                 masked = extract_masked_ip(output)
                 if returncode != 124 and not masked_ip_matches(control_ip, masked):
-                    raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
+                    skill.controller_json_request(
+                        sidecar.controller_port, "/connections", method="DELETE"
+                    )
+                    time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
+                    control_ip, country = control_geo(sidecar.mixed_port)
+                    exit_hmac = hmac_prefix(run_key, control_ip)
+                    returncode, output, raw_values = run_regioncheck_with_transport_retry(
+                        skill, args.host, args.timeout
+                    )
+                    masked = extract_masked_ip(output)
+                    if returncode != 124 and not masked_ip_matches(control_ip, masked):
+                        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
                 append_service_results(
                     report,
                     manifest=manifest,
