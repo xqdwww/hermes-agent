@@ -76,6 +76,22 @@ def test_generation_clicks_visible_send_button_before_enter() -> None:
     assert browser.entered is False
 
 
+def test_browser_click_uses_cdp_mouse_events() -> None:
+    class FakeCdp:
+        calls = []
+
+        def call(self, method: str, payload: dict) -> None:
+            self.calls.append((method, payload))
+
+    browser = object.__new__(BROWSER.ChromeProbe)
+    browser.cdp = FakeCdp()
+    browser.evaluate = lambda _expression: {"x": 12.5, "y": 25.0}
+    assert browser.click_selector(["button[data-testid='send-button']"]) is True
+    assert [payload["type"] for _, payload in browser.cdp.calls] == [
+        "mouseMoved", "mousePressed", "mouseReleased"
+    ]
+
+
 def test_safe_page_diagnostics_never_requests_dom_text_values() -> None:
     class FakeBrowser:
         expression = ""

@@ -362,14 +362,29 @@ class ChromeProbe:
   for (const selector of selectors) {
     const element = document.querySelector(selector);
     if (element && element.offsetParent !== null && !element.disabled) {
-      element.click();
-      return true;
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+      }
     }
   }
-  return false;
+  return null;
 })()
 """ % json.dumps(selectors)
-        return bool(self.evaluate(expression))
+        point = self.evaluate(expression)
+        if not isinstance(point, dict) or self.cdp is None:
+            return False
+        coordinates = {"x": float(point["x"]), "y": float(point["y"])}
+        self.cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", **coordinates})
+        self.cdp.call(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "button": "left", "clickCount": 1, **coordinates},
+        )
+        self.cdp.call(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "button": "left", "clickCount": 1, **coordinates},
+        )
+        return True
 
     def insert_text(self, text: str) -> None:
         if self.cdp is None:
