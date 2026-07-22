@@ -666,8 +666,7 @@ def run_generation(
     if not browser.click_selector(list(spec["inputs"])):
         return "AUTOMATION_UNAVAILABLE"
     browser.type_text(f"Reply only: {nonce}")
-    if not browser.click_selector(list(spec["send"])):
-        browser.press_enter()
+    browser.press_enter()
     return wait_for_answer(browser, service, nonce, baseline, timeout_seconds)
 
 

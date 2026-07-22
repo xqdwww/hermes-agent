@@ -41,7 +41,7 @@ def test_gemini_current_rich_textarea_selectors_are_supported() -> None:
     assert "button[aria-label*='Send']" in BROWSER.SERVICE_SPECS["gemini"]["send"]
 
 
-def test_generation_clicks_visible_send_button_before_enter() -> None:
+def test_generation_uses_trusted_typing_and_enter() -> None:
     class FakeBrowser:
         entered = False
         clicked = False
@@ -70,7 +70,7 @@ def test_generation_clicks_visible_send_button_before_enter() -> None:
     finally:
         BROWSER.wait_for_answer = original
     assert browser.clicked is True
-    assert browser.entered is False
+    assert browser.entered is True
 
 
 def test_browser_click_uses_cdp_mouse_events() -> None:
