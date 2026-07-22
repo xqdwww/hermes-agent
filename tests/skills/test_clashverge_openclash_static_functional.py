@@ -342,6 +342,77 @@ def test_manual_fail_conflicts_with_automated_pass_and_excludes_candidate() -> N
     assert result["evidence_conflict"] is True
 
 
+def test_gemini_manual_pass_admits_screen_negative_as_false_negative() -> None:
+    screened = functional("SCREEN_NEGATIVE")
+    report = SKILL.apply_functional_results_to_report(base_report(), [screened], manifest())
+    manual = [{
+        "service": "gemini", "node": "node-a", "exact_node_id": "id-a",
+        "source_snapshot_id": "snapshot-x", "tested_at": "2026-07-22T10:02:00+08:00",
+        "method": next(iter(SKILL.DEFINITIVE_MANUAL_METHODS)), "result": "PASS",
+    }]
+    report = SKILL.apply_manual_results_to_report(report, manual, manifest())
+    result = report["nodes"][0]["services"]["gemini"]
+    assert result["final_result"] == "PASS_WITH_SCREEN_FALSE_NEGATIVE"
+    assert result["screen_false_negative"] is True
+
+
+def test_gemini_manual_fail_conflicts_with_screen_pass() -> None:
+    screened = functional("SCREEN_PASS")
+    report = SKILL.apply_functional_results_to_report(base_report(), [screened], manifest())
+    manual = [{
+        "service": "gemini", "node": "node-a", "exact_node_id": "id-a",
+        "source_snapshot_id": "snapshot-x", "tested_at": "2026-07-22T10:02:00+08:00",
+        "method": next(iter(SKILL.DEFINITIVE_MANUAL_METHODS)), "result": "FAIL",
+    }]
+    report = SKILL.apply_manual_results_to_report(report, manual, manifest())
+    result = report["nodes"][0]["services"]["gemini"]
+    assert result["final_result"] == "EVIDENCE_CONFLICT"
+
+
+def test_gpt_manual_pass_does_not_override_transport_failure() -> None:
+    screened = functional("FAIL_TRANSPORT", service="gpt")
+    report = SKILL.apply_functional_results_to_report(base_report(), [screened], manifest())
+    manual = [{
+        "service": "gpt", "node": "node-a", "exact_node_id": "id-a",
+        "source_snapshot_id": "snapshot-x", "tested_at": "2026-07-22T10:02:00+08:00",
+        "method": next(iter(SKILL.DEFINITIVE_MANUAL_METHODS)), "result": "PASS",
+    }]
+    report = SKILL.apply_manual_results_to_report(report, manual, manifest())
+    assert report["nodes"][0]["services"]["gpt"]["final_result"] == "FAIL_TRANSPORT"
+
+
+def test_screen_and_false_negative_results_enter_current_candidate_groups() -> None:
+    report = base_report()
+    report["nodes"][0]["exact_node_id"] = "id-a"
+    report["nodes"][0]["services"]["gpt"]["final_result"] = "SCREEN_PASS"
+    report["nodes"][0]["services"]["gemini"]["final_result"] = (
+        "PASS_WITH_SCREEN_FALSE_NEGATIVE"
+    )
+    report["nodes"][0]["services"]["disney"]["final_result"] = "PASS_SUPPORTED_REGION"
+    selections, _, _ = SKILL.merge_lkg_results(
+        ["node-a"], {"node-a": 0}, {"nodes": {}}, report["nodes"],
+        probable_recapture=False, observed_at="2026-07-22T10:03:00+08:00",
+    )
+    assert selections["gpt"]["automatic"] == ["node-a"]
+    assert selections["gemini"]["automatic"] == ["node-a"]
+    assert selections["disney"]["automatic"] == ["node-a"]
+
+
+def test_disney_full_chain_outranks_newer_screening_result() -> None:
+    full_chain = functional("PASS", service="disney")
+    full_chain["method"] = "disney-full-chain-v2"
+    full_chain["raw_result"] = "PASS_SUPPORTED_REGION"
+    screen = functional("SCREEN_PASS", service="disney")
+    screen["tested_at"] = "2026-07-22T10:02:00+08:00"
+    screen["method"] = "regionrestrictioncheck-sidecar-v1"
+    report = SKILL.apply_functional_results_to_report(
+        base_report(), [full_chain, screen], manifest()
+    )
+    result = report["nodes"][0]["services"]["disney"]
+    assert result["final_result"] == "PASS_SUPPORTED_REGION"
+    assert result["functional_result"]["method"] == "disney-full-chain-v2"
+
+
 def test_functional_loader_rejects_nested_sensitive_content(tmp_path: Path) -> None:
     path = tmp_path / "bad.json"
     path.write_text(json.dumps({

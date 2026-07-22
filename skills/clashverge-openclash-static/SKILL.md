@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.3.1
+version: 2.4.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,16 +37,13 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the only release-version source for this
-Skill. Version 2.3.1 keeps the 2.2 immutable source and evidence contract and adds
-a dedicated persistent-browser bridge for logged-in GPT/Gemini generation, fixed
-loopback proxy attribution through the candidate sidecar, the complete Disney
-devices/token/GraphQL/redirect probe with current session-level schema, and
-snapshot-bound functional-result reconciliation. Browser login and persistence
-are established first on the normal Mac baseline network; the candidate sidecar
-is used only for node-attributed functional probes. A single node restriction or
-reauth response is a node result and does not invalidate the baseline session.
-No browser authentication data is exported. Production activation remains a
-separate transaction.
+Skill. Version 2.4.0 makes the router-installed RegionRestrictionCheck the formal
+GPT/Gemini/Disney screening backend. Hermes freezes the source, orchestrates the
+external tool through the isolated candidate sidecar, fuses snapshot-bound manual
+and full-chain evidence, builds the candidate, and keeps activation as a separate
+transaction. The browser probe remains historical experimental code and is not a
+candidate or activation gate. Do not add Playwright or operate the dedicated
+logged-in profile from this Skill.
 
 ## Accepted policy
 
@@ -79,9 +76,9 @@ Rules:
 - Gemini ordering is Japan → Taiwan → Hong Kong → Germany → other nodes.
 - Remove the placeholder node named `使用前先更新订阅`.
 - The historical GPT/Gemini/Disney candidate sets seed last-known-good state on the first run. Do not restore the old binary GPT probe.
-- New imports use one temporary loopback Mihomo instance, serial selector switching with controller read-back, multi-signal service probes, exact manual calibration, and LKG merging.
-- Use `DEFINITIVE_AUTOMATED_PASS`, `DEFINITIVE_AUTOMATED_FAIL`, `MANUAL_FUNCTIONAL_PASS`, `MANUAL_FUNCTIONAL_FAIL`, `SCREEN_PASS`, `LKG_FALLBACK`, and `UNKNOWN` as evidence types. Display conflicts and LKG-only membership separately from current proof.
-- GPT candidates require current automated generation PASS or current identity-bound manual functional PASS. Gemini candidates require current conflict-free automated Web generation PASS. Disney candidates require current full-chain `PASS_SUPPORTED_REGION`. LKG is historical fallback only.
+- Run the installed RegionRestrictionCheck through one temporary loopback Mihomo sidecar, serial selector switching, exact controller read-back, per-node connection reset, and explicit `-P` proxy binding. Never copy or update the external script.
+- Use `MANUAL_FUNCTIONAL_PASS`, `MANUAL_FUNCTIONAL_FAIL`, `SCREEN_PASS`, `SCREEN_NEGATIVE`, `PASS_WITH_SCREEN_FALSE_NEGATIVE`, `LKG_FALLBACK`, and `UNKNOWN` as evidence semantics. Display conflicts and LKG-only membership separately.
+- GPT candidates accept current `SCREEN_PASS` or current identity-bound manual functional PASS, but not an explicit current transport failure. Gemini candidates accept current `SCREEN_PASS`, current identity-bound manual functional PASS, or `PASS_WITH_SCREEN_FALSE_NEGATIVE`; exclude manual FAIL and conflicts. Disney candidates prefer current full-chain `PASS_SUPPORTED_REGION`; a full-chain hard failure outranks RegionRestrictionCheck.
 - Never treat Google reachability, Gemini HTTP 200, a login redirect, an API response, old LKG, or an old override as definitive Gemini Web generation proof.
 - Never treat a Disney homepage, TLS, CDN, or HTTP 200 response as Disney support proof.
 - New UNKNOWN nodes may appear only at the tail of the corresponding manual group; they never enter the candidate group.
@@ -161,31 +158,27 @@ logged-in generation/playback methods. Never store cookies, tokens, prompts,
 answers, or response bodies. Ignore stale results and any name, node identity,
 service, method, or snapshot mismatch.
 
-Run logged-in GPT and Gemini Web generation through the fixed browser-to-sidecar
-bridge. The dedicated profile is created in a private directory and is never
-inspected or copied:
+Run the external RegionRestrictionCheck screening backend through the fixed
+router sidecar. Require installed version 1.0.1, record its script SHA-256 and
+command path, and stop if explicit proxy support is unavailable:
 
 ```bash
-python3 scripts/browser_service_probe.py \
+python3 scripts/regioncheck_service_probe.py \
   --skill-script scripts/clashverge_to_openclash.py \
   --source-snapshot /path/to/source-snapshot.json \
-  --baseline-session-proof /private/path/baseline-session-proof.json \
-  --browser-executable "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --profile-dir /private/path/browser-service-profile \
-  --output /private/path/browser-functional-results.json
+  --output /private/path/regioncheck-functional-results.json
 ```
 
-The proof must attest that the same private profile was logged into and survived
-a restart on the normal Mac baseline network, without a sidecar and without
-exporting authentication data. The probe never creates or logs into a profile.
-The browser instance alone then uses the fixed loopback proxy. Remote debugging
-binds to `127.0.0.1`. Exit attribution must match a control request through the
-same sidecar proxy for every node. An unsupported-region response is a node FAIL
-and probing continues. One node-level reauthentication or challenge response is
-recorded for that node; repeated responses stop that service as
-`UNKNOWN_SESSION_INVALIDATED`. Account rate limiting stops only the affected
-service. Proxy attribution failure stops the entire probe without definitive
-results for the mismatched node.
+Invoke `regioncheck -M 4 -R 0 -E en -P http://127.0.0.1:<sidecar-port>`
+non-interactively. Strip ANSI output, BusyBox fractional-sleep warnings, and
+promotional sections. Persist only structured service results, tool metadata,
+country, and a run-keyed exit-IP HMAC. Match the tool's masked exit against the
+control exit before attributing results. `Google Gemini: No` is
+`SCREEN_NEGATIVE`, not a definitive failure. A current snapshot-bound manual Web
+generation PASS may admit that node as `PASS_WITH_SCREEN_FALSE_NEGATIVE`.
+
+Do not run `browser_service_probe.py` in the formal workflow. Keep the dedicated
+profile untouched; it is not an activation prerequisite.
 
 The Disney probe performs devices → token → GraphQL → supported-location → final
 redirect. It stores neither transient credentials nor response bodies:
@@ -268,7 +261,7 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 - Requests are serial per node, use a fresh curl process, connect timeout 3 seconds, total timeout 8 seconds, at most two attempts, and a 15-minute round deadline. The selector wait is 0.75 seconds.
 - GPT 403 challenge evidence is `CHALLENGE_UNKNOWN`, never `FAIL_REGION` without explicit region text.
 - Manual calibration requires exact raw name, exact HMAC node ID, exact service, exact source snapshot, test time, and method. Store these separately; newer definitive actual-use evidence takes precedence over older screening evidence.
-- Gemini's unauthenticated HTTP probe is screening only and emits `GEMINI_SCREEN_PASS`, `GEMINI_SCREEN_FAIL`, or unknown. A definitive result requires an isolated candidate-sidecar path plus an already logged-in browser session that sends a fixed low-cost prompt and verifies generation without persisting cookies, prompt text, or answer text.
+- RegionRestrictionCheck is screening evidence. ChatGPT/Gemini `Yes` is `SCREEN_PASS`; Gemini `No` is `SCREEN_NEGATIVE`. Bind any manual override to the exact snapshot and stable node ID. Never require browser automation for candidate generation or activation.
 - Disney probing must POST `/devices`, obtain an assertion, POST `/token`, distinguish `forbidden-location` and HTTP 403, POST `/graph/v1/device/graphql`, parse `countryCode` and `inSupportedLocation`, and reject final `disneyplus.com` redirects containing `preview` or `unavailable`. Persist no assertion, token, refresh token, or response body. Until that full chain runs, emit `UNKNOWN_INCOMPLETE_PROBE`, not PASS.
 - Egress persistence is limited to country, ASN, and a run-keyed HMAC prefix. Mark `PROBABLE_TUN_OR_UPSTREAM_RECAPTURE` only when at least three `BASE_PASS` nodes span at least two declared regions and every eligible node has the same complete signature. Transport failures do not participate; a guarded run cannot change LKG or service groups.
 - Temporary YAML, response bodies, headers, logs, Mihomo, PID, SSH tunnel, and lock are cleaned in `finally`. Candidate-probe failure must occur before the activation transaction and must never invoke production rollback.

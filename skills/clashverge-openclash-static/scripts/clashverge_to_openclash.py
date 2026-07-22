@@ -223,12 +223,15 @@ PASS_RESULTS = {
     "DEFINITIVE_AUTOMATED_PASS",
     "MANUAL_OVERRIDE_PASS",
     "PASS_SUPPORTED_REGION",
+    "SCREEN_PASS",
+    "PASS_WITH_SCREEN_FALSE_NEGATIVE",
 }
 PENDING_RESULTS = {
     "CHALLENGE_UNKNOWN",
     "AUTH_UNKNOWN",
     "UNKNOWN",
     "GEMINI_SCREEN_PASS",
+    "SCREEN_NEGATIVE",
     "UNKNOWN_INCOMPLETE_PROBE",
     "UNKNOWN_RESPONSE_SCHEMA",
 }
@@ -254,6 +257,7 @@ EVIDENCE_TYPES = {
     "MANUAL_FUNCTIONAL_PASS",
     "MANUAL_FUNCTIONAL_FAIL",
     "SCREEN_PASS",
+    "SCREEN_NEGATIVE",
     "LKG_FALLBACK",
     "UNKNOWN",
 }
@@ -1233,7 +1237,10 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
                     error = raw_result
                 else:
                     raise ConfigError(f"Functional result {index} has an invalid Disney result.")
-            elif raw_result in {"PASS", "FAIL", "UNKNOWN"}:
+            elif raw_result in {
+                "PASS", "FAIL", "UNKNOWN", "SCREEN_PASS", "SCREEN_NEGATIVE",
+                "FAIL_TRANSPORT", "FAIL_IP_BANNED", "FAIL_REGION",
+            }:
                 result = raw_result
             else:
                 raise ConfigError(f"Functional result {index} has an invalid result.")
@@ -1247,6 +1254,7 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
                     "tested_at": tested_at,
                     "method": method,
                     "result": result,
+                    "raw_result": raw_result,
                     "error_category": error,
                 }
             )
@@ -1288,17 +1296,28 @@ def apply_functional_results_to_report(
                 continue
             index, latest = max(
                 candidates,
-                key=lambda pair: parse_aware_timestamp(pair[1]["tested_at"], field="functional result"),
+                key=lambda pair: (
+                    1
+                    if service == "disney"
+                    and str(pair[1].get("method", "")).startswith("disney-full-chain")
+                    else 0,
+                    parse_aware_timestamp(pair[1]["tested_at"], field="functional result"),
+                ),
             )
             matched.add(index)
             service_result = node["services"][service]
             service_result["functional_result"] = {
-                key: latest[key] for key in (
+                key: latest.get(key) for key in (
                     "result", "tested_at", "method", "source_snapshot_id",
-                    "source_hash", "exact_node_id", "error_category"
+                    "source_hash", "exact_node_id", "error_category", "raw_result"
                 )
             }
-            if latest["result"] == "PASS":
+            if service == "disney" and latest.get("raw_result") in {
+                "PASS_SUPPORTED_REGION", "FAIL_FORBIDDEN_LOCATION", "FAIL_IP_BANNED",
+                "FAIL_UNAVAILABLE", "FAIL_TRANSPORT", "UNKNOWN_RESPONSE_SCHEMA",
+            }:
+                service_result["final_result"] = latest["raw_result"]
+            elif latest["result"] == "PASS":
                 service_result["final_result"] = "DEFINITIVE_AUTOMATED_PASS"
             elif latest["result"] == "FAIL":
                 service_result["final_result"] = (
@@ -1306,6 +1325,11 @@ def apply_functional_results_to_report(
                     if latest.get("error_category") == "FAIL_UNSUPPORTED_REGION"
                     else "DEFINITIVE_AUTOMATED_FAIL"
                 )
+            elif latest["result"] in {
+                "SCREEN_PASS", "SCREEN_NEGATIVE", "FAIL_TRANSPORT",
+                "FAIL_IP_BANNED", "FAIL_REGION",
+            }:
+                service_result["final_result"] = latest["result"]
     updated["functional_results"] = {
         "applied": len(matched),
         "unmatched_or_stale_count": len(functional_results) - len(matched),
@@ -1348,6 +1372,11 @@ def apply_manual_results_to_report(
                 service_result["final_result"] = "DEFINITIVE_AUTOMATED_PASS"
             elif functional.get("result") == "FAIL":
                 service_result["final_result"] = "DEFINITIVE_AUTOMATED_FAIL"
+            elif functional.get("result") in {
+                "SCREEN_PASS", "SCREEN_NEGATIVE", "FAIL_TRANSPORT",
+                "FAIL_IP_BANNED", "FAIL_REGION",
+            }:
+                service_result["final_result"] = functional["result"]
             else:
                 service_result["final_result"] = raw_result
             service_result.pop("manual_result", None)
@@ -1398,14 +1427,22 @@ def apply_manual_results_to_report(
             service_result = node["services"][service]
             service_result["override"] = override
             functional_result = str(service_result.get("functional_result", {}).get("result", ""))
-            if functional_result and functional_result != latest["result"]:
+            if latest["result"] == "PASS":
+                if functional_result == "FAIL_TRANSPORT":
+                    service_result["final_result"] = "FAIL_TRANSPORT"
+                elif service == "gemini" and functional_result == "SCREEN_NEGATIVE":
+                    service_result["final_result"] = "PASS_WITH_SCREEN_FALSE_NEGATIVE"
+                    service_result["screen_false_negative"] = True
+                elif functional_result in {"PASS", "SCREEN_PASS"}:
+                    service_result["final_result"] = (
+                        "DEFINITIVE_AUTOMATED_PASS"
+                        if functional_result == "PASS" else "SCREEN_PASS"
+                    )
+                else:
+                    service_result["final_result"] = override
+            elif functional_result in {"PASS", "SCREEN_PASS"}:
                 service_result["final_result"] = "EVIDENCE_CONFLICT"
                 service_result["evidence_conflict"] = True
-            elif functional_result:
-                service_result["final_result"] = (
-                    "DEFINITIVE_AUTOMATED_PASS"
-                    if functional_result == "PASS" else "DEFINITIVE_AUTOMATED_FAIL"
-                )
             else:
                 service_result["final_result"] = override
             service_result["manual_result"] = {
@@ -1615,8 +1652,15 @@ def merge_lkg_results(
 
             item["lkg_merge"][service] = action
             is_current_candidate = (
-                final_result in {"DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION"}
-                or (service == "gpt" and final_result == "MANUAL_OVERRIDE_PASS")
+                final_result in {
+                    "DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION", "SCREEN_PASS"
+                }
+                or (
+                    service in {"gpt", "gemini"}
+                    and final_result in {
+                        "MANUAL_OVERRIDE_PASS", "PASS_WITH_SCREEN_FALSE_NEGATIVE"
+                    }
+                )
             )
             item["enters_auto"][service] = is_current_candidate
             item["enters_manual_candidate"][service] = (
@@ -2485,9 +2529,9 @@ def annotate_probe_semantics(
     report: dict[str, Any], nodes: Sequence[dict[str, Any]]
 ) -> None:
     report["service_semantics"] = {
-        "gpt": "logged_in_web_generation_or_timestamped_manual_use",
-        "gemini": "logged_in_web_generation_only_for_primary_candidates",
-        "disney": "devices_token_graphql_supported_location_redirect_chain",
+        "gpt": "regionrestrictioncheck_screen_or_snapshot_bound_manual_use",
+        "gemini": "regionrestrictioncheck_screen_or_snapshot_bound_manual_use",
+        "disney": "full_chain_preferred_then_regionrestrictioncheck_screen",
     }
     groups = report.get("service_groups", {})
     summaries: dict[str, dict[str, int]] = {}
@@ -2510,6 +2554,12 @@ def annotate_probe_semantics(
                 evidence_type = "DEFINITIVE_AUTOMATED_FAIL"
             elif final_result in {"PASS", "GEMINI_SCREEN_PASS"}:
                 evidence_type = "SCREEN_PASS"
+            elif final_result == "SCREEN_PASS":
+                evidence_type = "SCREEN_PASS"
+            elif final_result == "SCREEN_NEGATIVE":
+                evidence_type = "SCREEN_NEGATIVE"
+            elif final_result == "PASS_WITH_SCREEN_FALSE_NEGATIVE":
+                evidence_type = "MANUAL_FUNCTIONAL_PASS"
             elif node_name in historical_names:
                 evidence_type = "LKG_FALLBACK"
             else:
@@ -2566,7 +2616,7 @@ def annotate_probe_semantics(
     if summaries["gpt"]["candidates"] == 0:
         blockers.append("GPT_CURRENT_FUNCTIONAL_CANDIDATE_MISSING")
     if summaries["gemini"]["candidates"] == 0:
-        blockers.append("GEMINI_DEFINITIVE_WEB_GENERATION_RESULT_MISSING")
+        blockers.append("GEMINI_CURRENT_SCREEN_OR_MANUAL_CANDIDATE_MISSING")
     if summaries["disney"]["candidates"] == 0:
         blockers.append("DISNEY_FULL_REGION_CHAIN_RESULT_MISSING")
     conflicts = sum(summaries[service]["evidence_conflict"] for service in SERVICE_KEYS)

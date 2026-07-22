@@ -681,7 +681,7 @@ def test_v3_reconcile_adds_current_source_node_without_faking_probe(tmp_path) ->
     assert new_node["services"]["gpt"]["final_result"] == "MANUAL_OVERRIDE_PASS"
     assert new_name in selections["gpt"]["automatic"]
     assert written["definitive_pass_counts"]["gemini"] == 0
-    assert "GEMINI_DEFINITIVE_WEB_GENERATION_RESULT_MISSING" in written[
+    assert "GEMINI_CURRENT_SCREEN_OR_MANUAL_CANDIDATE_MISSING" in written[
         "activation_blocked_reasons"
     ]
 
