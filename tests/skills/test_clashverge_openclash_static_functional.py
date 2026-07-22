@@ -52,9 +52,6 @@ def test_generation_clicks_visible_send_button_before_enter() -> None:
         def evaluate(self, expression: str):
             return "READY" if "hasInput" in expression else 0
 
-        def focus_selector(self, _selectors: list[str]) -> bool:
-            return True
-
         def insert_text(self, _text: str) -> None:
             return None
 

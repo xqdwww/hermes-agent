@@ -480,6 +480,7 @@ def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
   const text = (document.body?.innerText || '').toLowerCase();
   const selectors = %s;
   const sendSelectors = %s;
+  const inputElements = selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)));
   const counts = {};
   const visible = {};
   for (const selector of selectors) {
@@ -499,6 +500,10 @@ def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
       const element = document.querySelector(selector);
       return Boolean(element && element.offsetParent !== null && !element.disabled);
     }).length,
+    input_has_content: inputElements.some(element =>
+      Boolean((element.value || element.innerText || '').length)
+    ),
+    active_input_matches: inputElements.includes(document.activeElement),
     iframe_count: document.querySelectorAll('iframe').length,
     has_sign_in_marker: /(sign in|log in|登录|登入)/.test(text),
     has_challenge_marker: /captcha|verify you are human|cloudflare|unusual traffic|验证您是真人|异常流量/.test(text),
@@ -639,7 +644,7 @@ def run_generation(
         )
         or 0
     )
-    if not browser.focus_selector(list(spec["inputs"])):
+    if not browser.click_selector(list(spec["inputs"])):
         return "AUTOMATION_UNAVAILABLE"
     browser.insert_text(f"只回复：{nonce}")
     if not browser.click_selector(list(spec["send"])):
