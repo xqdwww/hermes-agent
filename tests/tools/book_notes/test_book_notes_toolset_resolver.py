@@ -41,33 +41,35 @@ def test_book_notes_is_declared_builtin_read_only_toolset():
     definition = TOOLSETS["book-notes"]
     assert definition["built_in"] is True
     assert definition["read_only"] is True
-    assert definition["tools"] == ["book_notes_retrieval"]
+    assert definition["tools"] == ["agy_book_dialogue", "book_notes_retrieval"]
     assert definition["includes"] == []
 
 
-def test_book_notes_resolves_exactly_one_tool():
+def test_book_notes_resolves_exactly_two_tools():
     assert validate_toolset("book-notes") is True
-    assert resolve_toolset("book-notes") == ["book_notes_retrieval"]
-    assert resolve_toolset("book-notes", include_registry=False) == ["book_notes_retrieval"]
+    assert resolve_toolset("book-notes") == ["agy_book_dialogue", "book_notes_retrieval"]
+    assert resolve_toolset("book-notes", include_registry=False) == ["agy_book_dialogue", "book_notes_retrieval"]
 
 
 def test_combined_toolsets_are_stable_deduplicated_union():
     combined = resolve_multiple_toolsets(["hermes-cli", "book-notes", "book-notes"])
     assert combined == sorted(set(combined))
     assert combined.count("book_notes_retrieval") == 1
+    assert combined.count("agy_book_dialogue") == 1
     assert "terminal" in combined
 
 
 def test_only_book_notes_does_not_expose_hermes_cli_tools():
     discover_builtin_tools()
     definitions = get_tool_definitions(["book-notes"], quiet_mode=True, skip_tool_search_assembly=True)
-    assert names(definitions) == ["book_notes_retrieval"]
+    assert names(definitions) == ["agy_book_dialogue", "book_notes_retrieval"]
 
 
 def test_hermes_cli_only_does_not_expose_book_notes():
     discover_builtin_tools()
     definitions = get_tool_definitions(["hermes-cli"], quiet_mode=True, skip_tool_search_assembly=True)
     assert "book_notes_retrieval" not in names(definitions)
+    assert "agy_book_dialogue" not in names(definitions)
 
 
 def test_combined_discovery_exposes_book_tool_once_and_preserves_cli():
@@ -77,6 +79,7 @@ def test_combined_discovery_exposes_book_tool_once_and_preserves_cli():
     )
     resolved = names(definitions)
     assert resolved.count("book_notes_retrieval") == 1
+    assert resolved.count("agy_book_dialogue") == 1
     assert "terminal" in resolved and "read_file" in resolved
 
 
@@ -113,11 +116,14 @@ def test_catalog_tool_exists_in_registry_after_discovery():
     discover_builtin_tools()
     assert registry.get_entry("book_notes_retrieval") is not None
     assert registry.get_all_tool_names().count("book_notes_retrieval") == 1
+    assert registry.get_entry("agy_book_dialogue") is not None
+    assert registry.get_all_tool_names().count("agy_book_dialogue") == 1
 
 
 def test_registry_presence_does_not_bypass_enabled_filter():
     discover_builtin_tools()
     assert registry.get_entry("book_notes_retrieval") is not None
+    assert registry.get_entry("agy_book_dialogue") is not None
     assert "book_notes_retrieval" not in names(
         get_tool_definitions(["terminal"], quiet_mode=True, skip_tool_search_assembly=True)
     )
@@ -156,6 +162,7 @@ def test_repeated_discovery_does_not_duplicate_registration():
     discover_builtin_tools()
     discover_builtin_tools()
     assert registry.get_all_tool_names().count("book_notes_retrieval") == 1
+    assert registry.get_all_tool_names().count("agy_book_dialogue") == 1
 
 
 def test_fresh_process_source_discovery_is_lazy_and_stable(tmp_path):
@@ -172,6 +179,7 @@ names = [item["function"]["name"] for item in defs]
 target = next(item["function"] for item in defs if item["function"]["name"] == "book_notes_retrieval")
 print(json.dumps({
     "count": names.count("book_notes_retrieval"),
+    "agy_count": names.count("agy_book_dialogue"),
     "terminal": "terminal" in names,
     "actions": target["parameters"]["properties"]["action"]["enum"],
     "sentence_transformers_loaded": "sentence_transformers" in sys.modules,
@@ -183,6 +191,7 @@ print(json.dumps({
     assert first.stdout == second.stdout
     payload = json.loads(first.stdout)
     assert payload == {
+        "agy_count": 1,
         "actions": ["resolve_book", "current_book", "other_books"],
         "count": 1,
         "lancedb_loaded": False,

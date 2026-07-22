@@ -36,10 +36,10 @@ def test_category_discovery_description_exposes_all_three_entrypoints():
     assert "把这本书和我以前读过的书连接起来, load it and call other_books once" in description
 
 
-def test_skill_requires_only_the_book_notes_retrieval_tool():
+def test_skill_requires_book_notes_retrieval_and_agy_dialogue_tools():
     frontmatter, body, _ = load_skill()
     conditions = extract_skill_conditions(frontmatter)
-    assert conditions["requires_tools"] == ["book_notes_retrieval"]
+    assert conditions["requires_tools"] == ["book_notes_retrieval", "agy_book_dialogue"]
     assert conditions["requires_toolsets"] == []
     assert "only personal-excerpt retrieval tool" in body
 
@@ -352,7 +352,10 @@ def test_guided_personal_probe_reuses_only_bounded_book_notes_action():
     assert "make at most one call with the existing helper" in guided
     assert "In `general_discussion`, do not call\n`current_book`" in guided
     assert "never label it as personal history" in guided
-    assert extract_skill_conditions(frontmatter)["requires_tools"] == ["book_notes_retrieval"]
+    assert extract_skill_conditions(frontmatter)["requires_tools"] == [
+        "book_notes_retrieval",
+        "agy_book_dialogue",
+    ]
     assert "BookNotesRetriever" not in source
 
 
@@ -423,3 +426,71 @@ def test_guided_budget_and_forbidden_platform_changes_are_explicit():
     assert "external research" in body
     assert "lancedb" not in source.lower()
     assert "embedding" not in source.lower()
+
+
+def test_guided_probe_connect_and_close_route_once_through_agy():
+    frontmatter, body, _ = load_skill()
+    assert extract_skill_conditions(frontmatter)["requires_tools"] == [
+        "book_notes_retrieval",
+        "agy_book_dialogue",
+    ]
+    assert "tool_name: agy_book_dialogue" in body
+    assert "action: respond" in body
+    assert "probe: call `agy_book_dialogue` once by default" in body
+    assert "connect: call `agy_book_dialogue` once after the bounded `other_books` call" in body
+    assert "close: call `agy_book_dialogue` once for the short close" in body
+    assert "orient: never call `agy_book_dialogue`" in body
+    assert "agy_calls_per_turn: 1" in body
+
+
+def test_agy_success_is_delivered_verbatim_without_a_second_question():
+    _, body, _ = load_skill()
+    assert "delivery_mode: verbatim" in body
+    assert "deliver the `response` field verbatim" in body
+    assert "Do not summarize, rewrite, template, compress, or add a second question" in body
+    assert "Remove only blank CLI wrapping" in body
+
+
+def test_meta_question_pauses_guided_progress_without_agy_or_repeated_prompt():
+    _, body, _ = load_skill()
+    gate = body.split("## Guided Meta Question Gate", 1)[1].split("## Active Guided Turn Gate", 1)[0]
+    for question in (
+        "你现在用的什么模型？",
+        "刚才调用了哪个工具？",
+        "为什么没有找到书摘？",
+        "现在是什么模式？",
+        "可以退出吗？",
+    ):
+        assert question in gate
+    assert "do not call `agy_book_dialogue`" in gate
+    assert "do not repeat the previous reading question" in gate
+    assert "do not increment `effective_turns`" in gate
+    assert "DeepSeek V4 Flash" in gate and "Gemini 3.1 Pro (High)" in gate
+
+
+def test_not_found_and_unavailable_retrieval_states_are_distinct_for_agy():
+    _, body, _ = load_skill()
+    assert "retrieval_status: resolved" in body
+    assert "personal_excerpt_available: true" in body
+    assert "retrieval_status: not_found" in body
+    assert "personal_excerpt_available: false" in body
+    assert "retrieval_operational: true" in body
+    assert "retrieval_status: unavailable" in body
+    assert "personal_excerpt_available: unknown" in body
+    assert "retrieval_operational: false" in body
+    assert "Never describe `unavailable` as `not_found`" in body
+
+
+def test_agy_failure_degrades_once_to_deepseek_without_gpt_bridge():
+    _, body, _ = load_skill()
+    assert "dialogue_engine: deepseek_fallback" in body
+    assert "这一轮 Gemini 对谈引擎暂时不可用，我先用当前模型继续。" in body
+    assert "Then continue under the existing Guided Mode B contract" in body
+    assert "Never call GPT Bridge" in body
+    assert "never retry AGY in the same turn" in body
+
+
+def test_manual_mode_a_does_not_force_agy():
+    _, body, _ = load_skill()
+    manual = body.split("## Route Manual Mode A Entrypoints", 1)[1]
+    assert "Mode A does not require `agy_book_dialogue`" in manual

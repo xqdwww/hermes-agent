@@ -1,3 +1,3 @@
 ---
-description: Note-taking skills for saved information and reading discussions. For 开始讨论《书名》, load book-deepening-extension and call resolve_book once. For 费曼聊这本书, load it and call current_book once. For 把这本书和我以前读过的书连接起来, load it and call other_books once. For 进入引导式读书模式《书名》, 用引导模式聊《书名》, or 开始连续聊《书名》, load it in guided_mode_b and call resolve_book once.
+description: Note-taking skills for saved information and reading discussions. For 开始讨论《书名》, load book-deepening-extension and call resolve_book once. For 费曼聊这本书, load it and call current_book once. For 把这本书和我以前读过的书连接起来, load it and call other_books once. For 进入引导式读书模式《书名》, 用引导模式聊《书名》, or 开始连续聊《书名》, load it in guided_mode_b, call resolve_book once, and use agy_book_dialogue for bounded probe/connect/close turns.
 ---

@@ -242,8 +242,8 @@ TOOLSETS = {
     },
 
     "book-notes": {
-        "description": "Read-only retrieval over personal Evernote book excerpts",
-        "tools": ["book_notes_retrieval"],
+        "description": "Read-only book excerpt retrieval and bounded guided dialogue",
+        "tools": ["agy_book_dialogue", "book_notes_retrieval"],
         "includes": [],
         "built_in": True,
         "read_only": True,
