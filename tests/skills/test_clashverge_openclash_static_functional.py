@@ -52,7 +52,7 @@ def test_generation_clicks_visible_send_button_before_enter() -> None:
         def evaluate(self, expression: str):
             return "READY" if "hasInput" in expression else 0
 
-        def insert_text(self, _text: str) -> None:
+        def type_text(self, _text: str) -> None:
             return None
 
         def click_selector(self, _selectors: list[str]) -> bool:
@@ -86,6 +86,21 @@ def test_browser_click_uses_cdp_mouse_events() -> None:
     assert browser.click_selector(["button[data-testid='send-button']"]) is True
     assert [payload["type"] for _, payload in browser.cdp.calls] == [
         "mouseMoved", "mousePressed", "mouseReleased"
+    ]
+
+
+def test_browser_typing_uses_cdp_keyboard_events() -> None:
+    class FakeCdp:
+        calls = []
+
+        def call(self, method: str, payload: dict) -> None:
+            self.calls.append((method, payload))
+
+    browser = object.__new__(BROWSER.ChromeProbe)
+    browser.cdp = FakeCdp()
+    browser.type_text("Ab")
+    assert [payload["type"] for _, payload in browser.cdp.calls] == [
+        "keyDown", "char", "keyUp", "keyDown", "char", "keyUp"
     ]
 
 

@@ -361,7 +361,8 @@ class ChromeProbe:
   const selectors = %s;
   for (const selector of selectors) {
     const element = document.querySelector(selector);
-    if (element && element.offsetParent !== null && !element.disabled) {
+    if (element && element.offsetParent !== null && !element.disabled &&
+        element.getAttribute('aria-disabled') !== 'true') {
       const rect = element.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
         return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
@@ -390,6 +391,23 @@ class ChromeProbe:
         if self.cdp is None:
             raise ProbeError("BROWSER_NOT_CONNECTED")
         self.cdp.call("Input.insertText", {"text": text})
+
+    def type_text(self, text: str) -> None:
+        if self.cdp is None:
+            raise ProbeError("BROWSER_NOT_CONNECTED")
+        for character in text:
+            self.cdp.call(
+                "Input.dispatchKeyEvent",
+                {"type": "keyDown", "key": character},
+            )
+            self.cdp.call(
+                "Input.dispatchKeyEvent",
+                {"type": "char", "key": character, "text": character},
+            )
+            self.cdp.call(
+                "Input.dispatchKeyEvent",
+                {"type": "keyUp", "key": character},
+            )
 
     def press_enter(self) -> None:
         if self.cdp is None:
@@ -498,7 +516,8 @@ def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
     stop_count: document.querySelectorAll(%s).length,
     visible_send_count: sendSelectors.filter(selector => {
       const element = document.querySelector(selector);
-      return Boolean(element && element.offsetParent !== null && !element.disabled);
+      return Boolean(element && element.offsetParent !== null && !element.disabled &&
+        element.getAttribute('aria-disabled') !== 'true');
     }).length,
     input_has_content: inputElements.some(element =>
       Boolean((element.value || element.innerText || '').length)
@@ -646,7 +665,7 @@ def run_generation(
     )
     if not browser.click_selector(list(spec["inputs"])):
         return "AUTOMATION_UNAVAILABLE"
-    browser.insert_text(f"只回复：{nonce}")
+    browser.type_text(f"Reply only: {nonce}")
     if not browser.click_selector(list(spec["send"])):
         browser.press_enter()
     return wait_for_answer(browser, service, nonce, baseline, timeout_seconds)
