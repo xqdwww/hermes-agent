@@ -466,6 +466,12 @@ def test_meta_question_pauses_guided_progress_without_agy_or_repeated_prompt():
     assert "do not repeat the previous reading question" in gate
     assert "do not increment `effective_turns`" in gate
     assert "DeepSeek V4 Flash" in gate and "Gemini 3.1 Pro (High)" in gate
+    assert (
+        "主会话控制器是 DeepSeek V4 Flash；引导式读书模式 B 的文学对谈轮次可由 "
+        "AGY Gemini 3.1 Pro (High) 生成。本轮是元问题，没有调用 AGY。"
+    ) in gate
+    assert "do not mention the saved focus question" in gate
+    assert "Do not claim AGY is unavailable" in gate
 
 
 def test_not_found_and_unavailable_retrieval_states_are_distinct_for_agy():
