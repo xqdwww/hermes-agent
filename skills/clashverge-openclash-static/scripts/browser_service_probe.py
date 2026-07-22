@@ -303,6 +303,8 @@ class ChromeProbe:
             self.cdp = CDPConnection(str(pages[0]["webSocketDebuggerUrl"]))
             self.cdp.call("Page.enable")
             self.cdp.call("Runtime.enable")
+            self.cdp.call("Network.enable")
+            self.cdp.call("Network.setCacheDisabled", {"cacheDisabled": True})
             return self
         except Exception:
             self.__exit__()
@@ -460,8 +462,8 @@ def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {"diagnostic": "UNAVAILABLE"}
 
 
-def browser_exit_ip(browser: ChromeProbe) -> str:
-    browser.navigate(EXIT_URL)
+def browser_exit_ip(browser: ChromeProbe, url: str = EXIT_URL) -> str:
+    browser.navigate(url)
     value = browser.evaluate(
         """
 (() => {
@@ -480,7 +482,7 @@ def browser_exit_ip(browser: ChromeProbe) -> str:
     return str(value)
 
 
-def control_exit_ip(proxy_port: int) -> str:
+def control_exit_ip(proxy_port: int, url: str = EXIT_URL) -> str:
     completed = subprocess.run(
         [
             "curl",
@@ -492,7 +494,7 @@ def control_exit_ip(proxy_port: int) -> str:
             "8",
             "--silent",
             "--show-error",
-            EXIT_URL,
+            url,
         ],
         capture_output=True,
         text=True,
@@ -515,13 +517,22 @@ def control_exit_ip(proxy_port: int) -> str:
 def verify_proxy_attribution(
     browser: ChromeProbe, proxy_port: int, run_key: bytes
 ) -> str:
-    control_ip = control_exit_ip(proxy_port)
-    browser_ip = browser_exit_ip(browser)
+    attribution_url = f"{EXIT_URL}&probe_nonce={secrets.token_hex(8)}"
+    control_ip = control_exit_ip(proxy_port, attribution_url)
+    browser_ip = browser_exit_ip(browser, attribution_url)
     control_hash = hmac_prefix(run_key, control_ip)
     browser_hash = hmac_prefix(run_key, browser_ip)
     if not hmac.compare_digest(control_hash, browser_hash):
         raise ProbeError("FAIL_BROWSER_PROXY_ATTRIBUTION")
     return browser_hash
+
+
+def reset_sidecar_connections(skill: Any, controller_port: int) -> None:
+    """Drop old sidecar flows so a selector change also changes browser egress."""
+    try:
+        skill.controller_json_request(controller_port, "/connections", method="DELETE")
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise ProbeError("SIDECAR_CONNECTION_RESET_FAILED") from exc
 
 
 def wait_for_answer(
@@ -727,6 +738,7 @@ def main() -> int:
             first_name = str(proxies[0]["name"])
             if not skill.select_probe_node(sidecar.controller_port, first_name):
                 raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+            reset_sidecar_connections(skill, sidecar.controller_port)
             time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
             verify_proxy_attribution(browser, sidecar.mixed_port, run_key)
             report["browser_proxy_attribution"] = "CONTROL_AND_BROWSER_EGRESS_HMAC_MATCH"
@@ -737,6 +749,7 @@ def main() -> int:
                 node_id = identities[name]
                 if not skill.select_probe_node(sidecar.controller_port, name):
                     raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+                reset_sidecar_connections(skill, sidecar.controller_port)
                 time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
                 egress_hash = verify_proxy_attribution(
                     browser, sidecar.mixed_port, run_key

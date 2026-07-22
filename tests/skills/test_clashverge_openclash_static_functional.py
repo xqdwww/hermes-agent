@@ -76,12 +76,25 @@ def test_spa_hydration_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_browser_proxy_attribution_requires_matching_egress(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(BROWSER, "control_exit_ip", lambda _port: "203.0.113.1")
-    monkeypatch.setattr(BROWSER, "browser_exit_ip", lambda _browser: "203.0.113.1")
+    monkeypatch.setattr(BROWSER, "control_exit_ip", lambda _port, _url: "203.0.113.1")
+    monkeypatch.setattr(BROWSER, "browser_exit_ip", lambda _browser, _url: "203.0.113.1")
     assert BROWSER.verify_proxy_attribution(object(), 1234, b"k" * 32)
-    monkeypatch.setattr(BROWSER, "browser_exit_ip", lambda _browser: "203.0.113.2")
+    monkeypatch.setattr(BROWSER, "browser_exit_ip", lambda _browser, _url: "203.0.113.2")
     with pytest.raises(BROWSER.ProbeError, match="FAIL_BROWSER_PROXY_ATTRIBUTION"):
         BROWSER.verify_proxy_attribution(object(), 1234, b"k" * 32)
+
+
+def test_selector_switch_closes_old_sidecar_connections() -> None:
+    class Skill:
+        calls = []
+
+        @classmethod
+        def controller_json_request(cls, port: int, path: str, *, method: str):
+            cls.calls.append((port, path, method))
+            return {}
+
+    BROWSER.reset_sidecar_connections(Skill, 23456)
+    assert Skill.calls == [(23456, "/connections", "DELETE")]
 
 
 @pytest.mark.parametrize(
