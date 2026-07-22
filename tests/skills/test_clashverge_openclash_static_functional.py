@@ -89,6 +89,7 @@ def test_safe_page_diagnostics_never_requests_dom_text_values() -> None:
     assert result["origin"] == "https://gemini.google.com"
     assert "innerText:" not in browser.expression
     assert "outerHTML" not in browser.expression
+    assert set(result) == {"origin", "path"}
 
 
 def test_login_marker_has_priority_over_anonymous_prompt_box() -> None:

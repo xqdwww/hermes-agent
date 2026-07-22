@@ -464,6 +464,7 @@ def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
 (() => {
   const text = (document.body?.innerText || '').toLowerCase();
   const selectors = %s;
+  const sendSelectors = %s;
   const counts = {};
   const visible = {};
   for (const selector of selectors) {
@@ -477,13 +478,24 @@ def safe_page_diagnostics(browser: ChromeProbe, service: str) -> dict[str, Any]:
     ready_state: document.readyState,
     selector_counts: counts,
     visible_selector_counts: visible,
+    answer_count: document.querySelectorAll(%s).length,
+    stop_count: document.querySelectorAll(%s).length,
+    visible_send_count: sendSelectors.filter(selector => {
+      const element = document.querySelector(selector);
+      return Boolean(element && element.offsetParent !== null && !element.disabled);
+    }).length,
     iframe_count: document.querySelectorAll('iframe').length,
     has_sign_in_marker: /(sign in|log in|登录|登入)/.test(text),
     has_challenge_marker: /captcha|verify you are human|cloudflare|unusual traffic|验证您是真人|异常流量/.test(text),
     has_unsupported_marker: /unsupported country|not available in your country|not available in your region|地区目前不支持|所在地区不可用/.test(text)
   };
 })()
-""" % json.dumps(spec["inputs"])
+""" % (
+        json.dumps(spec["inputs"]),
+        json.dumps(spec["send"]),
+        json.dumps(spec["answers"]),
+        json.dumps(spec["stop"]),
+    )
     value = browser.evaluate(expression)
     return value if isinstance(value, dict) else {"diagnostic": "UNAVAILABLE"}
 
@@ -803,6 +815,7 @@ def main() -> int:
                     result, error, session_risks[service], stop = classify_node_outcome(
                         outcome, session_risks[service]
                     )
+                    diagnostics = safe_page_diagnostics(browser, service)
                     report["results"].append(
                         {
                             "service": service,
@@ -816,6 +829,7 @@ def main() -> int:
                             "egress_hmac": egress_hash,
                             "result": result,
                             "error_category": error,
+                            "page_diagnostics": diagnostics,
                         }
                     )
                     if stop:
