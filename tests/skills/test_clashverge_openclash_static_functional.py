@@ -34,6 +34,12 @@ def test_browser_command_is_profile_scoped_and_loopback_only(tmp_path: Path) -> 
     assert not any("system" in item.lower() or "tun" in item.lower() for item in command)
 
 
+def test_gemini_current_rich_textarea_selectors_are_supported() -> None:
+    selectors = BROWSER.SERVICE_SPECS["gemini"]["inputs"]
+    assert "rich-textarea div[contenteditable='true']" in selectors
+    assert ".ql-editor[contenteditable='true']" in selectors
+
+
 def test_browser_proxy_attribution_requires_matching_egress(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(BROWSER, "control_exit_ip", lambda _port: "203.0.113.1")
     monkeypatch.setattr(BROWSER, "browser_exit_ip", lambda _browser: "203.0.113.1")

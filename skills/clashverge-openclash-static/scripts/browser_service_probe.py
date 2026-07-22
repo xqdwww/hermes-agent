@@ -345,7 +345,13 @@ SERVICE_SPECS = {
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
-        "inputs": ["div[contenteditable='true'][role='textbox']", "textarea"],
+        "inputs": [
+            "rich-textarea div[contenteditable='true']",
+            ".ql-editor[contenteditable='true']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true']",
+            "textarea",
+        ],
         "answers": "model-response, .model-response-text, [data-test-id='model-response']",
         "stop": "button[aria-label*='Stop'], button[aria-label*='stop']",
     },
@@ -362,10 +368,10 @@ def safe_page_state(browser: ChromeProbe, service: str) -> str:
     const element = document.querySelector(selector);
     return Boolean(element && element.offsetParent !== null);
   });
-  if (url.includes('/auth') || url.includes('/login') || /sign in|log in/.test(text) && !hasInput) return 'LOGIN_REQUIRED';
-  if (/captcha|verify you are human|cloudflare|unusual traffic/.test(text)) return 'CHALLENGE';
-  if (/too many requests|rate limit|try again later/.test(text)) return 'RATE_LIMIT';
-  if (/unsupported country|not available in your country|not available in your region/.test(text)) return 'UNSUPPORTED_REGION';
+  if (url.includes('accounts.google.com') || url.includes('/auth') || url.includes('/login') || /(sign in|log in|登录|登入)/.test(text) && !hasInput) return 'LOGIN_REQUIRED';
+  if (/captcha|verify you are human|cloudflare|unusual traffic|验证您是真人|异常流量/.test(text)) return 'CHALLENGE';
+  if (/too many requests|rate limit|try again later|请求过多|稍后重试/.test(text)) return 'RATE_LIMIT';
+  if (/unsupported country|not available in your country|not available in your region|地区目前不支持|所在地区不可用/.test(text)) return 'UNSUPPORTED_REGION';
   return hasInput ? 'READY' : 'AUTOMATION_UNAVAILABLE';
 })()
 """ % json.dumps(spec["inputs"])
@@ -628,6 +634,12 @@ def main() -> int:
             ):
                 report["status"] = "STOP_BROWSER_PREFLIGHT_UNAVAILABLE"
                 report["preflight_states"] = preflight_states
+                unavailable = next(
+                    service for service, state in preflight_states.items()
+                    if state in {"CHALLENGE", "RATE_LIMIT", "AUTOMATION_UNAVAILABLE"}
+                )
+                browser.navigate(str(SERVICE_SPECS[unavailable]["url"]))
+                time.sleep(max(0.0, args.login_wait))
             else:
                 stop_service: set[str] = set()
                 for proxy in proxies:
