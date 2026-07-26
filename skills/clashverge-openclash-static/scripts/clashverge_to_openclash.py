@@ -1225,7 +1225,19 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
                 raise ConfigError(f"Functional result {index} is incomplete.")
             parse_aware_timestamp(tested_at, field=f"functional result {index}")
             if service == "disney":
-                if raw_result == "PASS_SUPPORTED_REGION":
+                if method.startswith("regionrestrictioncheck-"):
+                    if raw_result in {
+                        "SCREEN_PASS", "FAIL_REGION", "FAIL_IP_BANNED",
+                        "FAIL_TRANSPORT", "UNKNOWN",
+                    }:
+                        result = raw_result
+                        error = "" if raw_result == "SCREEN_PASS" else raw_result
+                    else:
+                        raise ConfigError(
+                            f"Functional result {index} has an invalid Disney "
+                            "screening result."
+                        )
+                elif raw_result == "PASS_SUPPORTED_REGION":
                     result = "PASS"
                 elif raw_result in {
                     "FAIL_FORBIDDEN_LOCATION", "FAIL_IP_BANNED", "FAIL_UNAVAILABLE"

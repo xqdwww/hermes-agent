@@ -434,3 +434,35 @@ def test_disney_loader_downgrades_transport_to_unknown(tmp_path: Path) -> None:
         }],
     }), encoding="utf-8")
     assert SKILL.load_functional_results([path])[0]["result"] == "UNKNOWN"
+
+
+def test_disney_loader_accepts_regioncheck_screening_semantics(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "regioncheck.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "source_hash": "a" * 64,
+        "results": [
+            {
+                "service": "disney",
+                "exact_node_name": f"node-{index}",
+                "exact_node_id": f"id-{index}",
+                "source_snapshot_id": "snapshot-x",
+                "tested_at": "2026-07-22T10:01:00+08:00",
+                "probe_method_version": "regionrestrictioncheck-sidecar-v1",
+                "result": result,
+            }
+            for index, result in enumerate(
+                ("SCREEN_PASS", "FAIL_REGION", "FAIL_IP_BANNED", "FAIL_TRANSPORT")
+            )
+        ],
+    }), encoding="utf-8")
+
+    loaded = SKILL.load_functional_results([path])
+    assert [item["result"] for item in loaded] == [
+        "SCREEN_PASS",
+        "FAIL_REGION",
+        "FAIL_IP_BANNED",
+        "FAIL_TRANSPORT",
+    ]
