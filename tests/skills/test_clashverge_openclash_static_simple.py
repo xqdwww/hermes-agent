@@ -256,6 +256,14 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
         i for i, event in enumerate(events) if "OPENCLASH_ACTIVATION_INSTALL=1" in event
     )
     assert state_index < backup_index < activation_index
+    activation_start = next(
+        event for event in events if "OPENCLASH_ACTIVATION_START=1" in event
+    )
+    assert "/etc/init.d/openclash restart || true" in activation_start
+    assert (
+        "if ! /etc/init.d/openclash running >/dev/null 2>&1; then "
+        "/etc/init.d/openclash start || true; fi"
+    ) in activation_start
     assert any("original.yaml" in command and "active-yaml" in command for command in events)
     assert any(
         "cp -p /etc/config/openclash" in command
@@ -693,6 +701,10 @@ def test_network_snapshot_treats_absent_policy_tables_as_empty_state() -> None:
     assert "ip -4 route show table 354 2>/dev/null || true" in command
     assert "ip -6 rule show 2>/dev/null || true" in command
     assert "ip -6 route show table 354 2>/dev/null || true" in command
+    assert (
+        "nft -s list table inet fw4 2>/dev/null | "
+        "grep -E 'openclash|OpenClash' | sort || true"
+    ) in command
 
 
 def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:

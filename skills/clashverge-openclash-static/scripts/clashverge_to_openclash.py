@@ -3101,7 +3101,8 @@ def network_state_capture_command(output_path: str) -> str:
         f"ip -4 route show table 354 2>/dev/null || true; echo '[rule6]'; "
         f"ip -6 rule show 2>/dev/null || true; echo '[route6-354]'; "
         f"ip -6 route show table 354 2>/dev/null || true; echo '[nft-openclash]'; "
-        f"nft -s list table inet fw4 2>/dev/null | grep -E 'openclash|OpenClash' || true; "
+        f"nft -s list table inet fw4 2>/dev/null | "
+        f"grep -E 'openclash|OpenClash' | sort || true; "
         f"echo '[utun]'; ip -details link show utun 2>/dev/null || true; "
         f"echo '[dnsmasq-upstream]'; "
         f"grep -hE '^(no-resolv|server=|resolv-file=)' "
@@ -3669,12 +3670,18 @@ def activate_uploaded_candidate(
         rollback_remote_deployment(host, transaction=transaction)
         raise ConfigError("REMOTE_ACTIVATION_INSTALL_FAILED_ROLLED_BACK") from exc
 
-    service_action = "restart" if original_running else "start"
+    service_action = (
+        "/etc/init.d/openclash restart || true; "
+        "if ! /etc/init.d/openclash running >/dev/null 2>&1; then "
+        "/etc/init.d/openclash start || true; fi"
+        if original_running
+        else "/etc/init.d/openclash start || true"
+    )
     activate_cmd = (
         "OPENCLASH_ACTIVATION_START=1; set -e; "
         f"uci set openclash.config.config_path={quote_remote(remote_path)}; "
         "uci set openclash.config.enable='1'; uci commit openclash; "
-        f"/etc/init.d/openclash {service_action}"
+        + service_action
     )
     try:
         ssh_command(host, activate_cmd, capture=True)
