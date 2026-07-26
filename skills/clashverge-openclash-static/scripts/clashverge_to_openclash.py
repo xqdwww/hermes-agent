@@ -184,10 +184,11 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "socks-port",
     "tproxy-port",
 }
-HEALTH_CHECK_ATTEMPTS = 3
-HEALTH_CHECK_DELAY_SECONDS = 2
-REMOTE_HEALTH_CHECK_ATTEMPTS = 25
-REMOTE_HEALTH_CHECK_DELAY_SECONDS = 2
+REMOTE_HEALTH_DEADLINE_SECONDS = 110
+REMOTE_HEALTH_POLL_INTERVAL_SECONDS = 1
+REMOTE_HEALTH_CONSECUTIVE_SUCCESSES = 2
+LAN_HEALTH_DEADLINE_SECONDS = 30
+ROLLBACK_NETWORK_DEADLINE_SECONDS = 30
 LAN_HEALTH_URL = "https://www.baidu.com/"
 REMOTE_SIDECAR_MIXED_PORT = 17890
 REMOTE_SIDECAR_CONTROLLER_PORT = 19090
@@ -3199,50 +3200,62 @@ def read_remote_openclash_state(host: str) -> dict[str, str | bool]:
     }
 
 
-def wait_for_openclash_running(host: str, max_wait_seconds: int = 15) -> None:
-    """Poll /etc/init.d/openclash running every second until success or timeout.
-
-    Args:
-        host: SSH host
-        max_wait_seconds: Maximum seconds to wait (default 15)
-
-    Raises:
-        ConfigError: If running check fails after max_wait_seconds
-    """
-    start_time = time.monotonic()
-    last_error: subprocess.CalledProcessError | None = None
-
-    while time.monotonic() - start_time < max_wait_seconds:
-        try:
-            ssh_command(host, "/etc/init.d/openclash running >/dev/null 2>&1", capture=True)
-            return  # Success: running check passed
-        except subprocess.CalledProcessError as exc:
-            last_error = exc
-            time.sleep(1)  # Wait 1 second before next attempt
-
-    raise ConfigError(
-        f"OpenClash not running after {max_wait_seconds} seconds"
-    ) from last_error
-
-
 def verify_remote_health(
     host: str,
     *,
     remote_path: str,
     core_path: str,
-    attempts: int = REMOTE_HEALTH_CHECK_ATTEMPTS,
-    delay_seconds: int = REMOTE_HEALTH_CHECK_DELAY_SECONDS,
+    expected_sha256: str | None = None,
+    expected_config_path: str | None = None,
+    expected_enabled: bool | None = True,
+    deadline_seconds: int = REMOTE_HEALTH_DEADLINE_SECONDS,
+    poll_interval_seconds: int = REMOTE_HEALTH_POLL_INTERVAL_SECONDS,
+    consecutive_successes: int = REMOTE_HEALTH_CONSECUTIVE_SUCCESSES,
 ) -> None:
-    if attempts < 1:
-        raise ConfigError("HEALTH_CHECK_FAILED: attempts must be at least 1")
+    if deadline_seconds < 1:
+        raise ConfigError("HEALTH_CHECK_FAILED: deadline must be at least 1 second")
+    if poll_interval_seconds < 1:
+        raise ConfigError("HEALTH_CHECK_FAILED: poll interval must be at least 1 second")
+    if consecutive_successes < 1:
+        raise ConfigError("HEALTH_CHECK_FAILED: consecutive successes must be at least 1")
+    if expected_sha256 is not None:
+        sha_check = (
+            f"[ \"$(sha256sum \"$active_path\" | awk '{{print $1}}')\" = "
+            f"{quote_remote(expected_sha256)} ]; "
+        )
+    elif expected_config_path is not None:
+        sha_check = (
+            f"cmp -s \"$active_path\" {quote_remote(expected_config_path)}; "
+        )
+    else:
+        sha_check = ""
+    if expected_enabled is True:
+        enabled_check = "/etc/init.d/openclash enabled >/dev/null 2>&1; "
+    elif expected_enabled is False:
+        enabled_check = "! /etc/init.d/openclash enabled >/dev/null 2>&1; "
+    else:
+        enabled_check = ""
     command = (
         "OPENCLASH_HEALTH_CHECK=1; set -e; "
+        + enabled_check
+        +
         "/etc/init.d/openclash running >/dev/null 2>&1; "
         "pidof clash >/dev/null 2>&1 || pidof mihomo >/dev/null 2>&1; "
         "active_path=\"$(uci -q get openclash.config.config_path)\"; "
         "[ -n \"$active_path\" ]; "
         f"[ \"$active_path\" = {quote_remote(remote_path)} ]; "
-        f"{quote_remote(core_path)} -t -d /etc/openclash -f \"$active_path\"; "
+        + sha_check
+        + f"{quote_remote(core_path)} -t -d /etc/openclash -f \"$active_path\"; "
+        "controller_port=\"$(uci -q get openclash.config.cn_port 2>/dev/null || true)\"; "
+        "case \"$controller_port\" in ''|*[!0-9]*) exit 1 ;; esac; "
+        "[ \"$controller_port\" -ge 1 ] && [ \"$controller_port\" -le 65535 ]; "
+        "if command -v ss >/dev/null 2>&1; then "
+        "ss -lnt | awk -v port=\"$controller_port\" "
+        "'$4 ~ (\":\" port \"$\") {found=1} END {exit !found}'; "
+        "elif command -v netstat >/dev/null 2>&1; then "
+        "netstat -lnt | awk -v port=\"$controller_port\" "
+        "'$4 ~ (\":\" port \"$\") {found=1} END {exit !found}'; "
+        "else exit 1; fi; "
         "proxy_port=''; "
         "for option in mixed_port http_port; do "
         "candidate=\"$(uci -q get openclash.config.$option 2>/dev/null || true)\"; "
@@ -3263,31 +3276,71 @@ def verify_remote_health(
         "elif command -v netstat >/dev/null 2>&1; then "
         "netstat -lnt | awk -v port=\"$proxy_port\" '$4 ~ (\":\" port \"$\") {found=1} END {exit !found}'; "
         "else exit 1; fi; "
-        "http_code=\"$(curl --proxy \"http://127.0.0.1:${proxy_port}\" "
+        "proxy_auth_user=''; proxy_auth_password=''; "
+        "for auth_index in 0 1 2 3 4 5 6 7; do "
+        "auth_enabled=\"$(uci -q get \"openclash.@authentication[$auth_index].enabled\" "
+        "2>/dev/null || true)\"; [ \"$auth_enabled\" = '1' ] || continue; "
+        "proxy_auth_user=\"$(uci -q get "
+        "\"openclash.@authentication[$auth_index].username\" 2>/dev/null || true)\"; "
+        "proxy_auth_password=\"$(uci -q get "
+        "\"openclash.@authentication[$auth_index].password\" 2>/dev/null || true)\"; "
+        "[ -n \"$proxy_auth_user\" ] && break; done; "
+        "if [ -n \"$proxy_auth_user\" ]; then "
+        "proxy_auth_user_escaped=\"$(printf '%s' \"$proxy_auth_user\" | "
+        "sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\"; "
+        "proxy_auth_password_escaped=\"$(printf '%s' \"$proxy_auth_password\" | "
+        "sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\"; "
+        "http_code=\"$(printf 'proxy-user = \"%s:%s\"\\n' "
+        "\"$proxy_auth_user_escaped\" \"$proxy_auth_password_escaped\" | "
+        "curl --config - --proxy \"http://127.0.0.1:${proxy_port}\" "
         "--connect-timeout 3 --max-time 8 --silent --output /dev/null "
         "--write-out '%{http_code}' https://www.gstatic.com/generate_204)\"; "
-        "[ \"$http_code\" = '204' ]"
+        "else http_code=\"$(curl --proxy \"http://127.0.0.1:${proxy_port}\" "
+        "--connect-timeout 3 --max-time 8 --silent --output /dev/null "
+        "--write-out '%{http_code}' https://www.gstatic.com/generate_204)\"; fi; "
+        "[ \"$http_code\" = '204' ]; "
+        "nslookup www.baidu.com >/dev/null 2>&1; "
+        "router_http_code=\"$(curl --noproxy '*' --connect-timeout 3 --max-time 8 "
+        "--silent --output /dev/null --write-out '%{http_code}' "
+        "https://www.gstatic.com/generate_204)\"; "
+        "[ \"$router_http_code\" = '204' ]"
     )
     last_error: subprocess.CalledProcessError | None = None
-    for attempt in range(attempts):
+    deadline = time.monotonic() + deadline_seconds
+    successful_checks = 0
+    attempts = 0
+    while time.monotonic() < deadline:
+        attempts += 1
         try:
             ssh_command(host, command, capture=True)
-            return
+            successful_checks += 1
+            if successful_checks >= consecutive_successes:
+                return
         except subprocess.CalledProcessError as exc:
             last_error = exc
-            if attempt + 1 < attempts:
-                time.sleep(delay_seconds)
-    raise ConfigError(f"HEALTH_CHECK_FAILED after {attempts} attempts") from last_error
+            successful_checks = 0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+    raise ConfigError(
+        f"HEALTH_CHECK_FAILED: deadline {deadline_seconds}s expired after {attempts} attempts"
+    ) from last_error
 
 
 def verify_lan_client_egress(
     *,
-    attempts: int = HEALTH_CHECK_ATTEMPTS,
-    delay_seconds: int = HEALTH_CHECK_DELAY_SECONDS,
+    deadline_seconds: int = LAN_HEALTH_DEADLINE_SECONDS,
+    poll_interval_seconds: int = 1,
+    consecutive_successes: int = REMOTE_HEALTH_CONSECUTIVE_SUCCESSES,
 ) -> None:
     """Layer 3: verify egress from the machine running this deployment."""
+    if deadline_seconds < 1 or poll_interval_seconds < 1 or consecutive_successes < 1:
+        raise ConfigError("ROLLBACK_HEALTH_LAYER3_INVALID_WAIT")
     last_error: subprocess.CalledProcessError | None = None
-    for attempt in range(attempts):
+    deadline = time.monotonic() + deadline_seconds
+    successful_checks = 0
+    while time.monotonic() < deadline:
         try:
             run(
                 [
@@ -3307,11 +3360,16 @@ def verify_lan_client_egress(
                     LAN_HEALTH_URL,
                 ]
             )
-            return
+            successful_checks += 1
+            if successful_checks >= consecutive_successes:
+                return
         except subprocess.CalledProcessError as exc:
             last_error = exc
-            if attempt + 1 < attempts:
-                time.sleep(delay_seconds)
+            successful_checks = 0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
     raise ConfigError("ROLLBACK_HEALTH_LAYER3_LAN_EGRESS_FAILED") from last_error
 
 
@@ -3360,15 +3418,48 @@ def verify_stopped_openclash_health(
 
 def verify_post_rollback_health(host: str, transaction: DeploymentTransaction) -> None:
     if transaction.original_running:
-        wait_for_openclash_running(host, max_wait_seconds=15)
         verify_remote_health(
             host,
             remote_path=transaction.original_active_path,
             core_path=transaction.core_path,
+            expected_enabled=transaction.original_enabled,
         )
     else:
         verify_stopped_openclash_health(host, transaction)
     verify_lan_client_egress()
+
+
+def verify_rollback_network_state(
+    host: str,
+    transaction: DeploymentTransaction,
+    *,
+    deadline_seconds: int = ROLLBACK_NETWORK_DEADLINE_SECONDS,
+    poll_interval_seconds: int = 1,
+) -> None:
+    if deadline_seconds < 1 or poll_interval_seconds < 1:
+        raise ConfigError("ROLLBACK_NETWORK_VERIFY_INVALID_WAIT")
+    verify_network_path = transaction.network_state_backup + ".verify"
+    command = (
+        "OPENCLASH_ROLLBACK_NETWORK_VERIFY=1; "
+        + network_state_capture_command(verify_network_path)
+        + f"; if cmp -s {quote_remote(transaction.network_state_backup)} "
+        + f"{quote_remote(verify_network_path)}; then "
+        + f"rm -f {quote_remote(verify_network_path)}; exit 0; else "
+        + f"rm -f {quote_remote(verify_network_path)}; exit 1; fi"
+    )
+    deadline = time.monotonic() + deadline_seconds
+    last_error: subprocess.CalledProcessError | None = None
+    while time.monotonic() < deadline:
+        try:
+            ssh_command(host, command, capture=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+    raise ConfigError("ROLLBACK_NETWORK_STATE_DEADLINE_EXPIRED") from last_error
 
 
 def rollback_remote_deployment(
@@ -3497,15 +3588,7 @@ def rollback_remote_deployment(
     try:
         ssh_command(host, "; ".join(verify_parts), capture=True)
         verify_post_rollback_health(host, transaction)
-        verify_network_path = transaction.network_state_backup + ".verify"
-        ssh_command(
-            host,
-            "OPENCLASH_ROLLBACK_NETWORK_VERIFY=1; set -e; "
-            + network_state_capture_command(verify_network_path)
-            + f"; cmp -s {quote_remote(transaction.network_state_backup)} "
-            + f"{quote_remote(verify_network_path)}; rm -f {quote_remote(verify_network_path)}",
-            capture=True,
-        )
+        verify_rollback_network_state(host, transaction)
     except (subprocess.CalledProcessError, ConfigError) as exc:
         raise ConfigError("ROLLBACK_FAILED: rollback verification failed") from exc
 
@@ -3687,8 +3770,13 @@ def activate_uploaded_candidate(
     )
     try:
         ssh_command(host, activate_cmd, capture=True)
-        wait_for_openclash_running(host, max_wait_seconds=15)
-        verify_remote_health(host, remote_path=remote_path, core_path=core_path)
+        verify_remote_health(
+            host,
+            remote_path=remote_path,
+            core_path=core_path,
+            expected_config_path=candidate.candidate_path,
+        )
+        verify_lan_client_egress()
     except (subprocess.CalledProcessError, ConfigError) as exc:
         rollback_remote_deployment(host, transaction=transaction)
         raise ConfigError("HEALTH_CHECK_FAILED_ROLLED_BACK") from exc

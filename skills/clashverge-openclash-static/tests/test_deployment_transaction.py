@@ -245,8 +245,8 @@ def test_activation_success_preserves_running_and_stopped_entry_semantics(
             MODULE, "read_remote_openclash_state", return_value=remote_state(running=running)
         ),
         patch.object(MODULE, "ssh_command", side_effect=fake_ssh),
-        patch.object(MODULE, "wait_for_openclash_running"),
-        patch.object(MODULE, "verify_remote_health"),
+        patch.object(MODULE, "verify_remote_health") as health,
+        patch.object(MODULE, "verify_lan_client_egress") as lan_health,
         patch.object(MODULE, "rollback_remote_deployment") as rollback,
     ):
         result = MODULE.activate_uploaded_candidate(
@@ -255,6 +255,8 @@ def test_activation_success_preserves_running_and_stopped_entry_semantics(
 
     assert result == "/etc/openclash/config/new.yaml"
     assert f"/etc/init.d/openclash {expected_action}" in "\n".join(commands)
+    assert health.call_args.kwargs["expected_config_path"] == candidate.candidate_path
+    lan_health.assert_called_once()
     rollback.assert_not_called()
 
 
@@ -344,3 +346,33 @@ def test_stopped_with_stale_dataplane_is_blocked_before_transaction() -> None:
         with pytest.raises(MODULE.ConfigError, match="STOPPED_DATAPLANE_INCONSISTENT"):
             MODULE.activate_uploaded_candidate(candidate, host="router", core_path="/core")
     ssh.assert_not_called()
+
+
+def test_rollback_network_verification_retries_until_final_state_matches() -> None:
+    clock = [0.0]
+    calls = 0
+
+    def fake_ssh(_host: str, _command: str, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise subprocess.CalledProcessError(1, ["ssh"])
+        return completed()
+
+    def advance(seconds: float) -> None:
+        clock[0] += seconds
+
+    with (
+        patch.object(MODULE, "ssh_command", side_effect=fake_ssh),
+        patch.object(MODULE.time, "monotonic", side_effect=lambda: clock[0]),
+        patch.object(MODULE.time, "sleep", side_effect=advance),
+    ):
+        MODULE.verify_rollback_network_state(
+            "router",
+            transaction(),
+            deadline_seconds=5,
+            poll_interval_seconds=1,
+        )
+
+    assert calls == 3
+    assert clock[0] == 2

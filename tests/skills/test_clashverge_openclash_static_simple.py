@@ -188,7 +188,13 @@ def test_transform_removes_verge_runtime_without_touching_proxy_ports() -> None:
 
 
 def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
+    clock = [0.0]
+    monkeypatch.setattr(MODULE.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        MODULE.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
     candidate = MODULE.UploadedCandidate(
         "/etc/openclash/config/.clashverge-candidates/new.candidate",
         "/etc/openclash/config/new.yaml",
@@ -234,7 +240,7 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
             core_path="/etc/openclash/core/clash_meta",
         )
 
-    assert health_calls == MODULE.REMOTE_HEALTH_CHECK_ATTEMPTS
+    assert health_calls == MODULE.REMOTE_HEALTH_DEADLINE_SECONDS
     health_commands = [command for command in events if "OPENCLASH_HEALTH_CHECK=1" in command]
     assert all(
         "/etc/init.d/openclash running" in command
@@ -244,6 +250,7 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
         and "ss -lnt" in command
         and "netstat -lnt" in command
         and "curl --proxy" in command
+        and "curl --config -" in command
         and "--connect-timeout 3" in command
         and "--max-time 8" in command
         and "https://www.gstatic.com/generate_204" in command
@@ -294,6 +301,7 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
 
 
 def test_rollback_failure_has_explicit_status(tmp_path, monkeypatch) -> None:
+    clock = [0.0]
     monkeypatch.setattr(MODULE, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 0))
     candidate = MODULE.UploadedCandidate(
         "/etc/openclash/config/.clashverge-candidates/new.candidate",
@@ -323,7 +331,12 @@ def test_rollback_failure_has_explicit_status(tmp_path, monkeypatch) -> None:
         return subprocess.CompletedProcess([], 0)
 
     monkeypatch.setattr(MODULE, "ssh_command", fake_ssh)
-    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(MODULE.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        MODULE.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
     with pytest.raises(MODULE.ConfigError, match="ROLLBACK_FAILED"):
         MODULE.activate_uploaded_candidate(
             candidate,
@@ -1192,58 +1205,81 @@ def urllib_host(url: str) -> str:
     return url.split("/", 3)[2]
 
 
-def test_wait_for_openclash_running_polls_until_success(monkeypatch) -> None:
-    """Test: running succeeds on 3rd second - should not wait full 15 seconds."""
-    call_count = 0
-
-    def counting_ssh(host: str, command: str, *, capture: bool = False) -> None:
-        nonlocal call_count
-        call_count += 1
-        if "/etc/init.d/openclash running" in command:
-            if call_count < 3:  # Fail first 2 times
-                raise subprocess.CalledProcessError(1, command)
-            # Succeed on 3rd call
-        return None
-
-    monkeypatch.setattr(MODULE, "ssh_command", counting_ssh)
-    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
-
-    # Should succeed on 3rd attempt (after 2 failures)
-    MODULE.wait_for_openclash_running("root@192.168.10.1", max_wait_seconds=15)
-
-    # Verify: exactly 3 calls (2 failures + 1 success)
-    assert call_count == 3, f"Expected 3 calls, got {call_count}"
+def test_remote_health_deadline_is_bounded_and_stable() -> None:
+    assert 45 <= MODULE.REMOTE_HEALTH_DEADLINE_SECONDS <= 120
+    assert MODULE.REMOTE_HEALTH_POLL_INTERVAL_SECONDS == 1
+    assert MODULE.REMOTE_HEALTH_CONSECUTIVE_SUCCESSES == 2
 
 
-def test_wait_for_openclash_running_times_out_after_15_seconds(monkeypatch) -> None:
-    """Test: running fails for 15 seconds - should raise ConfigError."""
-    call_count = 0
+def test_remote_health_uses_deadline_auth_and_two_consecutive_passes(monkeypatch) -> None:
+    commands: list[str] = []
+    outcomes = iter([0, 1, 0, 0])
+    clock = [0.0]
 
-    def always_fail_ssh(host: str, command: str, *, capture: bool = False) -> None:
-        nonlocal call_count
-        call_count += 1
-        if "/etc/init.d/openclash running" in command:
+    def fake_ssh(host: str, command: str, *, capture: bool = False):
+        commands.append(command)
+        if next(outcomes):
             raise subprocess.CalledProcessError(1, command)
-        return None
+        return subprocess.CompletedProcess([], 0)
 
-    monkeypatch.setattr(MODULE, "ssh_command", always_fail_ssh)
-    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: None)
-
-    # Should fail after 15 attempts (one per second)
-    with pytest.raises(MODULE.ConfigError, match="OpenClash not running after 15 seconds"):
-        MODULE.wait_for_openclash_running("root@192.168.10.1", max_wait_seconds=15)
-
-    # Verify: at least 15 calls (could be 16 due to final check)
-    assert call_count >= 15, f"Expected at least 15 calls, got {call_count}"
-
-
-def test_remote_health_retry_window_covers_slow_openclash_startup() -> None:
-    assert (
-        (MODULE.REMOTE_HEALTH_CHECK_ATTEMPTS - 1)
-        * MODULE.REMOTE_HEALTH_CHECK_DELAY_SECONDS
-        >= 45
+    monkeypatch.setattr(MODULE, "ssh_command", fake_ssh)
+    monkeypatch.setattr(MODULE.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        MODULE.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
     )
-    assert MODULE.HEALTH_CHECK_ATTEMPTS == 3
+
+    MODULE.verify_remote_health(
+        "router.invalid",
+        remote_path="/etc/openclash/config/new.yaml",
+        core_path="/etc/openclash/core/clash_meta",
+        expected_sha256="abc123",
+        deadline_seconds=10,
+        poll_interval_seconds=1,
+        consecutive_successes=2,
+    )
+
+    assert len(commands) == 4
+    command = commands[0]
+    assert "OPENCLASH_HEALTH_CHECK=1" in command
+    assert "openclash.@authentication[$auth_index].enabled" in command
+    assert "curl --config -" in command
+    assert "--proxy-user" not in command
+    assert "cn_port" in command
+    assert "nslookup" in command
+    assert "abc123" in command
+
+
+def test_remote_health_stops_only_at_deadline(monkeypatch) -> None:
+    calls = 0
+    clock = [0.0]
+
+    def fake_ssh(host: str, command: str, *, capture: bool = False):
+        nonlocal calls
+        calls += 1
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(MODULE, "ssh_command", fake_ssh)
+    monkeypatch.setattr(MODULE.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        MODULE.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    with pytest.raises(MODULE.ConfigError, match="deadline"):
+        MODULE.verify_remote_health(
+            "router.invalid",
+            remote_path="/etc/openclash/config/new.yaml",
+            core_path="/etc/openclash/core/clash_meta",
+            deadline_seconds=3,
+            poll_interval_seconds=1,
+            consecutive_successes=2,
+        )
+
+    assert calls == 3
+    assert clock[0] == 3
 
 
 def source_gate_fixture(tmp_path: Path, *, count: int = 4) -> tuple[Path, Path]:

@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.0
+version: 2.4.1
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,11 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the only release-version source for this
-Skill. Version 2.4.0 makes the router-installed RegionRestrictionCheck the formal
+Skill. Version 2.4.1 makes activation and rollback health checks honor enabled
+OpenClash mixed-proxy authentication without exposing credentials, uses a real
+bounded deadline with consecutive stable passes, and waits for the final restored
+network state instead of treating an intermediate mismatch as rollback failure.
+Version 2.4.0 made the router-installed RegionRestrictionCheck the formal
 GPT/Gemini/Disney screening backend. Hermes freezes the source, orchestrates the
 external tool through the isolated candidate sidecar, fuses snapshot-bound manual
 and full-chain evidence, builds the candidate, and keeps activation as a separate
@@ -281,9 +285,9 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 5. Sidecar-test the candidate before activation. Its DNS and proxy listeners are loopback-only and it must not enable TUN, TPROXY, policy routing, firewall integration, or LAN access.
 6. Activation is the transaction boundary. Only here read the real active YAML path from UCI and back up that active YAML, the destination state, `/etc/config/openclash`, `/etc/config/dhcp`, `/etc/config/firewall`, enabled/running/core state, and full diagnostic snapshots of IPv4/IPv6 rules, table 354, OpenClash nft state, and utun state.
 7. Atomically copy the immutable candidate into the production config path, set UCI, enable OpenClash, and commit. Restart an originally running service, but treat the init-script exit code as advisory because procd may report `service delete: Not found`; check actual running state and issue one `start` fallback when needed. The bounded Layer 0–3 health checks remain authoritative.
-8. After restart, allow up to 25 remote-health attempts with a two-second interval so slow OpenClash/procd startup cannot be mistaken for a failed candidate merely because procd reports `running` before the core and proxy listener are ready. Each attempt verifies the service, validates the YAML currently selected by UCI with the installed core, discovers the mixed/HTTP proxy port from OpenClash UCI or the running/active YAML, verifies that port is listening, and requests `https://www.gstatic.com/generate_204` through that proxy with a three-second connect timeout and eight-second total timeout. The separate LAN egress check retains three bounded attempts.
+8. After restart, poll once per second against a 110-second remote-health deadline and require two consecutive complete passes. Each pass verifies enabled/running service state, the core process, selected-config path and exact candidate bytes, Mihomo syntax, controller and mixed/HTTP listeners, router DNS and HTTP 204, and proxy HTTP 204. When an enabled OpenClash authentication section exists, read it only inside the remote shell and pipe an escaped curl-config line over stdin; never place credentials in argv, stdout, logs, or reports. Apply the same consecutive-pass rule to LAN egress.
 9. On install, restart, or health failure, first stop OpenClash while its live DNS/firewall rollback bookkeeping still exists. In a rollback `finally` path, restore the destination and original active YAML states, OpenClash/DHCP/firewall UCI, reload firewall and dnsmasq, and restore the original enabled/running service state. A procd `service delete: Not found` must not skip later recovery steps. Capture absent rule/table/TUN state as an empty section instead of a shell error.
-10. Post-rollback health is layered: actual OpenClash core process state (Layer 0), restored Mihomo config test (Layer 1), proxy listener or absence of stale fwmark/table 354/nft redirect state (Layer 2), and transparent egress from the LAN machine running the deployment (Layer 3). Compare OpenClash nft snapshot lines in sorted order so firewall reload declaration reordering does not become a false rollback failure while rule-set additions/removals still fail. `curl --noproxy '*'` disables explicit proxy variables only; it is deliberately not claimed to bypass router transparent interception. Return an explicit `ROLLBACK_FAILED` status if any required layer fails.
+10. Post-rollback health is layered: actual OpenClash core process state (Layer 0), restored Mihomo config test (Layer 1), authentication-aware proxy listener/egress or absence of stale fwmark/table 354/nft redirect state (Layer 2), and transparent egress from the LAN machine running the deployment (Layer 3). Poll the restored network snapshot to a separate bounded deadline and judge the final stable state, not an intermediate firewall/dnsmasq reload state. Compare OpenClash nft snapshot lines in sorted order so firewall reload declaration reordering does not become a false rollback failure while rule-set additions/removals still fail. `curl --noproxy '*'` disables explicit proxy variables only; it is deliberately not claimed to bypass router transparent interception. Return an explicit `ROLLBACK_FAILED` status only if a required final state still fails at its deadline.
 11. Never reboot the router.
 
 ## Stop conditions
