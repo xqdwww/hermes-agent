@@ -3096,10 +3096,11 @@ def quote_remote(value: str) -> str:
 def network_state_capture_command(output_path: str) -> str:
     """Capture the transaction-relevant dataplane and DNS upstream semantics."""
     return (
-        f"{{ echo '[rule4]'; ip -4 rule show 2>/dev/null; echo '[route4-354]'; "
-        f"ip -4 route show table 354 2>/dev/null; echo '[rule6]'; "
-        f"ip -6 rule show 2>/dev/null; echo '[route6-354]'; "
-        f"ip -6 route show table 354 2>/dev/null; echo '[nft-openclash]'; "
+        f"{{ echo '[rule4]'; ip -4 rule show 2>/dev/null || true; "
+        f"echo '[route4-354]'; "
+        f"ip -4 route show table 354 2>/dev/null || true; echo '[rule6]'; "
+        f"ip -6 rule show 2>/dev/null || true; echo '[route6-354]'; "
+        f"ip -6 route show table 354 2>/dev/null || true; echo '[nft-openclash]'; "
         f"nft -s list table inet fw4 2>/dev/null | grep -E 'openclash|OpenClash' || true; "
         f"echo '[utun]'; ip -details link show utun 2>/dev/null || true; "
         f"echo '[dnsmasq-upstream]'; "

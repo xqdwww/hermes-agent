@@ -686,6 +686,15 @@ def test_v3_reconcile_adds_current_source_node_without_faking_probe(tmp_path) ->
     ]
 
 
+def test_network_snapshot_treats_absent_policy_tables_as_empty_state() -> None:
+    command = MODULE.network_state_capture_command("/tmp/network-state")
+
+    assert "ip -4 rule show 2>/dev/null || true" in command
+    assert "ip -4 route show table 354 2>/dev/null || true" in command
+    assert "ip -6 rule show 2>/dev/null || true" in command
+    assert "ip -6 route show table 354 2>/dev/null || true" in command
+
+
 def test_v2_lkg_merge_rules_and_current_subscription_filter() -> None:
     anchor = "🇯🇵锚点"
     existing_unknown = "🇨🇳台湾旧LKG"
