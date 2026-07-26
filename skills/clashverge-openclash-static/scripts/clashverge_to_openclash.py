@@ -186,6 +186,8 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
 }
 HEALTH_CHECK_ATTEMPTS = 3
 HEALTH_CHECK_DELAY_SECONDS = 2
+REMOTE_HEALTH_CHECK_ATTEMPTS = 25
+REMOTE_HEALTH_CHECK_DELAY_SECONDS = 2
 LAN_HEALTH_URL = "https://www.baidu.com/"
 REMOTE_SIDECAR_MIXED_PORT = 17890
 REMOTE_SIDECAR_CONTROLLER_PORT = 19090
@@ -3228,8 +3230,8 @@ def verify_remote_health(
     *,
     remote_path: str,
     core_path: str,
-    attempts: int = HEALTH_CHECK_ATTEMPTS,
-    delay_seconds: int = HEALTH_CHECK_DELAY_SECONDS,
+    attempts: int = REMOTE_HEALTH_CHECK_ATTEMPTS,
+    delay_seconds: int = REMOTE_HEALTH_CHECK_DELAY_SECONDS,
 ) -> None:
     if attempts < 1:
         raise ConfigError("HEALTH_CHECK_FAILED: attempts must be at least 1")

@@ -234,7 +234,7 @@ def test_deploy_retries_health_then_rolls_back_and_verifies(tmp_path, monkeypatc
             core_path="/etc/openclash/core/clash_meta",
         )
 
-    assert health_calls == MODULE.HEALTH_CHECK_ATTEMPTS
+    assert health_calls == MODULE.REMOTE_HEALTH_CHECK_ATTEMPTS
     health_commands = [command for command in events if "OPENCLASH_HEALTH_CHECK=1" in command]
     assert all(
         "/etc/init.d/openclash running" in command
@@ -1235,6 +1235,15 @@ def test_wait_for_openclash_running_times_out_after_15_seconds(monkeypatch) -> N
 
     # Verify: at least 15 calls (could be 16 due to final check)
     assert call_count >= 15, f"Expected at least 15 calls, got {call_count}"
+
+
+def test_remote_health_retry_window_covers_slow_openclash_startup() -> None:
+    assert (
+        (MODULE.REMOTE_HEALTH_CHECK_ATTEMPTS - 1)
+        * MODULE.REMOTE_HEALTH_CHECK_DELAY_SECONDS
+        >= 45
+    )
+    assert MODULE.HEALTH_CHECK_ATTEMPTS == 3
 
 
 def source_gate_fixture(tmp_path: Path, *, count: int = 4) -> tuple[Path, Path]:
