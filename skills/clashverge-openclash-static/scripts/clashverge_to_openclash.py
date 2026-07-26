@@ -2617,6 +2617,12 @@ def annotate_probe_semantics(
                 node.get("services", {}).get(service, {}).get("final_result") == "EVIDENCE_CONFLICT"
                 for node in nodes
             ),
+            "candidate_evidence_conflict": sum(
+                node.get("name") in candidate_names
+                and node.get("services", {}).get(service, {}).get("final_result")
+                == "EVIDENCE_CONFLICT"
+                for node in nodes
+            ),
         }
     report["candidate_evidence_summary"] = summaries
     report["definitive_automated_pass_counts"] = {
@@ -2631,7 +2637,10 @@ def annotate_probe_semantics(
         blockers.append("GEMINI_CURRENT_SCREEN_OR_MANUAL_CANDIDATE_MISSING")
     if summaries["disney"]["candidates"] == 0:
         blockers.append("DISNEY_FULL_REGION_CHAIN_RESULT_MISSING")
-    conflicts = sum(summaries[service]["evidence_conflict"] for service in SERVICE_KEYS)
+    conflicts = sum(
+        summaries[service]["candidate_evidence_conflict"]
+        for service in SERVICE_KEYS
+    )
     if conflicts:
         blockers.append("EVIDENCE_CONFLICT_PRESENT")
     report["activation_blocked_reasons"] = blockers

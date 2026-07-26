@@ -342,6 +342,42 @@ def test_manual_fail_conflicts_with_automated_pass_and_excludes_candidate() -> N
     assert result["evidence_conflict"] is True
 
 
+def test_activation_blocks_only_conflicts_that_enter_candidate_group() -> None:
+    nodes = []
+    for name in ("conflict-node", "safe-node"):
+        nodes.append({
+            "name": name,
+            "observed_at": "2026-07-22T10:00:00+08:00",
+            "services": {
+                service: {
+                    "final_result": (
+                        "EVIDENCE_CONFLICT"
+                        if name == "conflict-node" and service == "gemini"
+                        else "SCREEN_PASS"
+                    )
+                }
+                for service in SKILL.SERVICE_KEYS
+            },
+        })
+    report = {
+        "run_timestamp": "2026-07-22T10:00:00+08:00",
+        "service_groups": {
+            service: {
+                "automatic": ["safe-node"],
+                "historical_lkg": [],
+            }
+            for service in SKILL.SERVICE_KEYS
+        },
+    }
+
+    SKILL.annotate_probe_semantics(report, nodes)
+    assert "EVIDENCE_CONFLICT_PRESENT" not in report["activation_blocked_reasons"]
+
+    report["service_groups"]["gemini"]["automatic"].append("conflict-node")
+    SKILL.annotate_probe_semantics(report, nodes)
+    assert "EVIDENCE_CONFLICT_PRESENT" in report["activation_blocked_reasons"]
+
+
 def test_gemini_manual_pass_admits_screen_negative_as_false_negative() -> None:
     screened = functional("SCREEN_NEGATIVE")
     report = SKILL.apply_functional_results_to_report(base_report(), [screened], manifest())
