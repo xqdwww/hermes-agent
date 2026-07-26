@@ -181,6 +181,45 @@ def test_node_transport_failure_records_all_services_without_ip() -> None:
     assert {item["exit_country"] for item in report["results"]} == {"UNKNOWN"}
 
 
+def test_failed_tool_without_provider_records_node_error_not_service_results() -> None:
+    assert RRC.is_unattributable_tool_failure(1, None) is True
+    assert RRC.is_unattributable_tool_failure(0, None) is False
+    assert RRC.is_unattributable_tool_failure(1, "203.0.*.*") is False
+
+    report = {"results": [], "node_errors": []}
+    manifest = {
+        "source_snapshot_id": "snapshot_test",
+        "source_hash": "a" * 64,
+    }
+    tool = {
+        "tool_version": "1.0.1",
+        "script_sha256": "b" * 64,
+    }
+    RRC.append_node_error(
+        report,
+        manifest=manifest,
+        identities={"node-a": "node_abc"},
+        node_name="node-a",
+        tool=tool,
+    )
+
+    assert report["results"] == []
+    assert report["node_errors"] == [
+        {
+            "exact_node_id": "node_abc",
+            "exact_node_name": "node-a",
+            "source_snapshot_id": "snapshot_test",
+            "source_hash": "a" * 64,
+            "tool_version": "1.0.1",
+            "tool_sha256": "b" * 64,
+            "tested_at": report["node_errors"][0]["tested_at"],
+            "probe_method_version": RRC.METHOD_VERSION,
+            "error": "RRC_EXECUTION_FAILED_NO_ATTRIBUTABLE_RESULTS",
+            "evidence_type": "UNKNOWN",
+        }
+    ]
+
+
 def test_regioncheck_values_are_completed_without_service_reuse() -> None:
     output = "ChatGPT: Yes\nDisney+: No (IP Banned By Disney+ 1)\n"
 

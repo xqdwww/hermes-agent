@@ -127,6 +127,10 @@ def masked_ip_matches(full_ip: str, masked_ip: str | None) -> bool:
     return bool(normalized) and full_ip.lower().startswith(normalized.rstrip(":"))
 
 
+def is_unattributable_tool_failure(returncode: int, masked_ip: str | None) -> bool:
+    return returncode not in {0, 124} and masked_ip is None
+
+
 def hmac_prefix(key: bytes, value: str) -> str:
     return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()[:20]
 
@@ -163,6 +167,30 @@ def append_service_results(
                 "evidence_type": evidence,
             }
         )
+
+
+def append_node_error(
+    report: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    identities: dict[str, str],
+    node_name: str,
+    tool: dict[str, Any],
+) -> None:
+    report["node_errors"].append(
+        {
+            "exact_node_id": identities[node_name],
+            "exact_node_name": node_name,
+            "source_snapshot_id": manifest["source_snapshot_id"],
+            "source_hash": manifest["source_hash"],
+            "tool_version": tool["tool_version"],
+            "tool_sha256": tool["script_sha256"],
+            "tested_at": iso_now(),
+            "probe_method_version": METHOD_VERSION,
+            "error": "RRC_EXECUTION_FAILED_NO_ATTRIBUTABLE_RESULTS",
+            "evidence_type": "UNKNOWN",
+        }
+    )
 
 
 def inspect_tool(skill: Any, host: str) -> dict[str, Any]:
@@ -340,6 +368,7 @@ def main() -> int:
         "status": "RUNNING",
         "production_fingerprint_preserved": False,
         "results": [],
+        "node_errors": [],
     }
     with tempfile.TemporaryDirectory(prefix="rrc-sidecar-") as temporary:
         config_path = Path(temporary) / "probe.yaml"
@@ -396,6 +425,23 @@ def main() -> int:
                     )
                     masked = extract_masked_ip(output)
                     if returncode != 124 and not masked_ip_matches(control_ip, masked):
+                        if is_unattributable_tool_failure(returncode, masked):
+                            append_node_error(
+                                report,
+                                manifest=manifest,
+                                identities=identities,
+                                node_name=name,
+                                tool=tool,
+                            )
+                            report["nodes_completed"] = node_index
+                            safe_atomic_json(args.output.resolve(), report)
+                            skill.controller_json_request(
+                                sidecar.controller_port,
+                                "/connections",
+                                method="DELETE",
+                            )
+                            time.sleep(max(0.0, args.node_interval))
+                            continue
                         raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
                 append_service_results(
                     report,
