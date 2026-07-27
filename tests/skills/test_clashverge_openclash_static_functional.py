@@ -504,24 +504,24 @@ def test_disney_loader_accepts_regioncheck_screening_semantics(
     ]
 
 
-def test_functional_loader_accepts_only_complete_attributed_rrc_v6(
+def test_functional_loader_accepts_only_complete_attributed_rrc_v7(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "regioncheck-v6.json"
+    path = tmp_path / "regioncheck-v7.json"
     base_result = {
         "exact_node_name": "node-a",
         "exact_node_id": "id-a",
         "source_snapshot_id": "snapshot-x",
         "source_hash": "a" * 64,
         "tested_at": "2026-07-27T10:01:00+08:00",
-        "probe_method_version": "regionrestrictioncheck-sidecar-v6",
+        "probe_method_version": "regionrestrictioncheck-sidecar-v7",
         "control_exit_ip_hmac": "c" * 20,
         "regioncheck_exit_ip_hmac": "c" * 20,
         "attribution_status": "ATTRIBUTION_MATCH",
     }
     payload = {
         "schema_version": 3,
-        "probe_method_version": "regionrestrictioncheck-sidecar-v6",
+        "probe_method_version": "regionrestrictioncheck-sidecar-v7",
         "status": "COMPLETE",
         "production_fingerprint_preserved": True,
         "selected_node_count": 1,

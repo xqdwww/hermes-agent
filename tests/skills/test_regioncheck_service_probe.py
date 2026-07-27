@@ -155,6 +155,30 @@ def test_control_geo_falls_back_across_fresh_ipv4_backends(monkeypatch) -> None:
     assert len({command[-1] for command, _kwargs in observed}) == 3
 
 
+def test_control_geo_first_uses_regioncheck_network_provider_endpoint(
+    monkeypatch,
+) -> None:
+    observed = []
+
+    class Completed:
+        returncode = 0
+        stdout = "8.8.8.8"
+        stderr = ""
+
+    def fake_run(command, **_kwargs):
+        observed.append(command)
+        return Completed()
+
+    monkeypatch.setattr(RRC, "run_in_runner_scope", fake_run)
+
+    assert RRC.control_geo(
+        proxy_url="http://127.0.0.1:1234",
+        runner_scope="local",
+        host="unused",
+    ) == ("8.8.8.8", "UNKNOWN")
+    assert observed[0][-1] == "https://api64.ipify.org"
+
+
 def test_control_geo_rejects_non_public_or_non_ipv4_results(monkeypatch) -> None:
     class Completed:
         returncode = 0
@@ -197,6 +221,7 @@ def test_control_geo_falls_back_to_cloudflare_trace_after_json_tls_failures(
             Completed(35, ""),
             Completed(35, ""),
             Completed(35, ""),
+            Completed(35, ""),
             Completed(0, "fl=1\nip=8.8.4.4\nts=1\n"),
         ]
     )
@@ -223,7 +248,7 @@ def test_control_geo_retries_full_backend_set_once(monkeypatch) -> None:
 
     responses = iter(
         [Completed(28, "") for _backend in RRC.CONTROL_ATTRIBUTION_BACKENDS]
-        + [Completed(0, '{"ip":"8.8.8.8","country":"US"}')]
+        + [Completed(0, "8.8.8.8")]
     )
     sleeps = []
     monkeypatch.setattr(
@@ -237,7 +262,7 @@ def test_control_geo_retries_full_backend_set_once(monkeypatch) -> None:
         runner_scope="local",
         host="unused",
         sleep_fn=sleeps.append,
-    ) == ("8.8.8.8", "US")
+    ) == ("8.8.8.8", "UNKNOWN")
     assert sleeps == [1]
 
 
@@ -416,7 +441,7 @@ def test_remote_control_and_regioncheck_receive_same_resolved_proxy_url(
             return Completed(
                 "ChatGPT: Yes\nGoogle Gemini: No\nDisney+: Yes (Region: JP)\n"
             )
-        return Completed('{"ip":"8.8.8.8","country":"US"}')
+        return Completed("8.8.8.8")
 
     monkeypatch.setattr(RRC.subprocess, "run", fake_run)
     proxy_url = "http://127.0.0.1:17890"
@@ -426,7 +451,7 @@ def test_remote_control_and_regioncheck_receive_same_resolved_proxy_url(
         runner_scope="remote",
         host="router",
         sleep_fn=lambda _seconds: None,
-    ) == ("8.8.8.8", "US")
+    ) == ("8.8.8.8", "UNKNOWN")
     code, _ = RRC.run_regioncheck(
         "router",
         30,

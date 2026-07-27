@@ -23,13 +23,14 @@ from typing import Any, Literal, NamedTuple
 
 
 SCHEMA_VERSION = 3
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v6"
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v7"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
 DEFAULT_TIMEOUT_SECONDS = 240
 DEFAULT_STABILIZATION_SECONDS = 1.0
 CONTROL_ATTRIBUTION_BACKENDS = (
+    ("regioncheck-ipify", "https://api64.ipify.org", "plain"),
     ("ipify", "https://api.ipify.org?format=json", "json"),
     ("ifconfig-co", "https://ifconfig.co/json", "json"),
     ("ipinfo", "https://ipinfo.io/json", "json"),
