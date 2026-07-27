@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.6
+version: 2.4.7
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,10 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.6 retries the complete control-backend set once
+for this Skill. Version 2.4.7 confirms an unavailable-rate or consecutive-node
+systemic signal against the calibrated sentinel exits before stopping the
+whole run; an explicit exit mismatch remains fail-closed. Version 2.4.6
+retries the complete control-backend set once
 with fresh connections after a bounded pause before declaring node-local
 attribution unavailable. Version 2.4.5 makes the post-selector discard request
 best-effort and adds Cloudflare trace plus AWS check-IP fallbacks so a warm-up

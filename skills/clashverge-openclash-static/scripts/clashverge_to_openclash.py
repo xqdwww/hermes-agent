@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.6"
+SKILL_VERSION = "2.4.7"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -272,7 +272,7 @@ EVIDENCE_TYPES = {
 }
 FUNCTIONAL_RESULT_SCHEMA_VERSION = 1
 RRC_FUNCTIONAL_RESULT_SCHEMA_VERSION = 3
-RRC_FUNCTIONAL_METHOD_VERSION = "regionrestrictioncheck-sidecar-v5"
+RRC_FUNCTIONAL_METHOD_VERSION = "regionrestrictioncheck-sidecar-v6"
 SOURCE_REFRESH_OUTCOMES = {
     "SUCCESS_CHANGED",
     "SUCCESS_NOT_MODIFIED",

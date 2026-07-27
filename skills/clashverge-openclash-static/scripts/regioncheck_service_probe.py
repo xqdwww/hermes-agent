@@ -23,7 +23,7 @@ from typing import Any, Literal, NamedTuple
 
 
 SCHEMA_VERSION = 3
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v5"
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v6"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
@@ -853,6 +853,47 @@ def systemic_attribution_stop_reason(
     return None
 
 
+def confirm_systemic_attribution_health(
+    *,
+    skill: Any,
+    host: str,
+    controller_port: int,
+    proxy_context: SidecarProxyContext,
+    sentinel_names: list[str],
+    timeout_seconds: int,
+    run_key: bytes,
+    stabilization_seconds: float,
+    sleep_fn: Any = time.sleep,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Confirm that an unavailable-rate signal is actually system-wide."""
+    confirmations: list[dict[str, Any]] = []
+    for name in sentinel_names:
+        outcome = probe_node_with_attribution(
+            skill=skill,
+            host=host,
+            controller_port=controller_port,
+            proxy_context=proxy_context,
+            node_name=name,
+            timeout_seconds=timeout_seconds,
+            run_key=run_key,
+            stabilization_seconds=stabilization_seconds,
+            sleep_fn=sleep_fn,
+        )
+        confirmation = {
+            key: value
+            for key, value in outcome.items()
+            if key != "raw_values"
+        }
+        confirmation["sentinel_name"] = name
+        confirmation["completed_at"] = iso_now()
+        confirmations.append(confirmation)
+        if outcome["status"] == "ATTRIBUTION_MISMATCH":
+            raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_MISMATCH")
+        if outcome["status"] == "ATTRIBUTION_MATCH":
+            return True, confirmations
+    return False, confirmations
+
+
 def validate_two_node_calibration(report: dict[str, Any]) -> None:
     nodes = report["node_attempts"]
     if any(item.get("status") == "ATTRIBUTION_MISMATCH" for item in nodes):
@@ -907,13 +948,14 @@ def main() -> int:
         if args.max_nodes < 1:
             raise ProbeError("MAX_NODES_INVALID")
         proxies = proxies[: args.max_nodes]
+    calibration_payload: dict[str, Any] | None = None
     if args.calibration_only:
         if len(proxies) != 2 or not args.node:
             raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRES_EXACTLY_TWO_NODES")
     elif len(proxies) > 2:
         if args.calibration_report is None:
             raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRED")
-        validate_calibration_report(
+        calibration_payload = validate_calibration_report(
             args.calibration_report.resolve(),
             manifest=manifest,
         )
@@ -957,6 +999,7 @@ def main() -> int:
         "remote_sidecar_port": skill.REMOTE_SIDECAR_MIXED_PORT,
         "resolved_proxy_url_strategy": "remote_loopback_sidecar_port",
         "gid_bypass_verified": False,
+        "systemic_gate_confirmations": [],
     }
     previous_path: Path | None = None
     if args.resume and args.output.exists():
@@ -1009,6 +1052,12 @@ def main() -> int:
                 remote_proxy_port=skill.REMOTE_SIDECAR_MIXED_PORT,
                 controller_url=f"http://127.0.0.1:{sidecar.controller_port}",
             )
+            sentinel_names = [
+                str(item["exact_node_name"])
+                for item in (calibration_payload or {}).get("node_attempts", [])
+                if item.get("status") == "ATTRIBUTION_MATCH"
+            ]
+            last_confirmed_unavailable_count = 0
             for proxy in proxies:
                 name = str(proxy["name"])
                 node_id = identities[name]
@@ -1083,9 +1132,38 @@ def main() -> int:
                     report["node_attempts"]
                 )
                 if systemic_stop is not None:
-                    report["status"] = systemic_stop
-                    safe_atomic_json(args.output.resolve(), report)
-                    raise ProbeError(systemic_stop)
+                    unavailable_count = int(report["attribution_unavailable"])
+                    if unavailable_count > last_confirmed_unavailable_count:
+                        healthy, confirmations = (
+                            confirm_systemic_attribution_health(
+                                skill=skill,
+                                host=args.host,
+                                controller_port=sidecar.controller_port,
+                                proxy_context=proxy_context,
+                                sentinel_names=sentinel_names,
+                                timeout_seconds=args.timeout,
+                                run_key=run_key,
+                                stabilization_seconds=max(
+                                    DEFAULT_STABILIZATION_SECONDS,
+                                    skill.PROBE_SWITCH_WAIT_SECONDS,
+                                ),
+                            )
+                        )
+                        report["systemic_gate_confirmations"].append(
+                            {
+                                "trigger": systemic_stop,
+                                "unavailable_count": unavailable_count,
+                                "nodes_attempted": report["nodes_attempted"],
+                                "healthy": healthy,
+                                "sentinels": confirmations,
+                            }
+                        )
+                        safe_atomic_json(args.output.resolve(), report)
+                        if not healthy:
+                            report["status"] = systemic_stop
+                            safe_atomic_json(args.output.resolve(), report)
+                            raise ProbeError(systemic_stop)
+                        last_confirmed_unavailable_count = unavailable_count
                 reset_sidecar_connections(
                     skill,
                     sidecar.controller_port,

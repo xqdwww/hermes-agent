@@ -827,6 +827,100 @@ def test_unavailable_ratio_equal_to_25_percent_does_not_stop_run() -> None:
     assert RRC.systemic_attribution_stop_reason(attempts) is None
 
 
+def test_systemic_gate_confirmation_accepts_healthy_calibration_sentinel(
+    monkeypatch,
+) -> None:
+    outcomes = iter(
+        [
+            {"status": "ATTRIBUTION_UNAVAILABLE", "raw_values": {}},
+            {
+                "status": "ATTRIBUTION_MATCH",
+                "raw_values": {"gpt": "Yes"},
+                "control_exit_ip_hmac": "a" * 20,
+                "regioncheck_exit_ip_hmac": "a" * 20,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        RRC,
+        "probe_node_with_attribution",
+        lambda **_kwargs: next(outcomes),
+    )
+
+    healthy, confirmations = RRC.confirm_systemic_attribution_health(
+        skill=FakeSkill(),
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        sentinel_names=["node-tw", "node-us"],
+        timeout_seconds=217,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert healthy is True
+    assert [item["status"] for item in confirmations] == [
+        "ATTRIBUTION_UNAVAILABLE",
+        "ATTRIBUTION_MATCH",
+    ]
+    assert all("raw_values" not in item for item in confirmations)
+
+
+def test_systemic_gate_confirmation_rejects_unavailable_sentinels(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        RRC,
+        "probe_node_with_attribution",
+        lambda **_kwargs: {
+            "status": "ATTRIBUTION_UNAVAILABLE",
+            "raw_values": {},
+        },
+    )
+
+    healthy, confirmations = RRC.confirm_systemic_attribution_health(
+        skill=FakeSkill(),
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        sentinel_names=["node-tw", "node-us"],
+        timeout_seconds=217,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert healthy is False
+    assert len(confirmations) == 2
+
+
+def test_systemic_gate_confirmation_preserves_mismatch_fail_closed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        RRC,
+        "probe_node_with_attribution",
+        lambda **_kwargs: {
+            "status": "ATTRIBUTION_MISMATCH",
+            "raw_values": {},
+        },
+    )
+
+    with pytest.raises(RRC.ProbeError, match="STOP_RRC_PROXY_ATTRIBUTION_MISMATCH"):
+        RRC.confirm_systemic_attribution_health(
+            skill=FakeSkill(),
+            host="router",
+            controller_port=57013,
+            proxy_context=proxy_context(),
+            sentinel_names=["node-tw"],
+            timeout_seconds=217,
+            run_key=b"k" * 32,
+            stabilization_seconds=0,
+            sleep_fn=lambda _seconds: None,
+        )
+
+
 def test_regioncheck_timeout_is_per_node_and_no_global_port_fallback(
     monkeypatch,
 ) -> None:
