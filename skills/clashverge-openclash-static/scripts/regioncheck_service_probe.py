@@ -23,16 +23,22 @@ from typing import Any, Literal, NamedTuple
 
 
 SCHEMA_VERSION = 3
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v3"
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v4"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
 DEFAULT_TIMEOUT_SECONDS = 240
 DEFAULT_STABILIZATION_SECONDS = 1.0
 CONTROL_ATTRIBUTION_BACKENDS = (
-    ("ipify", "https://api.ipify.org?format=json"),
-    ("ifconfig-co", "https://ifconfig.co/json"),
-    ("ipinfo", "https://ipinfo.io/json"),
+    ("ipify", "https://api.ipify.org?format=json", "json"),
+    ("ifconfig-co", "https://ifconfig.co/json", "json"),
+    ("ipinfo", "https://ipinfo.io/json", "json"),
+    (
+        "cloudflare-trace",
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "trace",
+    ),
+    ("aws-checkip", "https://checkip.amazonaws.com", "plain"),
 )
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SERVICE_LABELS = {
@@ -371,7 +377,7 @@ def control_geo(
 ) -> tuple[str, str]:
     validate_proxy_url(proxy_url)
     last_error: BaseException | None = None
-    for _backend_id, backend_url in CONTROL_ATTRIBUTION_BACKENDS:
+    for _backend_id, backend_url, parser in CONTROL_ATTRIBUTION_BACKENDS:
         try:
             completed = run_in_runner_scope(
                 [
@@ -396,19 +402,17 @@ def control_geo(
             )
             if completed.returncode != 0:
                 raise ProbeError("CONTROL_GEO_TRANSPORT")
-            payload = json.loads(completed.stdout)
-            ip = str(payload.get("ip") or payload.get("ip_addr") or "")
-            country = str(
-                payload.get("country")
-                or payload.get("country_iso")
-                or "UNKNOWN"
+            ip, country = parse_control_backend_response(
+                completed.stdout,
+                parser=parser,
             )
             parsed_ip = ipaddress.ip_address(ip)
             if parsed_ip.version != 4 or not parsed_ip.is_global:
                 raise ProbeError("CONTROL_GEO_NOT_PUBLIC_IPV4")
             return ip, country
         except (
-            KeyError, ValueError, json.JSONDecodeError, OSError,
+            AttributeError, KeyError, TypeError, ValueError,
+            json.JSONDecodeError, OSError,
             subprocess.TimeoutExpired, ProbeError,
         ) as exc:
             last_error = exc
@@ -416,6 +420,65 @@ def control_geo(
     raise ControlAttributionUnavailable(
         "CONTROL_ATTRIBUTION_UNAVAILABLE"
     ) from last_error
+
+
+def parse_control_backend_response(
+    output: str,
+    *,
+    parser: str,
+) -> tuple[str, str]:
+    if parser == "json":
+        payload = json.loads(output)
+        return (
+            str(payload.get("ip") or payload.get("ip_addr") or ""),
+            str(
+                payload.get("country")
+                or payload.get("country_iso")
+                or "UNKNOWN"
+            ),
+        )
+    if parser == "trace":
+        match = re.search(r"^ip=([^\r\n]+)$", output, re.MULTILINE)
+        return (match.group(1).strip() if match else "", "UNKNOWN")
+    if parser == "plain":
+        return output.strip(), "UNKNOWN"
+    raise ProbeError("CONTROL_GEO_PARSER_INVALID")
+
+
+def discard_proxy_request(
+    *,
+    proxy_url: str,
+    runner_scope: Literal["local", "remote"],
+    host: str,
+) -> bool:
+    validate_proxy_url(proxy_url)
+    try:
+        completed = run_in_runner_scope(
+            [
+                "curl",
+                "--proxy",
+                proxy_url,
+                "--ipv4",
+                "--no-keepalive",
+                "--header",
+                "Connection: close",
+                "--connect-timeout",
+                "3",
+                "--max-time",
+                "8",
+                "--silent",
+                "--show-error",
+                "--output",
+                "/dev/null",
+                "https://www.gstatic.com/generate_204",
+            ],
+            runner_scope=runner_scope,
+            host=host,
+            timeout_seconds=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def run_regioncheck(
@@ -560,12 +623,12 @@ def probe_node_with_attribution(
             sleep_fn=sleep_fn,
         )
         try:
-            # Discard the first fresh connection after a selector change.
-            control_geo(
+            # This connection is intentionally best-effort and carries no
+            # attribution evidence.
+            discard_proxy_request(
                 proxy_url=proxy_context.resolved_proxy_url,
                 runner_scope=proxy_context.runner_scope,
                 host=host,
-                sleep_fn=sleep_fn,
             )
             reset_sidecar_connections(
                 skill,
@@ -883,7 +946,8 @@ def main() -> int:
         "imported_verified_records": 0,
         "resumed_verified_records": 0,
         "control_attribution_backends": [
-            backend_id for backend_id, _url in CONTROL_ATTRIBUTION_BACKENDS
+            backend_id
+            for backend_id, _url, _parser in CONTROL_ATTRIBUTION_BACKENDS
         ],
         "runner_location": "router",
         "runner_scope": "remote",

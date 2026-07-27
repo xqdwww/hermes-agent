@@ -182,6 +182,56 @@ def test_control_geo_rejects_non_public_or_non_ipv4_results(monkeypatch) -> None
     ) == ("1.1.1.1", "AU")
 
 
+def test_control_geo_falls_back_to_cloudflare_trace_after_json_tls_failures(
+    monkeypatch,
+) -> None:
+    class Completed:
+        stderr = ""
+
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    responses = iter(
+        [
+            Completed(35, ""),
+            Completed(35, ""),
+            Completed(35, ""),
+            Completed(0, "fl=1\nip=8.8.4.4\nts=1\n"),
+        ]
+    )
+    monkeypatch.setattr(
+        RRC,
+        "run_in_runner_scope",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    assert RRC.control_geo(
+        proxy_url="http://127.0.0.1:1234",
+        runner_scope="local",
+        host="unused",
+    ) == ("8.8.4.4", "UNKNOWN")
+
+
+def test_discard_proxy_request_is_best_effort(monkeypatch) -> None:
+    monkeypatch.setattr(
+        RRC,
+        "run_in_runner_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RRC.subprocess.TimeoutExpired("curl", 8)
+        ),
+    )
+
+    assert (
+        RRC.discard_proxy_request(
+            proxy_url="http://127.0.0.1:1234",
+            runner_scope="local",
+            host="unused",
+        )
+        is False
+    )
+
+
 def test_node_transport_failure_records_all_services_without_ip() -> None:
     report = {"results": []}
     manifest = {
@@ -410,6 +460,7 @@ def successful_regioncheck(*_args, **_kwargs):
 
 def test_matching_control_and_regioncheck_hmac_accepts_node(monkeypatch) -> None:
     skill = FakeSkill()
+    monkeypatch.setattr(RRC, "discard_proxy_request", lambda **_kwargs: True)
     exits = iter([("203.0.113.8", "JP")] * 3)
     monkeypatch.setattr(RRC, "control_geo", lambda **_kwargs: next(exits))
     monkeypatch.setattr(
@@ -440,12 +491,11 @@ def test_stale_exit_pollution_retries_once_then_accepts_fresh_exit(
     monkeypatch,
 ) -> None:
     skill = FakeSkill()
+    monkeypatch.setattr(RRC, "discard_proxy_request", lambda **_kwargs: True)
     exits = iter(
         [
             ("203.0.113.8", "JP"),
-            ("203.0.113.8", "JP"),
             ("198.51.100.2", "US"),
-            ("203.0.113.8", "JP"),
             ("203.0.113.8", "JP"),
             ("203.0.113.8", "JP"),
         ]
@@ -475,9 +525,9 @@ def test_stale_exit_pollution_retries_once_then_accepts_fresh_exit(
 
 def test_repeated_exit_mismatch_is_rejected(monkeypatch) -> None:
     skill = FakeSkill()
+    monkeypatch.setattr(RRC, "discard_proxy_request", lambda **_kwargs: True)
     exits = iter(
         [
-            ("203.0.113.8", "JP"),
             ("203.0.113.8", "JP"),
             ("198.51.100.2", "US"),
         ]
@@ -509,9 +559,10 @@ def test_repeated_exit_mismatch_is_rejected(monkeypatch) -> None:
 
 def test_selector_switch_produces_a_different_attributed_exit(monkeypatch) -> None:
     skill = FakeSkill()
+    monkeypatch.setattr(RRC, "discard_proxy_request", lambda **_kwargs: True)
     exits = iter(
-        [("203.0.113.8", "TW")] * 3
-        + [("203.0.113.9", "US")] * 3
+        [("203.0.113.8", "TW")] * 2
+        + [("203.0.113.9", "US")] * 2
     )
     monkeypatch.setattr(RRC, "control_geo", lambda **_kwargs: next(exits))
     monkeypatch.setattr(
@@ -660,6 +711,7 @@ def test_node_local_attribution_unavailable_has_no_service_evidence(
     monkeypatch,
 ) -> None:
     skill = FakeSkill()
+    monkeypatch.setattr(RRC, "discard_proxy_request", lambda **_kwargs: False)
     monkeypatch.setattr(
         RRC,
         "control_geo",
