@@ -23,7 +23,7 @@ from typing import Any, Literal, NamedTuple
 
 
 SCHEMA_VERSION = 3
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v7"
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v8"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
@@ -611,14 +611,14 @@ def probe_node_with_attribution(
     last: dict[str, Any] | None = None
     for attribution_attempt in range(1, 3):
         if not skill.select_probe_node(controller_port, node_name):
-            raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+            raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_MISMATCH")
         selected = selector_readback(
             skill,
             controller_port,
             proxy_context.selector_group,
         )
         if selected != node_name:
-            raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+            raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_MISMATCH")
         reset_sidecar_connections(
             skill,
             controller_port,
@@ -719,7 +719,7 @@ def probe_node_with_attribution(
                 "status": (
                     "ATTRIBUTION_MATCH"
                     if attribution_valid
-                    else "ATTRIBUTION_MISMATCH"
+                    else "ATTRIBUTION_UNAVAILABLE"
                 ),
                 "control_exit_ip_hmac": control_exit_hmac,
                 "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
@@ -734,7 +734,7 @@ def probe_node_with_attribution(
                 "returncode": returncode,
                 "output_complete": output_complete,
                 "transport_unknown": transport_unknown,
-                "raw_values": raw_values,
+                "raw_values": raw_values if attribution_valid else {},
                 "masked_ip_present": masked is not None,
             }
             if attribution_valid:

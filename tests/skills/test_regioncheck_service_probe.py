@@ -540,6 +540,33 @@ def test_matching_control_and_regioncheck_hmac_accepts_node(monkeypatch) -> None
     assert skill.connection_resets >= 2
 
 
+def test_selector_readback_mismatch_remains_fail_closed() -> None:
+    class WrongSelectorSkill(FakeSkill):
+        def controller_json_request(
+            self,
+            _controller_port: int,
+            path: str,
+            *,
+            method: str = "GET",
+        ) -> dict:
+            if path == "/connections" and method == "DELETE":
+                return {}
+            return {"now": "different-node"}
+
+    with pytest.raises(RRC.ProbeError, match="STOP_RRC_PROXY_ATTRIBUTION_MISMATCH"):
+        RRC.probe_node_with_attribution(
+            skill=WrongSelectorSkill(),
+            host="router",
+            controller_port=57013,
+            proxy_context=proxy_context(),
+            node_name="node-a",
+            timeout_seconds=217,
+            run_key=b"k" * 32,
+            stabilization_seconds=0,
+            sleep_fn=lambda _seconds: None,
+        )
+
+
 def test_stale_exit_pollution_retries_once_then_accepts_fresh_exit(
     monkeypatch,
 ) -> None:
@@ -576,7 +603,7 @@ def test_stale_exit_pollution_retries_once_then_accepts_fresh_exit(
     assert outcome["attribution_attempts"] == 2
 
 
-def test_repeated_exit_mismatch_is_rejected(monkeypatch) -> None:
+def test_repeated_cross_connection_exit_drift_is_unavailable(monkeypatch) -> None:
     skill = FakeSkill()
     monkeypatch.setattr(RRC, "discard_proxy_request", lambda **_kwargs: True)
     exits = iter(
@@ -605,9 +632,10 @@ def test_repeated_exit_mismatch_is_rejected(monkeypatch) -> None:
         sleep_fn=lambda _seconds: None,
     )
 
-    assert outcome["status"] == "ATTRIBUTION_MISMATCH"
+    assert outcome["status"] == "ATTRIBUTION_UNAVAILABLE"
     assert outcome["attribution_valid"] is False
     assert outcome["attribution_attempts"] == 2
+    assert outcome["raw_values"] == {}
 
 
 def test_selector_switch_produces_a_different_attributed_exit(monkeypatch) -> None:

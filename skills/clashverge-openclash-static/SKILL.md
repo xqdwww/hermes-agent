@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.8
+version: 2.4.9
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,10 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.8 first queries the same IPv4 exit endpoint used by
+for this Skill. Version 2.4.9 treats a cross-connection masked-exit drift as
+node-local attribution unavailable, with no service evidence, because it does
+not prove proxy-path mismatch for rotating exit pools. Explicit selector or
+proxy-path mismatches remain fail-closed. Version 2.4.8 first queries the same IPv4 exit endpoint used by
 RegionRestrictionCheck's network-provider line, while preserving the
 independent bounded fallback set. Version 2.4.7 confirms an unavailable-rate or consecutive-node
 systemic signal against the calibrated sentinel exits before stopping the
