@@ -188,8 +188,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
 SKILL_VERSION = "2.4.4"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
-# Canonical source: ef144787970e0a3923a2c41ee6e5be8ca0a21c76
-CANONICAL_COMMIT = "ef144787970e0a3923a2c41ee6e5be8ca0a21c76"
+RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
 
 REMOTE_HEALTH_DEADLINE_SECONDS = 110
 REMOTE_HEALTH_POLL_INTERVAL_SECONDS = 1
@@ -4112,6 +4111,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def runtime_sync_commit(script_path: Path) -> str:
+    marker_path = script_path.parent.parent / RUNTIME_SYNC_COMMIT_FILE
+    try:
+        value = marker_path.read_text(encoding="ascii").strip()
+    except OSError:
+        return "UNRECORDED"
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else "INVALID"
+
+
 def runtime_self_check() -> dict[str, Any]:
     """Run a read-only self-check and write a version report.
 
@@ -4125,6 +4133,7 @@ def runtime_self_check() -> dict[str, Any]:
         script_sha = hashlib.sha256(script_path.read_bytes()).hexdigest()
     except OSError:
         script_sha = "unreadable"
+    sync_commit = runtime_sync_commit(script_path)
 
     # Locate all copies of the same skill by name
     # Only scan the actual Hermes skill resolver paths, not development repos.
@@ -4144,7 +4153,7 @@ def runtime_self_check() -> dict[str, Any]:
 
     report = {
         "skill_version": SKILL_VERSION,
-        "canonical_commit": CANONICAL_COMMIT,
+        "canonical_commit": sync_commit,
         "resolved_skill_path": str(script_path.parent.parent),
         "entrypoint_path": str(script_path),
         "entrypoint_sha256": script_sha,
@@ -4155,7 +4164,7 @@ def runtime_self_check() -> dict[str, Any]:
         "browser_probe_gate": False,
         "deployment_mode": "upload_candidate_then_independent_activate",
         "duplicate_skill_paths": duplicate_paths,
-        "pass": True,
+        "pass": sync_commit not in {"UNRECORDED", "INVALID"},
     }
 
     # Print to stdout for Hermes context
@@ -4175,6 +4184,10 @@ def runtime_self_check() -> dict[str, Any]:
             f"executable copy/copies: {duplicate_paths}. "
             "Refusing to proceed. Remove or rename duplicates first."
         )
+        print(msg)
+        raise RuntimeError(msg)
+    if sync_commit in {"UNRECORDED", "INVALID"}:
+        msg = "FATAL: runtime Skill canonical sync provenance is missing or invalid."
         print(msg)
         raise RuntimeError(msg)
 

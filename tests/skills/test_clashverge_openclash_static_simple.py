@@ -1704,3 +1704,17 @@ def test_snapshot_identity_propagates_into_probe_report(tmp_path) -> None:
         result["probe_method_version"] == MODULE.PROBE_VERSION
         for result in report["nodes"][0]["services"].values()
     )
+
+
+def test_runtime_sync_commit_requires_valid_deployment_marker(tmp_path) -> None:
+    skill_root = tmp_path / "skill"
+    script = skill_root / "scripts" / "entrypoint.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("", encoding="utf-8")
+
+    assert MODULE.runtime_sync_commit(script) == "UNRECORDED"
+    marker = skill_root / MODULE.RUNTIME_SYNC_COMMIT_FILE
+    marker.write_text("not-a-commit\n", encoding="ascii")
+    assert MODULE.runtime_sync_commit(script) == "INVALID"
+    marker.write_text("a" * 40 + "\n", encoding="ascii")
+    assert MODULE.runtime_sync_commit(script) == "a" * 40
