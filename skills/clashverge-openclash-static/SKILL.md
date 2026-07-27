@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.2
+version: 2.4.3
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -36,8 +36,12 @@ python3 -m pip install PyYAML
 
 ## Upgrade record
 
-The front-matter `version` field is the only release-version source for this
-Skill. Version 2.4.1 makes activation and rollback health checks honor enabled
+The front-matter `version` field is the authoritative release-version source
+for this Skill. Version 2.4.3 binds the RegionRestrictionCheck control query
+and tool process to one runner-scoped sidecar proxy context, requires matching
+run-keyed exit HMACs, gates a full run on two-node calibration, and checkpoints
+only completely attributed node evidence. Version 2.4.1 makes activation and
+rollback health checks honor enabled
 OpenClash mixed-proxy authentication without exposing credentials, uses a real
 bounded deadline with consecutive stable passes, and waits for the final restored
 network state instead of treating an intermediate mismatch as rollback failure.
@@ -170,14 +174,28 @@ command path, and stop if explicit proxy support is unavailable:
 python3 scripts/regioncheck_service_probe.py \
   --skill-script scripts/clashverge_to_openclash.py \
   --source-snapshot /path/to/source-snapshot.json \
+  --node 'one-region-a-node' \
+  --node 'one-region-b-node' \
+  --calibration-only \
+  --output /private/path/regioncheck-calibration.json
+
+python3 scripts/regioncheck_service_probe.py \
+  --skill-script scripts/clashverge_to_openclash.py \
+  --source-snapshot /path/to/source-snapshot.json \
+  --calibration-report /private/path/regioncheck-calibration.json \
   --output /private/path/regioncheck-functional-results.json
 ```
 
-Invoke `regioncheck -M 4 -R 0 -E en -P http://127.0.0.1:<sidecar-port>`
-non-interactively. Strip ANSI output, BusyBox fractional-sleep warnings, and
-promotional sections. Persist only structured service results, tool metadata,
-country, and a run-keyed exit-IP HMAC. Match the tool's masked exit against the
-control exit before attributing results. `Google Gemini: No` is
+Resolve one proxy URL in the RegionRestrictionCheck runner's network namespace,
+then pass it explicitly to the control query and
+`regioncheck -M 4 -R 0 -E en -P <resolved-proxy-url>` non-interactively. Never
+let either probe function derive a sidecar port. Strip ANSI output, BusyBox
+fractional-sleep warnings, and promotional sections. Persist only structured
+service results, tool metadata, country, and run-keyed control/post-tool
+exit-IP HMACs. Require those HMACs to match and the tool's masked exit to match
+before attributing results. Use `--resume` only with a v2 report whose snapshot,
+stable node ID, selector read-back, tool hash, complete output, and both HMACs
+all match. `Google Gemini: No` is
 `SCREEN_NEGATIVE`, not a definitive failure. A current snapshot-bound manual Web
 generation PASS may admit that node as `PASS_WITH_SCREEN_FALSE_NEGATIVE`.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 
@@ -104,11 +105,13 @@ def test_regioncheck_invocation_is_noninteractive_and_explicit_proxy(monkeypatch
         observed["kwargs"] = kwargs
         return Completed()
 
-    class Skill:
-        REMOTE_SIDECAR_MIXED_PORT = 7891
-
     monkeypatch.setattr(RRC.subprocess, "run", fake_run)
-    code, _ = RRC.run_regioncheck(Skill, "router", 30)
+    code, _ = RRC.run_regioncheck(
+        "router",
+        30,
+        proxy_url="http://127.0.0.1:7891",
+        runner_scope="remote",
+    )
     assert code == 0
     remote = observed["command"][-1]
     assert "-M 4" in remote
@@ -130,7 +133,12 @@ def test_control_geo_is_forced_to_same_ipv4_family_as_regioncheck(monkeypatch) -
         return Completed()
 
     monkeypatch.setattr(RRC.subprocess, "run", fake_run)
-    assert RRC.control_geo(1234, sleep_fn=lambda _seconds: None) == ("203.0.113.8", "JP")
+    assert RRC.control_geo(
+        proxy_url="http://127.0.0.1:1234",
+        runner_scope="local",
+        host="unused",
+        sleep_fn=lambda _seconds: None,
+    ) == ("203.0.113.8", "JP")
     assert "--ipv4" in observed["command"]
 
 
@@ -147,7 +155,12 @@ def test_control_geo_retries_once_then_succeeds(monkeypatch) -> None:
         Completed(0, '{"ip":"203.0.113.8","country":"JP"}'),
     ])
     monkeypatch.setattr(RRC.subprocess, "run", lambda *_args, **_kwargs: next(responses))
-    assert RRC.control_geo(1234, sleep_fn=calls.append) == ("203.0.113.8", "JP")
+    assert RRC.control_geo(
+        proxy_url="http://127.0.0.1:1234",
+        runner_scope="local",
+        host="unused",
+        sleep_fn=calls.append,
+    ) == ("203.0.113.8", "JP")
     assert calls == [1]
 
 
@@ -166,7 +179,8 @@ def test_node_transport_failure_records_all_services_without_ip() -> None:
         manifest=manifest,
         identities={"node-a": "node_abc"},
         node_name="node-a",
-        exit_hmac="",
+        control_exit_hmac="",
+        regioncheck_exit_hmac="",
         country="UNKNOWN",
         tool=tool,
         raw_values={
@@ -242,13 +256,19 @@ def test_regioncheck_transport_retry_reruns_once(monkeypatch) -> None:
         (0, "ChatGPT: Yes\nGoogle Gemini: No\nDisney+: Yes (Region: JP)\n"),
     ])
 
-    def fake_run(_skill, _host, _timeout):
+    def fake_run(_host, _timeout, *, proxy_url, runner_scope):
+        assert proxy_url == "http://127.0.0.1:17890"
+        assert runner_scope == "remote"
         calls.append("run")
         return next(responses)
 
     monkeypatch.setattr(RRC, "run_regioncheck", fake_run)
     code, _output, values = RRC.run_regioncheck_with_transport_retry(
-        object(), "router", 30, sleep_fn=lambda _seconds: calls.append("sleep")
+        "router",
+        30,
+        proxy_url="http://127.0.0.1:17890",
+        runner_scope="remote",
+        sleep_fn=lambda _seconds: calls.append("sleep"),
     )
 
     assert code == 0
@@ -258,3 +278,361 @@ def test_regioncheck_transport_retry_reruns_once(monkeypatch) -> None:
         "gemini": "No",
         "disney": "Yes (Region: JP)",
     }
+
+
+def test_sidecar_proxy_context_resolves_endpoint_once_for_runner_scope() -> None:
+    local = RRC.resolve_sidecar_proxy_context(
+        runner_scope="local",
+        local_proxy_host="127.0.0.1",
+        local_proxy_port=57012,
+        remote_proxy_host="127.0.0.1",
+        remote_proxy_port=17890,
+        controller_url="http://127.0.0.1:57013",
+    )
+    remote = RRC.resolve_sidecar_proxy_context(
+        runner_scope="remote",
+        local_proxy_host="127.0.0.1",
+        local_proxy_port=57012,
+        remote_proxy_host="127.0.0.1",
+        remote_proxy_port=17890,
+        controller_url="http://127.0.0.1:57013",
+    )
+
+    assert local.resolved_proxy_url == "http://127.0.0.1:57012"
+    assert remote.resolved_proxy_url == "http://127.0.0.1:17890"
+
+
+def test_remote_control_and_regioncheck_receive_same_resolved_proxy_url(
+    monkeypatch,
+) -> None:
+    observed: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(command, **_kwargs):
+        observed.append(command)
+        if RRC.DEFAULT_COMMAND_PATH in command[-1]:
+            return Completed(
+                "ChatGPT: Yes\nGoogle Gemini: No\nDisney+: Yes (Region: JP)\n"
+            )
+        return Completed('{"ip":"203.0.113.8","country":"JP"}')
+
+    monkeypatch.setattr(RRC.subprocess, "run", fake_run)
+    proxy_url = "http://127.0.0.1:17890"
+
+    assert RRC.control_geo(
+        proxy_url=proxy_url,
+        runner_scope="remote",
+        host="router",
+        sleep_fn=lambda _seconds: None,
+    ) == ("203.0.113.8", "JP")
+    code, _ = RRC.run_regioncheck(
+        "router",
+        30,
+        proxy_url=proxy_url,
+        runner_scope="remote",
+    )
+
+    assert code == 0
+    assert len(observed) == 2
+    assert all(proxy_url in command[-1] for command in observed)
+
+
+class FakeSkill:
+    def __init__(self) -> None:
+        self.selected = ""
+        self.selections: list[str] = []
+        self.connection_resets = 0
+
+    def select_probe_node(self, _controller_port: int, name: str) -> bool:
+        self.selected = name
+        self.selections.append(name)
+        return True
+
+    def controller_json_request(
+        self,
+        _controller_port: int,
+        path: str,
+        *,
+        method: str = "GET",
+    ) -> dict:
+        if path == "/connections" and method == "DELETE":
+            self.connection_resets += 1
+            return {}
+        return {"now": self.selected}
+
+
+def proxy_context() -> RRC.SidecarProxyContext:
+    return RRC.resolve_sidecar_proxy_context(
+        runner_scope="remote",
+        local_proxy_host="127.0.0.1",
+        local_proxy_port=57012,
+        remote_proxy_host="127.0.0.1",
+        remote_proxy_port=17890,
+        controller_url="http://127.0.0.1:57013",
+    )
+
+
+def successful_regioncheck(*_args, **_kwargs):
+    return (
+        0,
+        (
+            "ChatGPT: Yes\nGoogle Gemini: No\n"
+            "Disney+: Yes (Region: JP)\n"
+            "** Your Network Provider: ISP (203.0.*.*)\n"
+        ),
+        {"gpt": "Yes", "gemini": "No", "disney": "Yes (Region: JP)"},
+    )
+
+
+def test_matching_control_and_regioncheck_hmac_accepts_node(monkeypatch) -> None:
+    skill = FakeSkill()
+    exits = iter([("203.0.113.8", "JP")] * 3)
+    monkeypatch.setattr(RRC, "control_geo", lambda **_kwargs: next(exits))
+    monkeypatch.setattr(
+        RRC,
+        "run_regioncheck_with_transport_retry",
+        successful_regioncheck,
+    )
+
+    outcome = RRC.probe_node_with_attribution(
+        skill=skill,
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        node_name="node-a",
+        timeout_seconds=217,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert outcome["status"] == "ATTRIBUTION_VALID"
+    assert outcome["control_exit_ip_hmac"] == outcome["regioncheck_exit_ip_hmac"]
+    assert outcome["selector_readback"] == "node-a"
+    assert skill.connection_resets >= 2
+
+
+def test_stale_exit_pollution_retries_once_then_accepts_fresh_exit(
+    monkeypatch,
+) -> None:
+    skill = FakeSkill()
+    exits = iter(
+        [
+            ("203.0.113.8", "JP"),
+            ("203.0.113.8", "JP"),
+            ("198.51.100.2", "US"),
+            ("203.0.113.8", "JP"),
+            ("203.0.113.8", "JP"),
+            ("203.0.113.8", "JP"),
+        ]
+    )
+    monkeypatch.setattr(RRC, "control_geo", lambda **_kwargs: next(exits))
+    monkeypatch.setattr(
+        RRC,
+        "run_regioncheck_with_transport_retry",
+        successful_regioncheck,
+    )
+
+    outcome = RRC.probe_node_with_attribution(
+        skill=skill,
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        node_name="node-a",
+        timeout_seconds=217,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert outcome["status"] == "ATTRIBUTION_VALID"
+    assert outcome["attribution_attempts"] == 2
+
+
+def test_repeated_exit_mismatch_is_rejected(monkeypatch) -> None:
+    skill = FakeSkill()
+    exits = iter(
+        [
+            ("203.0.113.8", "JP"),
+            ("203.0.113.8", "JP"),
+            ("198.51.100.2", "US"),
+        ]
+        * 2
+    )
+    monkeypatch.setattr(RRC, "control_geo", lambda **_kwargs: next(exits))
+    monkeypatch.setattr(
+        RRC,
+        "run_regioncheck_with_transport_retry",
+        successful_regioncheck,
+    )
+
+    outcome = RRC.probe_node_with_attribution(
+        skill=skill,
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        node_name="node-a",
+        timeout_seconds=217,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert outcome["status"] == "ATTRIBUTION_INVALID"
+    assert outcome["attribution_valid"] is False
+    assert outcome["attribution_attempts"] == 2
+
+
+def test_selector_switch_produces_a_different_attributed_exit(monkeypatch) -> None:
+    skill = FakeSkill()
+    exits = iter(
+        [("203.0.113.8", "TW")] * 3
+        + [("203.0.113.9", "US")] * 3
+    )
+    monkeypatch.setattr(RRC, "control_geo", lambda **_kwargs: next(exits))
+    monkeypatch.setattr(
+        RRC,
+        "run_regioncheck_with_transport_retry",
+        successful_regioncheck,
+    )
+    outcomes = [
+        RRC.probe_node_with_attribution(
+            skill=skill,
+            host="router",
+            controller_port=57013,
+            proxy_context=proxy_context(),
+            node_name=name,
+            timeout_seconds=217,
+            run_key=b"k" * 32,
+            stabilization_seconds=0,
+            sleep_fn=lambda _seconds: None,
+        )
+        for name in ("node-tw", "node-us")
+    ]
+
+    assert skill.selections == ["node-tw", "node-us"]
+    assert all(item["status"] == "ATTRIBUTION_VALID" for item in outcomes)
+    assert (
+        outcomes[0]["control_exit_ip_hmac"]
+        != outcomes[1]["control_exit_ip_hmac"]
+    )
+
+
+def test_two_node_calibration_requires_distinct_attributed_exits() -> None:
+    report = {
+        "node_attempts": [
+            {
+                "status": "ATTRIBUTION_VALID",
+                "selector_readback": "node-a",
+                "exact_node_name": "node-a",
+                "control_exit_ip_hmac": "a" * 20,
+                "result_count": 3,
+            },
+            {
+                "status": "ATTRIBUTION_VALID",
+                "selector_readback": "node-b",
+                "exact_node_name": "node-b",
+                "control_exit_ip_hmac": "b" * 20,
+                "result_count": 3,
+            },
+        ]
+    }
+    RRC.validate_two_node_calibration(report)
+    assert (
+        report["calibration_status"]
+        == "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_CALIBRATION"
+    )
+
+    report["node_attempts"][1]["control_exit_ip_hmac"] = "a" * 20
+    with pytest.raises(RRC.ProbeError, match="ATTRIBUTION_FAILED"):
+        RRC.validate_two_node_calibration(report)
+
+
+def test_only_complete_attribution_records_are_reusable() -> None:
+    manifest = {"source_snapshot_id": "snapshot_test", "source_hash": "a" * 64}
+    tool = {"script_sha256": "b" * 64}
+    previous = {
+        "schema_version": RRC.SCHEMA_VERSION,
+        "probe_method_version": RRC.METHOD_VERSION,
+        **manifest,
+        "tool": tool,
+        "results": [
+            {"exact_node_id": "node-1", "service": service}
+            for service in RRC.SERVICE_LABELS
+        ],
+        "node_attempts": [
+            {
+                "exact_node_id": "node-1",
+                "exact_node_name": "one",
+                "selector_readback": "one",
+                "status": "ATTRIBUTION_VALID",
+                "attribution_valid": True,
+                "output_complete": True,
+                "control_exit_ip_hmac": "c" * 20,
+                "regioncheck_exit_ip_hmac": "c" * 20,
+            },
+            {
+                "exact_node_id": "node-2",
+                "exact_node_name": "two",
+                "selector_readback": "two",
+                "status": "ATTRIBUTION_VALID",
+                "attribution_valid": True,
+                "output_complete": False,
+                "control_exit_ip_hmac": "d" * 20,
+                "regioncheck_exit_ip_hmac": "d" * 20,
+            },
+        ],
+    }
+
+    assert RRC.reusable_node_ids(previous, manifest=manifest, tool=tool) == {
+        "node-1"
+    }
+    previous["schema_version"] = 1
+    assert RRC.reusable_node_ids(previous, manifest=manifest, tool=tool) == set()
+
+
+def test_regioncheck_timeout_is_per_node_and_no_global_port_fallback(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_runner(command, *, runner_scope, host, timeout_seconds):
+        observed.update(
+            command=command,
+            runner_scope=runner_scope,
+            host=host,
+            timeout_seconds=timeout_seconds,
+        )
+        return Completed()
+
+    monkeypatch.setattr(RRC, "run_in_runner_scope", fake_runner)
+    RRC.run_regioncheck(
+        "router",
+        217,
+        proxy_url="http://127.0.0.1:19001",
+        runner_scope="remote",
+    )
+
+    assert observed["timeout_seconds"] == 217
+    assert "http://127.0.0.1:19001" in observed["command"]
+    assert "REMOTE_SIDECAR_MIXED_PORT" not in inspect.getsource(
+        RRC.run_regioncheck
+    )
+    assert "REMOTE_SIDECAR_MIXED_PORT" not in inspect.getsource(RRC.control_geo)
+
+
+def test_production_fingerprint_must_remain_exact() -> None:
+    RRC.require_preserved_production_fingerprint("same", "same")
+    with pytest.raises(RRC.ProbeError, match="PRODUCTION_STATE_CHANGED"):
+        RRC.require_preserved_production_fingerprint("before", "after")

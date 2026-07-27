@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.2"
+SKILL_VERSION = "2.4.3"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 # Canonical source: ef144787970e0a3923a2c41ee6e5be8ca0a21c76
@@ -272,6 +272,8 @@ EVIDENCE_TYPES = {
     "UNKNOWN",
 }
 FUNCTIONAL_RESULT_SCHEMA_VERSION = 1
+RRC_FUNCTIONAL_RESULT_SCHEMA_VERSION = 2
+RRC_FUNCTIONAL_METHOD_VERSION = "regionrestrictioncheck-sidecar-v2"
 SOURCE_REFRESH_OUTCOMES = {
     "SUCCESS_CHANGED",
     "SUCCESS_NOT_MODIFIED",
@@ -1207,8 +1209,26 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
         return False
     for path in paths or ():
         payload = load_json_object(path.expanduser().resolve())
-        if payload.get("schema_version") != FUNCTIONAL_RESULT_SCHEMA_VERSION:
+        payload_schema = payload.get("schema_version")
+        payload_method = str(payload.get("probe_method_version") or "")
+        is_attributed_rrc = (
+            payload_schema == RRC_FUNCTIONAL_RESULT_SCHEMA_VERSION
+            and payload_method == RRC_FUNCTIONAL_METHOD_VERSION
+        )
+        if (
+            payload_schema != FUNCTIONAL_RESULT_SCHEMA_VERSION
+            and not is_attributed_rrc
+        ):
             raise ConfigError(f"Unsupported functional-result schema: {path}")
+        if is_attributed_rrc and (
+            payload.get("status") != "COMPLETE"
+            or payload.get("production_fingerprint_preserved") is not True
+            or payload.get("attribution_invalid") != 0
+            or payload.get("nodes_completed") != payload.get("selected_node_count")
+        ):
+            raise ConfigError(
+                f"Attributed RegionRestrictionCheck result is incomplete: {path}"
+            )
         if contains_sensitive(payload):
             raise ConfigError(f"Functional-result file contains sensitive content: {path}")
         service_hint = str(payload.get("service", ""))
@@ -1229,6 +1249,17 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
             method = str(item.get("probe_method_version") or payload.get("probe_method_version", ""))
             raw_result = str(item.get("result", ""))
             error = str(item.get("error_category") or item.get("failure_stage") or "")
+            if is_attributed_rrc:
+                control_hmac = str(item.get("control_exit_ip_hmac") or "")
+                regioncheck_hmac = str(item.get("regioncheck_exit_ip_hmac") or "")
+                if (
+                    item.get("attribution_status") != "ATTRIBUTION_VALID"
+                    or not control_hmac
+                    or control_hmac != regioncheck_hmac
+                ):
+                    raise ConfigError(
+                        f"Functional result {index} lacks valid RRC attribution."
+                    )
             if service not in SERVICE_KEYS or not all(
                 (node, node_id, snapshot_id, source_hash, tested_at, method, raw_result)
             ):
@@ -4098,15 +4129,13 @@ def runtime_self_check() -> dict[str, Any]:
     # Locate all copies of the same skill by name
     # Only scan the actual Hermes skill resolver paths, not development repos.
     skill_name_dir = f"{SKILL_NAME}"
-    search_roots = [
-        Path.home() / ".hermes" / "skills",
-    ]
-    # Also check $HERMES_HOME/skills if set
-    hermes_home = os.environ.get("HERMES_HOME", "")
-    if hermes_home.strip():
-        hermes_skills = Path(hermes_home.strip()) / "skills"
-        if hermes_skills.exists() and hermes_skills not in search_roots:
-            search_roots.append(hermes_skills)
+    configured_home = os.environ.get("HERMES_HOME", "").strip()
+    hermes_home = (
+        Path(configured_home).expanduser()
+        if configured_home
+        else Path.home() / ".hermes"
+    )
+    search_roots = [hermes_home / "skills"]
     duplicate_paths: list[str] = []
     for root in search_roots:
         candidate = root / skill_name_dir / "scripts" / "clashverge_to_openclash.py"
@@ -4134,7 +4163,7 @@ def runtime_self_check() -> dict[str, Any]:
         print(f"RUNTIME_CHECK:{k}={v}")
 
     # Write to a report file
-    report_dir = Path.home() / ".hermes" / "state" / SKILL_NAME
+    report_dir = hermes_home / "state" / SKILL_NAME
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "runtime-self-check.json"
     report_path.write_text(json.dumps(report, indent=2, default=str))

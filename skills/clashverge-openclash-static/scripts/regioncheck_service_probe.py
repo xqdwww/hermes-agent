@@ -12,20 +12,23 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import tempfile
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 
-SCHEMA_VERSION = 1
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v1"
+SCHEMA_VERSION = 2
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v2"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
 DEFAULT_TIMEOUT_SECONDS = 240
+DEFAULT_STABILIZATION_SECONDS = 1.0
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SERVICE_LABELS = {
     "gpt": "ChatGPT",
@@ -36,6 +39,57 @@ SERVICE_LABELS = {
 
 class ProbeError(RuntimeError):
     """A fail-closed RegionRestrictionCheck orchestration error."""
+
+
+class SidecarProxyContext(NamedTuple):
+    """One explicitly resolved proxy endpoint in the runner's namespace."""
+
+    runner_scope: Literal["local", "remote"]
+    local_proxy_host: str
+    local_proxy_port: int
+    remote_proxy_host: str
+    remote_proxy_port: int
+    resolved_proxy_url: str
+    selector_group: str
+    controller_url: str
+
+
+def resolve_sidecar_proxy_context(
+    *,
+    runner_scope: Literal["local", "remote"],
+    local_proxy_host: str,
+    local_proxy_port: int,
+    remote_proxy_host: str,
+    remote_proxy_port: int,
+    controller_url: str,
+    selector_group: str = "PROBE",
+) -> SidecarProxyContext:
+    if runner_scope not in {"local", "remote"}:
+        raise ProbeError("RRC_RUNNER_SCOPE_INVALID")
+    for host in (local_proxy_host, remote_proxy_host):
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise ProbeError("RRC_PROXY_HOST_NOT_LOOPBACK")
+        except ValueError as exc:
+            raise ProbeError("RRC_PROXY_HOST_INVALID") from exc
+    for port in (local_proxy_port, remote_proxy_port):
+        if not 0 < port < 65536:
+            raise ProbeError("RRC_PROXY_PORT_INVALID")
+    proxy_host, proxy_port = (
+        (local_proxy_host, local_proxy_port)
+        if runner_scope == "local"
+        else (remote_proxy_host, remote_proxy_port)
+    )
+    return SidecarProxyContext(
+        runner_scope=runner_scope,
+        local_proxy_host=local_proxy_host,
+        local_proxy_port=local_proxy_port,
+        remote_proxy_host=remote_proxy_host,
+        remote_proxy_port=remote_proxy_port,
+        resolved_proxy_url=f"http://{proxy_host}:{proxy_port}",
+        selector_group=selector_group,
+        controller_url=controller_url,
+    )
 
 
 def iso_now() -> str:
@@ -141,7 +195,8 @@ def append_service_results(
     manifest: dict[str, Any],
     identities: dict[str, str],
     node_name: str,
-    exit_hmac: str,
+    control_exit_hmac: str,
+    regioncheck_exit_hmac: str,
     country: str,
     tool: dict[str, Any],
     raw_values: dict[str, str],
@@ -155,7 +210,18 @@ def append_service_results(
                 "exact_node_name": node_name,
                 "source_snapshot_id": manifest["source_snapshot_id"],
                 "source_hash": manifest["source_hash"],
-                "exit_ip_hmac": exit_hmac,
+                "exit_ip_hmac": control_exit_hmac,
+                "control_exit_ip_hmac": control_exit_hmac,
+                "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
+                "regioncheck_exit_ip_hmac_source": (
+                    "post_regioncheck_control_same_proxy"
+                ),
+                "attribution_status": (
+                    "ATTRIBUTION_VALID"
+                    if control_exit_hmac
+                    and control_exit_hmac == regioncheck_exit_hmac
+                    else "ATTRIBUTION_UNAVAILABLE"
+                ),
                 "exit_country": country,
                 "tool_version": tool["tool_version"],
                 "tool_sha256": tool["script_sha256"],
@@ -224,20 +290,89 @@ def inspect_tool(skill: Any, host: str) -> dict[str, Any]:
     }
 
 
-def control_geo(proxy_port: int, *, sleep_fn: Any = time.sleep) -> tuple[str, str]:
+def validate_proxy_url(proxy_url: str) -> None:
+    parsed = urllib.parse.urlsplit(proxy_url)
+    try:
+        host = ipaddress.ip_address(parsed.hostname or "")
+        port = parsed.port
+    except ValueError as exc:
+        raise ProbeError("RRC_PROXY_URL_INVALID") from exc
+    if (
+        parsed.scheme != "http"
+        or not host.is_loopback
+        or port is None
+        or not 0 < port < 65536
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProbeError("RRC_PROXY_URL_INVALID")
+
+
+def run_in_runner_scope(
+    command: list[str],
+    *,
+    runner_scope: Literal["local", "remote"],
+    host: str,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    if runner_scope == "local":
+        runner_command = command
+    elif runner_scope == "remote":
+        runner_command = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            host,
+            shlex.join(command) + " </dev/null",
+        ]
+    else:
+        raise ProbeError("RRC_RUNNER_SCOPE_INVALID")
+    return subprocess.run(
+        runner_command,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
+def control_geo(
+    *,
+    proxy_url: str,
+    runner_scope: Literal["local", "remote"],
+    host: str,
+    sleep_fn: Any = time.sleep,
+) -> tuple[str, str]:
+    validate_proxy_url(proxy_url)
     last_error: BaseException | None = None
     for attempt in range(2):
         try:
-            completed = subprocess.run(
+            completed = run_in_runner_scope(
                 [
-                    "curl", "--proxy", f"http://127.0.0.1:{proxy_port}",
-                    "--ipv4", "--connect-timeout", "4", "--max-time", "12",
-                    "--silent", "--show-error", "https://ipinfo.io/json",
+                    "curl",
+                    "--proxy",
+                    proxy_url,
+                    "--ipv4",
+                    "--no-keepalive",
+                    "--header",
+                    "Connection: close",
+                    "--connect-timeout",
+                    "4",
+                    "--max-time",
+                    "12",
+                    "--silent",
+                    "--show-error",
+                    "https://ipinfo.io/json",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
+                runner_scope=runner_scope,
+                host=host,
+                timeout_seconds=15,
             )
             if completed.returncode != 0:
                 raise ProbeError("CONTROL_GEO_TRANSPORT")
@@ -256,18 +391,30 @@ def control_geo(proxy_port: int, *, sleep_fn: Any = time.sleep) -> tuple[str, st
     raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED") from last_error
 
 
-def run_regioncheck(skill: Any, host: str, timeout_seconds: int) -> tuple[int, str]:
-    command = (
-        f"{DEFAULT_COMMAND_PATH} -M 4 -R 0 -E en "
-        f"-P http://127.0.0.1:{skill.REMOTE_SIDECAR_MIXED_PORT} </dev/null"
-    )
+def run_regioncheck(
+    host: str,
+    timeout_seconds: int,
+    *,
+    proxy_url: str,
+    runner_scope: Literal["local", "remote"],
+) -> tuple[int, str]:
+    validate_proxy_url(proxy_url)
     try:
-        completed = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
+        completed = run_in_runner_scope(
+            [
+                DEFAULT_COMMAND_PATH,
+                "-M",
+                "4",
+                "-R",
+                "0",
+                "-E",
+                "en",
+                "-P",
+                proxy_url,
+            ],
+            runner_scope=runner_scope,
+            host=host,
+            timeout_seconds=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
         return 124, ""
@@ -290,19 +437,30 @@ def normalize_regioncheck_values(
 
 
 def run_regioncheck_with_transport_retry(
-    skill: Any,
     host: str,
     timeout_seconds: int,
     *,
+    proxy_url: str,
+    runner_scope: Literal["local", "remote"],
     sleep_fn: Any = time.sleep,
 ) -> tuple[int, str, dict[str, str]]:
-    returncode, output = run_regioncheck(skill, host, timeout_seconds)
+    returncode, output = run_regioncheck(
+        host,
+        timeout_seconds,
+        proxy_url=proxy_url,
+        runner_scope=runner_scope,
+    )
     raw_values = extract_service_values(output)
     if returncode != 0 or (
         raw_values and all("Network Connection" in raw for raw in raw_values.values())
     ):
         sleep_fn(1)
-        returncode, output = run_regioncheck(skill, host, timeout_seconds)
+        returncode, output = run_regioncheck(
+            host,
+            timeout_seconds,
+            proxy_url=proxy_url,
+            runner_scope=runner_scope,
+        )
     return returncode, output, normalize_regioncheck_values(returncode, output)
 
 
@@ -324,6 +482,249 @@ def safe_atomic_json(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
+def reset_sidecar_connections(
+    skill: Any,
+    controller_port: int,
+    *,
+    sleep_seconds: float,
+    sleep_fn: Any = time.sleep,
+) -> None:
+    skill.controller_json_request(
+        controller_port,
+        "/connections",
+        method="DELETE",
+    )
+    sleep_fn(max(0.0, sleep_seconds))
+
+
+def selector_readback(skill: Any, controller_port: int, selector_group: str) -> str:
+    selector_path = "/proxies/" + urllib.parse.quote(selector_group, safe="")
+    payload = skill.controller_json_request(controller_port, selector_path)
+    return str(payload.get("now") or "")
+
+
+def probe_node_with_attribution(
+    *,
+    skill: Any,
+    host: str,
+    controller_port: int,
+    proxy_context: SidecarProxyContext,
+    node_name: str,
+    timeout_seconds: int,
+    run_key: bytes,
+    stabilization_seconds: float,
+    sleep_fn: Any = time.sleep,
+) -> dict[str, Any]:
+    last: dict[str, Any] | None = None
+    for attribution_attempt in range(1, 3):
+        if not skill.select_probe_node(controller_port, node_name):
+            raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+        selected = selector_readback(
+            skill,
+            controller_port,
+            proxy_context.selector_group,
+        )
+        if selected != node_name:
+            raise ProbeError("NODE_SWITCH_UNCONFIRMED")
+        reset_sidecar_connections(
+            skill,
+            controller_port,
+            sleep_seconds=stabilization_seconds,
+            sleep_fn=sleep_fn,
+        )
+        try:
+            # Discard the first fresh connection after a selector change.
+            control_geo(
+                proxy_url=proxy_context.resolved_proxy_url,
+                runner_scope=proxy_context.runner_scope,
+                host=host,
+                sleep_fn=sleep_fn,
+            )
+            reset_sidecar_connections(
+                skill,
+                controller_port,
+                sleep_seconds=min(0.25, stabilization_seconds),
+                sleep_fn=sleep_fn,
+            )
+            control_ip, country = control_geo(
+                proxy_url=proxy_context.resolved_proxy_url,
+                runner_scope=proxy_context.runner_scope,
+                host=host,
+                sleep_fn=sleep_fn,
+            )
+            returncode, output, raw_values = run_regioncheck_with_transport_retry(
+                host,
+                timeout_seconds,
+                proxy_url=proxy_context.resolved_proxy_url,
+                runner_scope=proxy_context.runner_scope,
+                sleep_fn=sleep_fn,
+            )
+            regioncheck_ip, regioncheck_country = control_geo(
+                proxy_url=proxy_context.resolved_proxy_url,
+                runner_scope=proxy_context.runner_scope,
+                host=host,
+                sleep_fn=sleep_fn,
+            )
+        except ProbeError:
+            last = {
+                "selector_readback": selected,
+                "attribution_attempts": attribution_attempt,
+                "attribution_valid": False,
+                "status": "ATTRIBUTION_INVALID",
+            }
+        else:
+            control_exit_hmac = hmac_prefix(run_key, control_ip)
+            regioncheck_exit_hmac = hmac_prefix(run_key, regioncheck_ip)
+            masked = extract_masked_ip(output)
+            masked_matches = returncode == 124 or masked_ip_matches(
+                regioncheck_ip,
+                masked,
+            )
+            attribution_valid = (
+                control_exit_hmac == regioncheck_exit_hmac and masked_matches
+            )
+            output_complete = all(
+                service in extract_service_values(output)
+                for service in SERVICE_LABELS
+            )
+            transport_unknown = (
+                returncode == 124
+                or is_unattributable_tool_failure(returncode, masked)
+                or not output_complete
+            )
+            last = {
+                "selector_readback": selected,
+                "attribution_attempts": attribution_attempt,
+                "attribution_valid": attribution_valid,
+                "status": (
+                    "TRANSPORT_UNKNOWN"
+                    if attribution_valid and transport_unknown
+                    else (
+                        "ATTRIBUTION_VALID"
+                        if attribution_valid
+                        else "ATTRIBUTION_INVALID"
+                    )
+                ),
+                "control_exit_ip_hmac": control_exit_hmac,
+                "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
+                "regioncheck_exit_ip_hmac_source": (
+                    "post_regioncheck_control_same_proxy"
+                ),
+                "exit_country": country or regioncheck_country or "UNKNOWN",
+                "returncode": returncode,
+                "output_complete": output_complete,
+                "raw_values": raw_values,
+                "masked_ip_present": masked is not None,
+            }
+            if attribution_valid:
+                return last
+        reset_sidecar_connections(
+            skill,
+            controller_port,
+            sleep_seconds=stabilization_seconds,
+            sleep_fn=sleep_fn,
+        )
+    assert last is not None
+    return last
+
+
+def reusable_node_ids(
+    previous: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    tool: dict[str, Any],
+) -> set[str]:
+    if (
+        previous.get("schema_version") != SCHEMA_VERSION
+        or previous.get("probe_method_version") != METHOD_VERSION
+        or previous.get("source_snapshot_id") != manifest["source_snapshot_id"]
+        or previous.get("source_hash") != manifest["source_hash"]
+        or previous.get("tool", {}).get("script_sha256") != tool["script_sha256"]
+    ):
+        return set()
+    results_by_id: dict[str, set[str]] = {}
+    for result in previous.get("results", []):
+        node_id = str(result.get("exact_node_id") or "")
+        results_by_id.setdefault(node_id, set()).add(str(result.get("service") or ""))
+    reusable: set[str] = set()
+    for item in previous.get("node_attempts", []):
+        node_id = str(item.get("exact_node_id") or "")
+        control_hmac = str(item.get("control_exit_ip_hmac") or "")
+        regioncheck_hmac = str(item.get("regioncheck_exit_ip_hmac") or "")
+        if (
+            item.get("status") == "ATTRIBUTION_VALID"
+            and item.get("attribution_valid") is True
+            and item.get("selector_readback") == item.get("exact_node_name")
+            and item.get("output_complete") is True
+            and control_hmac
+            and control_hmac == regioncheck_hmac
+            and results_by_id.get(node_id) == set(SERVICE_LABELS)
+        ):
+            reusable.add(node_id)
+    return reusable
+
+
+def validate_calibration_report(
+    path: Path,
+    *,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProbeError("RRC_CALIBRATION_REPORT_INVALID") from exc
+    if (
+        payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("probe_method_version") != METHOD_VERSION
+        or payload.get("source_snapshot_id") != manifest["source_snapshot_id"]
+        or payload.get("source_hash") != manifest["source_hash"]
+        or payload.get("status") != "COMPLETE"
+        or payload.get("calibration_status")
+        != "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_CALIBRATION"
+        or payload.get("production_fingerprint_preserved") is not True
+        or payload.get("gid_bypass_verified") is not True
+    ):
+        raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRED")
+    return payload
+
+
+def update_report_counts(report: dict[str, Any]) -> None:
+    nodes = report["node_attempts"]
+    report["nodes_attempted"] = len(nodes)
+    report["nodes_completed"] = sum(
+        item.get("status") != "ATTRIBUTION_INVALID" for item in nodes
+    )
+    report["attribution_valid"] = sum(
+        item.get("attribution_valid") is True for item in nodes
+    )
+    report["attribution_invalid"] = sum(
+        item.get("status") == "ATTRIBUTION_INVALID" for item in nodes
+    )
+    report["transport_unknown"] = sum(
+        item.get("status") == "TRANSPORT_UNKNOWN" for item in nodes
+    )
+
+
+def validate_two_node_calibration(report: dict[str, Any]) -> None:
+    nodes = report["node_attempts"]
+    if (
+        len(nodes) != 2
+        or any(item.get("status") != "ATTRIBUTION_VALID" for item in nodes)
+        or any(item.get("selector_readback") != item.get("exact_node_name") for item in nodes)
+        or any(item.get("result_count") != len(SERVICE_LABELS) for item in nodes)
+        or len({item.get("control_exit_ip_hmac") for item in nodes}) != 2
+    ):
+        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
+    report["calibration_status"] = (
+        "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_CALIBRATION"
+    )
+
+
+def require_preserved_production_fingerprint(before: str, after: str) -> None:
+    if before != after:
+        raise ProbeError("CANDIDATE_SIDECAR_PRODUCTION_STATE_CHANGED")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skill-script", type=Path, required=True)
@@ -334,16 +735,35 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--node-interval", type=float, default=3.0)
     parser.add_argument("--max-nodes", type=int)
+    parser.add_argument("--node", action="append", default=[])
+    parser.add_argument("--calibration-only", action="store_true")
+    parser.add_argument("--calibration-report", type=Path)
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
     skill = load_module(args.skill_script.resolve())
     manifest, payload_path = skill.verify_source_snapshot(args.source_snapshot.resolve())
     data = skill.load_yaml(payload_path)
     proxies = skill.static_proxy_objects(data)
+    if args.node:
+        requested = set(args.node)
+        proxies = [proxy for proxy in proxies if str(proxy["name"]) in requested]
+        if {str(proxy["name"]) for proxy in proxies} != requested:
+            raise ProbeError("RRC_REQUESTED_NODE_NOT_FOUND")
     if args.max_nodes is not None:
         if args.max_nodes < 1:
             raise ProbeError("MAX_NODES_INVALID")
         proxies = proxies[: args.max_nodes]
+    if args.calibration_only:
+        if len(proxies) != 2 or not args.node:
+            raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRES_EXACTLY_TWO_NODES")
+    elif len(proxies) > 2:
+        if args.calibration_report is None:
+            raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRED")
+        validate_calibration_report(
+            args.calibration_report.resolve(),
+            manifest=manifest,
+        )
     identities = {
         str(item["exact_node_name"]): str(item["exact_node_id"])
         for item in manifest["nodes"]
@@ -369,7 +789,37 @@ def main() -> int:
         "production_fingerprint_preserved": False,
         "results": [],
         "node_errors": [],
+        "node_attempts": [],
+        "nodes_reused": 0,
+        "runner_location": "router",
+        "runner_scope": "remote",
+        "tunnel_local_port_strategy": "dynamic_loopback",
+        "remote_sidecar_port": skill.REMOTE_SIDECAR_MIXED_PORT,
+        "resolved_proxy_url_strategy": "remote_loopback_sidecar_port",
+        "gid_bypass_verified": False,
     }
+    if args.resume and args.output.exists():
+        previous = json.loads(args.output.read_text(encoding="utf-8"))
+        reusable = reusable_node_ids(previous, manifest=manifest, tool=tool)
+        selected_ids = {
+            identities[str(proxy["name"])]
+            for proxy in proxies
+        }
+        reusable &= selected_ids
+        report["node_attempts"] = [
+            item
+            for item in previous.get("node_attempts", [])
+            if item.get("exact_node_id") in reusable
+        ]
+        report["results"] = [
+            item
+            for item in previous.get("results", [])
+            if item.get("exact_node_id") in reusable
+        ]
+        report["nodes_reused"] = len(reusable)
+    else:
+        reusable = set()
+    before_fingerprint = skill.remote_production_fingerprint(args.host)
     with tempfile.TemporaryDirectory(prefix="rrc-sidecar-") as temporary:
         config_path = Path(temporary) / "probe.yaml"
         skill.dump_yaml(config, config_path)
@@ -377,90 +827,97 @@ def main() -> int:
         with skill.remote_candidate_sidecar(
             config_path, host=args.host, core_path=args.core_path
         ) as sidecar:
+            report["gid_bypass_verified"] = (
+                "service=running" in before_fingerprint
+            )
             skill.validate_probe_runtime(sidecar.controller_port)
-            for node_index, proxy in enumerate(proxies, start=1):
+            proxy_context = resolve_sidecar_proxy_context(
+                runner_scope="remote",
+                local_proxy_host="127.0.0.1",
+                local_proxy_port=sidecar.mixed_port,
+                remote_proxy_host="127.0.0.1",
+                remote_proxy_port=skill.REMOTE_SIDECAR_MIXED_PORT,
+                controller_url=f"http://127.0.0.1:{sidecar.controller_port}",
+            )
+            for proxy in proxies:
                 name = str(proxy["name"])
-                if not skill.select_probe_node(sidecar.controller_port, name):
-                    raise ProbeError("NODE_SWITCH_UNCONFIRMED")
-                skill.controller_json_request(
-                    sidecar.controller_port, "/connections", method="DELETE"
+                node_id = identities[name]
+                if node_id in reusable:
+                    continue
+                outcome = probe_node_with_attribution(
+                    skill=skill,
+                    host=args.host,
+                    controller_port=sidecar.controller_port,
+                    proxy_context=proxy_context,
+                    node_name=name,
+                    timeout_seconds=args.timeout,
+                    run_key=run_key,
+                    stabilization_seconds=max(
+                        DEFAULT_STABILIZATION_SECONDS,
+                        skill.PROBE_SWITCH_WAIT_SECONDS,
+                    ),
                 )
-                time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
-                try:
-                    control_ip, country = control_geo(sidecar.mixed_port)
-                except ProbeError as exc:
-                    if str(exc) != "STOP_RRC_PROXY_ATTRIBUTION_FAILED":
-                        raise
+                node_entry = {
+                    key: value
+                    for key, value in outcome.items()
+                    if key != "raw_values"
+                }
+                node_entry.update(
+                    {
+                        "exact_node_id": node_id,
+                        "exact_node_name": name,
+                        "source_snapshot_id": manifest["source_snapshot_id"],
+                        "completed_at": iso_now(),
+                        "result_count": 0,
+                    }
+                )
+                if outcome["status"] == "ATTRIBUTION_INVALID":
+                    report["node_attempts"].append(node_entry)
+                    update_report_counts(report)
+                    report["status"] = "STOP_RRC_PROXY_ATTRIBUTION_FAILED"
+                    safe_atomic_json(args.output.resolve(), report)
+                    raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
+                if outcome["status"] == "TRANSPORT_UNKNOWN" and not outcome[
+                    "output_complete"
+                ]:
+                    append_node_error(
+                        report,
+                        manifest=manifest,
+                        identities=identities,
+                        node_name=name,
+                        tool=tool,
+                    )
+                else:
                     append_service_results(
                         report,
                         manifest=manifest,
                         identities=identities,
                         node_name=name,
-                        exit_hmac="",
-                        country="UNKNOWN",
+                        control_exit_hmac=outcome["control_exit_ip_hmac"],
+                        regioncheck_exit_hmac=outcome["regioncheck_exit_ip_hmac"],
+                        country=outcome["exit_country"],
                         tool=tool,
-                        raw_values={
-                            service: "Failed (Network Connection)"
-                            for service in SERVICE_LABELS
-                        },
+                        raw_values=outcome["raw_values"],
                     )
-                    report["nodes_completed"] = node_index
-                    safe_atomic_json(args.output, report)
-                    time.sleep(args.node_interval)
-                    continue
-                exit_hmac = hmac_prefix(run_key, control_ip)
-                returncode, output, raw_values = run_regioncheck_with_transport_retry(
-                    skill, args.host, args.timeout
-                )
-                masked = extract_masked_ip(output)
-                if returncode != 124 and not masked_ip_matches(control_ip, masked):
-                    skill.controller_json_request(
-                        sidecar.controller_port, "/connections", method="DELETE"
-                    )
-                    time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
-                    control_ip, country = control_geo(sidecar.mixed_port)
-                    exit_hmac = hmac_prefix(run_key, control_ip)
-                    returncode, output, raw_values = run_regioncheck_with_transport_retry(
-                        skill, args.host, args.timeout
-                    )
-                    masked = extract_masked_ip(output)
-                    if returncode != 124 and not masked_ip_matches(control_ip, masked):
-                        if is_unattributable_tool_failure(returncode, masked):
-                            append_node_error(
-                                report,
-                                manifest=manifest,
-                                identities=identities,
-                                node_name=name,
-                                tool=tool,
-                            )
-                            report["nodes_completed"] = node_index
-                            safe_atomic_json(args.output.resolve(), report)
-                            skill.controller_json_request(
-                                sidecar.controller_port,
-                                "/connections",
-                                method="DELETE",
-                            )
-                            time.sleep(max(0.0, args.node_interval))
-                            continue
-                        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
-                append_service_results(
-                    report,
-                    manifest=manifest,
-                    identities=identities,
-                    node_name=name,
-                    exit_hmac=exit_hmac,
-                    country=country,
-                    tool=tool,
-                    raw_values=raw_values,
-                )
-                report["nodes_completed"] = node_index
+                    node_entry["result_count"] = len(SERVICE_LABELS)
+                report["node_attempts"].append(node_entry)
+                update_report_counts(report)
                 safe_atomic_json(args.output.resolve(), report)
-                skill.controller_json_request(
-                    sidecar.controller_port, "/connections", method="DELETE"
+                reset_sidecar_connections(
+                    skill,
+                    sidecar.controller_port,
+                    sleep_seconds=max(0.0, args.node_interval),
                 )
-                time.sleep(max(0.0, args.node_interval))
+    after_fingerprint = skill.remote_production_fingerprint(args.host)
+    require_preserved_production_fingerprint(
+        before_fingerprint,
+        after_fingerprint,
+    )
     report["status"] = "COMPLETE"
     report["production_fingerprint_preserved"] = True
+    update_report_counts(report)
+    if args.calibration_only:
+        validate_two_node_calibration(report)
     report["completed_at"] = iso_now()
     safe_atomic_json(args.output.resolve(), report)
     print("COMPLETE")

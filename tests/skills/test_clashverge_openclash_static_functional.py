@@ -502,3 +502,49 @@ def test_disney_loader_accepts_regioncheck_screening_semantics(
         "FAIL_IP_BANNED",
         "FAIL_TRANSPORT",
     ]
+
+
+def test_functional_loader_accepts_only_complete_attributed_rrc_v2(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "regioncheck-v2.json"
+    base_result = {
+        "exact_node_name": "node-a",
+        "exact_node_id": "id-a",
+        "source_snapshot_id": "snapshot-x",
+        "source_hash": "a" * 64,
+        "tested_at": "2026-07-27T10:01:00+08:00",
+        "probe_method_version": "regionrestrictioncheck-sidecar-v2",
+        "control_exit_ip_hmac": "c" * 20,
+        "regioncheck_exit_ip_hmac": "c" * 20,
+        "attribution_status": "ATTRIBUTION_VALID",
+    }
+    payload = {
+        "schema_version": 2,
+        "probe_method_version": "regionrestrictioncheck-sidecar-v2",
+        "status": "COMPLETE",
+        "production_fingerprint_preserved": True,
+        "selected_node_count": 1,
+        "nodes_completed": 1,
+        "attribution_invalid": 0,
+        "source_hash": "a" * 64,
+        "results": [
+            {**base_result, "service": "gpt", "result": "SCREEN_PASS"},
+            {**base_result, "service": "gemini", "result": "SCREEN_NEGATIVE"},
+            {**base_result, "service": "disney", "result": "FAIL_REGION"},
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert len(SKILL.load_functional_results([path])) == 3
+
+    payload["status"] = "RUNNING"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SKILL.ConfigError, match="incomplete"):
+        SKILL.load_functional_results([path])
+
+    payload["status"] = "COMPLETE"
+    payload["results"][0]["regioncheck_exit_ip_hmac"] = "d" * 20
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SKILL.ConfigError, match="attribution"):
+        SKILL.load_functional_results([path])
