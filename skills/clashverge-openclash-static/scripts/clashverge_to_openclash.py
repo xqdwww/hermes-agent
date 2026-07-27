@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.9"
+SKILL_VERSION = "2.4.10"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -1320,7 +1320,7 @@ def apply_functional_results_to_report(
 ) -> dict[str, Any]:
     """Apply exact-identity automated results; UNKNOWN never becomes a pass."""
     updated = deepcopy(report)
-    probe_timestamp = parse_aware_timestamp(str(updated.get("run_timestamp", "")), field="probe run")
+    parse_aware_timestamp(str(updated.get("run_timestamp", "")), field="probe run")
     snapshot_id = str(snapshot_manifest.get("source_snapshot_id", ""))
     source_hash = str(snapshot_manifest.get("source_hash", ""))
     identity_by_name = {
@@ -1342,7 +1342,6 @@ def apply_functional_results_to_report(
                 and item["exact_node_id"] == node_id
                 and item["source_snapshot_id"] == snapshot_id
                 and item["source_hash"] == source_hash
-                and parse_aware_timestamp(item["tested_at"], field="functional result") >= probe_timestamp
             ]
             if not candidates:
                 continue

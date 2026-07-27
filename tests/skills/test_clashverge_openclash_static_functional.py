@@ -321,6 +321,23 @@ def test_functional_pass_and_fail_apply_by_exact_snapshot_identity() -> None:
     assert report["functional_results"]["applied"] == 0
 
 
+def test_snapshot_bound_functional_result_survives_later_base_probe() -> None:
+    earlier = functional("SCREEN_PASS")
+    earlier["tested_at"] = "2026-07-22T09:59:00+08:00"
+
+    report = SKILL.apply_functional_results_to_report(
+        base_report(),
+        [earlier],
+        manifest(),
+    )
+
+    assert report["functional_results"]["applied"] == 1
+    assert (
+        report["nodes"][0]["services"]["gemini"]["final_result"]
+        == "SCREEN_PASS"
+    )
+
+
 def test_unsupported_region_keeps_specific_definitive_failure() -> None:
     failed = functional("FAIL")
     failed["error_category"] = "FAIL_UNSUPPORTED_REGION"
