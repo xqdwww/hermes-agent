@@ -23,7 +23,7 @@ from typing import Any, Literal, NamedTuple
 
 
 SCHEMA_VERSION = 3
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v4"
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v5"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
@@ -377,46 +377,48 @@ def control_geo(
 ) -> tuple[str, str]:
     validate_proxy_url(proxy_url)
     last_error: BaseException | None = None
-    for _backend_id, backend_url, parser in CONTROL_ATTRIBUTION_BACKENDS:
-        try:
-            completed = run_in_runner_scope(
-                [
-                    "curl",
-                    "--proxy",
-                    proxy_url,
-                    "--ipv4",
-                    "--no-keepalive",
-                    "--header",
-                    "Connection: close",
-                    "--connect-timeout",
-                    "4",
-                    "--max-time",
-                    "12",
-                    "--silent",
-                    "--show-error",
-                    backend_url,
-                ],
-                runner_scope=runner_scope,
-                host=host,
-                timeout_seconds=15,
-            )
-            if completed.returncode != 0:
-                raise ProbeError("CONTROL_GEO_TRANSPORT")
-            ip, country = parse_control_backend_response(
-                completed.stdout,
-                parser=parser,
-            )
-            parsed_ip = ipaddress.ip_address(ip)
-            if parsed_ip.version != 4 or not parsed_ip.is_global:
-                raise ProbeError("CONTROL_GEO_NOT_PUBLIC_IPV4")
-            return ip, country
-        except (
-            AttributeError, KeyError, TypeError, ValueError,
-            json.JSONDecodeError, OSError,
-            subprocess.TimeoutExpired, ProbeError,
-        ) as exc:
-            last_error = exc
-            sleep_fn(0)
+    for control_attempt in range(2):
+        for _backend_id, backend_url, parser in CONTROL_ATTRIBUTION_BACKENDS:
+            try:
+                completed = run_in_runner_scope(
+                    [
+                        "curl",
+                        "--proxy",
+                        proxy_url,
+                        "--ipv4",
+                        "--no-keepalive",
+                        "--header",
+                        "Connection: close",
+                        "--connect-timeout",
+                        "4",
+                        "--max-time",
+                        "12",
+                        "--silent",
+                        "--show-error",
+                        backend_url,
+                    ],
+                    runner_scope=runner_scope,
+                    host=host,
+                    timeout_seconds=15,
+                )
+                if completed.returncode != 0:
+                    raise ProbeError("CONTROL_GEO_TRANSPORT")
+                ip, country = parse_control_backend_response(
+                    completed.stdout,
+                    parser=parser,
+                )
+                parsed_ip = ipaddress.ip_address(ip)
+                if parsed_ip.version != 4 or not parsed_ip.is_global:
+                    raise ProbeError("CONTROL_GEO_NOT_PUBLIC_IPV4")
+                return ip, country
+            except (
+                AttributeError, KeyError, TypeError, ValueError,
+                json.JSONDecodeError, OSError,
+                subprocess.TimeoutExpired, ProbeError,
+            ) as exc:
+                last_error = exc
+        if control_attempt == 0:
+            sleep_fn(1)
     raise ControlAttributionUnavailable(
         "CONTROL_ATTRIBUTION_UNAVAILABLE"
     ) from last_error

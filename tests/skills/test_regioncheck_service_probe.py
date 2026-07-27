@@ -213,6 +213,34 @@ def test_control_geo_falls_back_to_cloudflare_trace_after_json_tls_failures(
     ) == ("8.8.4.4", "UNKNOWN")
 
 
+def test_control_geo_retries_full_backend_set_once(monkeypatch) -> None:
+    class Completed:
+        stderr = ""
+
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    responses = iter(
+        [Completed(28, "") for _backend in RRC.CONTROL_ATTRIBUTION_BACKENDS]
+        + [Completed(0, '{"ip":"8.8.8.8","country":"US"}')]
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        RRC,
+        "run_in_runner_scope",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    assert RRC.control_geo(
+        proxy_url="http://127.0.0.1:1234",
+        runner_scope="local",
+        host="unused",
+        sleep_fn=sleeps.append,
+    ) == ("8.8.8.8", "US")
+    assert sleeps == [1]
+
+
 def test_discard_proxy_request_is_best_effort(monkeypatch) -> None:
     monkeypatch.setattr(
         RRC,
