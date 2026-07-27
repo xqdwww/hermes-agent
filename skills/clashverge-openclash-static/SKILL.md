@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.1
+version: 2.4.2
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]

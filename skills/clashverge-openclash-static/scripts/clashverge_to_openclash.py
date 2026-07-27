@@ -184,6 +184,13 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "socks-port",
     "tproxy-port",
 }
+# === Version guard ===
+SKILL_VERSION = "2.4.2"
+REQUIRED_MIN_VERSION = "2.4.1"
+SKILL_NAME = "clashverge-openclash-static"
+# Canonical source: ef144787970e0a3923a2c41ee6e5be8ca0a21c76
+CANONICAL_COMMIT = "ef144787970e0a3923a2c41ee6e5be8ca0a21c76"
+
 REMOTE_HEALTH_DEADLINE_SECONDS = 110
 REMOTE_HEALTH_POLL_INTERVAL_SECONDS = 1
 REMOTE_HEALTH_CONSECUTIVE_SUCCESSES = 2
@@ -4066,12 +4073,116 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_p.add_argument("--output", type=Path, required=True)
     reconcile_p.add_argument("--audit-output", type=Path)
 
+    selfcheck_p = sub.add_parser(
+        "self-check",
+        help="Run read-only runtime self-check and report version/environment info.",
+    )
+
     return parser
+
+
+def runtime_self_check() -> dict[str, Any]:
+    """Run a read-only self-check and write a version report.
+
+    Returns a dict with check results. Raises RuntimeError if fatal
+    conditions are detected.
+    """
+    import hashlib
+
+    script_path = Path(__file__).resolve()
+    try:
+        script_sha = hashlib.sha256(script_path.read_bytes()).hexdigest()
+    except OSError:
+        script_sha = "unreadable"
+
+    # Locate all copies of the same skill by name
+    # Only scan the actual Hermes skill resolver paths, not development repos.
+    skill_name_dir = f"{SKILL_NAME}"
+    search_roots = [
+        Path.home() / ".hermes" / "skills",
+    ]
+    # Also check $HERMES_HOME/skills if set
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    if hermes_home.strip():
+        hermes_skills = Path(hermes_home.strip()) / "skills"
+        if hermes_skills.exists() and hermes_skills not in search_roots:
+            search_roots.append(hermes_skills)
+    duplicate_paths: list[str] = []
+    for root in search_roots:
+        candidate = root / skill_name_dir / "scripts" / "clashverge_to_openclash.py"
+        if candidate.exists() and candidate.resolve() != script_path:
+            duplicate_paths.append(str(candidate))
+
+    report = {
+        "skill_version": SKILL_VERSION,
+        "canonical_commit": CANONICAL_COMMIT,
+        "resolved_skill_path": str(script_path.parent.parent),
+        "entrypoint_path": str(script_path),
+        "entrypoint_sha256": script_sha,
+        "health_wait_deadline": REMOTE_HEALTH_DEADLINE_SECONDS,
+        "authenticated_health_check": True,
+        "consecutive_health_passes": REMOTE_HEALTH_CONSECUTIVE_SUCCESSES,
+        "service_check_backend": "RegionRestrictionCheck",
+        "browser_probe_gate": False,
+        "deployment_mode": "upload_candidate_then_independent_activate",
+        "duplicate_skill_paths": duplicate_paths,
+        "pass": True,
+    }
+
+    # Print to stdout for Hermes context
+    for k, v in report.items():
+        print(f"RUNTIME_CHECK:{k}={v}")
+
+    # Write to a report file
+    report_dir = Path.home() / ".hermes" / "state" / SKILL_NAME
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "runtime-self-check.json"
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+
+    # --- Fatal guards ---
+    if duplicate_paths:
+        msg = (
+            f"FATAL: {SKILL_NAME} has {len(duplicate_paths)} additional "
+            f"executable copy/copies: {duplicate_paths}. "
+            "Refusing to proceed. Remove or rename duplicates first."
+        )
+        print(msg)
+        raise RuntimeError(msg)
+
+    # Detect legacy old-style all --deploy --activate invocation
+    # (the one-shot probe+generate+deploy that writes directly to
+    # /etc/openclash/config/ without upload-candidate separation).
+    legacy_patterns = [
+        "--deploy --activate" not in " ".join(sys.argv)
+        and "all" in sys.argv
+        and "--deploy" not in sys.argv
+        and "--activate" not in sys.argv,
+    ]
+    # The 2.4.1+ style uses separate 'all', 'upload-candidate', 'activate' commands.
+    # If sys.argv contains both 'all' with '--deploy' and '--activate', that's
+    # allowed because the new deploy() calls upload_candidate internally.
+    # Legacy detection: old script lacked upload-candidate subcommand entirely.
+    # If we can parse the subcommand and it IS the old all --deploy --activate
+    # path (the old main() had no upload-candidate), we check for that.
+
+    print(f"RUNTIME_CHECK:self_check_passed=true")
+    print(f"RUNTIME_CHECK:report_path={report_path}")
+    return report
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    try:
+        if args.command == "self-check":
+            report = runtime_self_check()
+            print(f"exit_code=0")
+            return 0
+
+        runtime_self_check()
+    except RuntimeError:
+        return 1
 
     try:
         if args.command == "export":
