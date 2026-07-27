@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.3
+version: 2.4.4
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,11 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.3 binds the RegionRestrictionCheck control query
+for this Skill. Version 2.4.4 queries three bounded public-IPv4 control
+backends and separates node-local `ATTRIBUTION_UNAVAILABLE` from an explicit
+`ATTRIBUTION_MISMATCH`; isolated unavailable nodes remain unknown, while
+confirmed mismatch and systematic control outages stop the run. Version 2.4.3
+binds the RegionRestrictionCheck control query
 and tool process to one runner-scoped sidecar proxy context, requires matching
 run-keyed exit HMACs, gates a full run on two-node calibration, and checkpoints
 only completely attributed node evidence. Version 2.4.1 makes activation and
@@ -284,7 +288,8 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 - GPT 403 challenge evidence is `CHALLENGE_UNKNOWN`, never `FAIL_REGION` without explicit region text.
 - Manual calibration requires exact raw name, exact HMAC node ID, exact service, exact source snapshot, test time, and method. Store these separately; newer definitive actual-use evidence takes precedence over older screening evidence.
 - RegionRestrictionCheck is screening evidence. ChatGPT/Gemini `Yes` is `SCREEN_PASS`; Gemini `No` is `SCREEN_NEGATIVE`. Bind any manual override to the exact snapshot and stable node ID. Never require browser automation for candidate generation or activation.
-- After the bounded retry, a nonzero RegionRestrictionCheck exit with no provider line has no attributable service evidence. Record one node-level `RRC_EXECUTION_FAILED_NO_ATTRIBUTABLE_RESULTS` as `UNKNOWN`, emit no service results for that node, and continue. If the tool emits any usable service judgment while its provider is missing or conflicts with the control exit, stop with `STOP_RRC_PROXY_ATTRIBUTION_FAILED`.
+- Resolve the RegionRestrictionCheck runner proxy once and use that same explicit loopback URL for every router-side control request and `regioncheck -M 4 -P`. Query three bounded IPv4 control backends in order with fresh curl processes; accept only a public IPv4 and persist only a run-keyed HMAC.
+- Record `ATTRIBUTION_MATCH` only when the control and RegionRestrictionCheck exits are comparable and agree. A single node with no usable control backend or no comparable RegionRestrictionCheck provider is `ATTRIBUTION_UNAVAILABLE`: emit no service evidence and continue. Retry an explicit mismatch once, then stop with `STOP_RRC_PROXY_ATTRIBUTION_MISMATCH`. Stop systematic control failure only after three consecutive unavailable nodes, or after at least eight attempts when unavailable exceeds 25%.
 - Disney probing must POST `/devices`, obtain an assertion, POST `/token`, distinguish `forbidden-location` and HTTP 403, POST `/graph/v1/device/graphql`, parse `countryCode` and `inSupportedLocation`, and reject final `disneyplus.com` redirects containing `preview` or `unavailable`. Persist no assertion, token, refresh token, or response body. Until that full chain runs, emit `UNKNOWN_INCOMPLETE_PROBE`, not PASS.
 - Egress persistence is limited to country, ASN, and a run-keyed HMAC prefix. Mark `PROBABLE_TUN_OR_UPSTREAM_RECAPTURE` only when at least three `BASE_PASS` nodes span at least two declared regions and every eligible node has the same complete signature. Transport failures do not participate; a guarded run cannot change LKG or service groups.
 - Temporary YAML, response bodies, headers, logs, Mihomo, PID, SSH tunnel, and lock are cleaned in `finally`. Candidate-probe failure must occur before the activation transaction and must never invoke production rollback.

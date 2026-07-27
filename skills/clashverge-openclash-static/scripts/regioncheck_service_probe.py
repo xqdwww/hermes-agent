@@ -22,13 +22,18 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 
-SCHEMA_VERSION = 2
-METHOD_VERSION = "regionrestrictioncheck-sidecar-v2"
+SCHEMA_VERSION = 3
+METHOD_VERSION = "regionrestrictioncheck-sidecar-v3"
 EXPECTED_TOOL_VERSION = "1.0.1"
 DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
 DEFAULT_TIMEOUT_SECONDS = 240
 DEFAULT_STABILIZATION_SECONDS = 1.0
+CONTROL_ATTRIBUTION_BACKENDS = (
+    ("ipify", "https://api.ipify.org?format=json"),
+    ("ifconfig-co", "https://ifconfig.co/json"),
+    ("ipinfo", "https://ipinfo.io/json"),
+)
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SERVICE_LABELS = {
     "gpt": "ChatGPT",
@@ -39,6 +44,10 @@ SERVICE_LABELS = {
 
 class ProbeError(RuntimeError):
     """A fail-closed RegionRestrictionCheck orchestration error."""
+
+
+class ControlAttributionUnavailable(ProbeError):
+    """All bounded control exit backends were unavailable."""
 
 
 class SidecarProxyContext(NamedTuple):
@@ -94,6 +103,17 @@ def resolve_sidecar_proxy_context(
 
 def iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def resolve_run_id(
+    *,
+    resume: bool,
+    previous: dict[str, Any] | None = None,
+) -> str:
+    previous_id = str((previous or {}).get("run_id") or "")
+    if resume and re.fullmatch(r"[0-9a-f]{32}", previous_id):
+        return previous_id
+    return secrets.token_hex(16)
 
 
 def load_module(path: Path) -> Any:
@@ -217,7 +237,7 @@ def append_service_results(
                     "post_regioncheck_control_same_proxy"
                 ),
                 "attribution_status": (
-                    "ATTRIBUTION_VALID"
+                    "ATTRIBUTION_MATCH"
                     if control_exit_hmac
                     and control_exit_hmac == regioncheck_exit_hmac
                     else "ATTRIBUTION_UNAVAILABLE"
@@ -351,7 +371,7 @@ def control_geo(
 ) -> tuple[str, str]:
     validate_proxy_url(proxy_url)
     last_error: BaseException | None = None
-    for attempt in range(2):
+    for _backend_id, backend_url in CONTROL_ATTRIBUTION_BACKENDS:
         try:
             completed = run_in_runner_scope(
                 [
@@ -368,7 +388,7 @@ def control_geo(
                     "12",
                     "--silent",
                     "--show-error",
-                    "https://ipinfo.io/json",
+                    backend_url,
                 ],
                 runner_scope=runner_scope,
                 host=host,
@@ -377,18 +397,25 @@ def control_geo(
             if completed.returncode != 0:
                 raise ProbeError("CONTROL_GEO_TRANSPORT")
             payload = json.loads(completed.stdout)
-            ip = str(payload["ip"])
-            country = str(payload.get("country") or "UNKNOWN")
-            ipaddress.ip_address(ip)
+            ip = str(payload.get("ip") or payload.get("ip_addr") or "")
+            country = str(
+                payload.get("country")
+                or payload.get("country_iso")
+                or "UNKNOWN"
+            )
+            parsed_ip = ipaddress.ip_address(ip)
+            if parsed_ip.version != 4 or not parsed_ip.is_global:
+                raise ProbeError("CONTROL_GEO_NOT_PUBLIC_IPV4")
             return ip, country
         except (
             KeyError, ValueError, json.JSONDecodeError, OSError,
             subprocess.TimeoutExpired, ProbeError,
         ) as exc:
             last_error = exc
-            if attempt == 0:
-                sleep_fn(1)
-    raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED") from last_error
+            sleep_fn(0)
+    raise ControlAttributionUnavailable(
+        "CONTROL_ATTRIBUTION_UNAVAILABLE"
+    ) from last_error
 
 
 def run_regioncheck(
@@ -565,21 +592,48 @@ def probe_node_with_attribution(
                 host=host,
                 sleep_fn=sleep_fn,
             )
-        except ProbeError:
-            last = {
+        except ControlAttributionUnavailable:
+            return {
                 "selector_readback": selected,
                 "attribution_attempts": attribution_attempt,
                 "attribution_valid": False,
-                "status": "ATTRIBUTION_INVALID",
+                "status": "ATTRIBUTION_UNAVAILABLE",
+                "control_exit_ip_hmac": "",
+                "regioncheck_exit_ip_hmac": "",
+                "exit_country": "UNKNOWN",
+                "returncode": None,
+                "output_complete": False,
+                "transport_unknown": True,
+                "raw_values": {},
+                "masked_ip_present": False,
             }
         else:
             control_exit_hmac = hmac_prefix(run_key, control_ip)
             regioncheck_exit_hmac = hmac_prefix(run_key, regioncheck_ip)
             masked = extract_masked_ip(output)
-            masked_matches = returncode == 124 or masked_ip_matches(
-                regioncheck_ip,
-                masked,
-            )
+            if masked is None:
+                return {
+                    "selector_readback": selected,
+                    "attribution_attempts": attribution_attempt,
+                    "attribution_valid": False,
+                    "status": "ATTRIBUTION_UNAVAILABLE",
+                    "control_exit_ip_hmac": control_exit_hmac,
+                    "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
+                    "regioncheck_exit_ip_hmac_source": (
+                        "post_regioncheck_control_same_proxy"
+                    ),
+                    "exit_country": (
+                        country
+                        if country and country != "UNKNOWN"
+                        else regioncheck_country or "UNKNOWN"
+                    ),
+                    "returncode": returncode,
+                    "output_complete": False,
+                    "transport_unknown": True,
+                    "raw_values": {},
+                    "masked_ip_present": False,
+                }
+            masked_matches = masked_ip_matches(regioncheck_ip, masked)
             attribution_valid = (
                 control_exit_hmac == regioncheck_exit_hmac and masked_matches
             )
@@ -597,22 +651,23 @@ def probe_node_with_attribution(
                 "attribution_attempts": attribution_attempt,
                 "attribution_valid": attribution_valid,
                 "status": (
-                    "TRANSPORT_UNKNOWN"
-                    if attribution_valid and transport_unknown
-                    else (
-                        "ATTRIBUTION_VALID"
-                        if attribution_valid
-                        else "ATTRIBUTION_INVALID"
-                    )
+                    "ATTRIBUTION_MATCH"
+                    if attribution_valid
+                    else "ATTRIBUTION_MISMATCH"
                 ),
                 "control_exit_ip_hmac": control_exit_hmac,
                 "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
                 "regioncheck_exit_ip_hmac_source": (
                     "post_regioncheck_control_same_proxy"
                 ),
-                "exit_country": country or regioncheck_country or "UNKNOWN",
+                "exit_country": (
+                    country
+                    if country and country != "UNKNOWN"
+                    else regioncheck_country or "UNKNOWN"
+                ),
                 "returncode": returncode,
                 "output_complete": output_complete,
+                "transport_unknown": transport_unknown,
                 "raw_values": raw_values,
                 "masked_ip_present": masked is not None,
             }
@@ -639,6 +694,7 @@ def reusable_node_ids(
         or previous.get("probe_method_version") != METHOD_VERSION
         or previous.get("source_snapshot_id") != manifest["source_snapshot_id"]
         or previous.get("source_hash") != manifest["source_hash"]
+        or previous.get("tool", {}).get("tool_version") != tool["tool_version"]
         or previous.get("tool", {}).get("script_sha256") != tool["script_sha256"]
     ):
         return set()
@@ -652,7 +708,7 @@ def reusable_node_ids(
         control_hmac = str(item.get("control_exit_ip_hmac") or "")
         regioncheck_hmac = str(item.get("regioncheck_exit_ip_hmac") or "")
         if (
-            item.get("status") == "ATTRIBUTION_VALID"
+            item.get("status") == "ATTRIBUTION_MATCH"
             and item.get("attribution_valid") is True
             and item.get("selector_readback") == item.get("exact_node_name")
             and item.get("output_complete") is True
@@ -691,30 +747,59 @@ def validate_calibration_report(
 def update_report_counts(report: dict[str, Any]) -> None:
     nodes = report["node_attempts"]
     report["nodes_attempted"] = len(nodes)
-    report["nodes_completed"] = sum(
-        item.get("status") != "ATTRIBUTION_INVALID" for item in nodes
+    report["nodes_completed"] = len(nodes)
+    report["attribution_match"] = sum(
+        item.get("status") == "ATTRIBUTION_MATCH" for item in nodes
     )
-    report["attribution_valid"] = sum(
-        item.get("attribution_valid") is True for item in nodes
+    report["attribution_unavailable"] = sum(
+        item.get("status") == "ATTRIBUTION_UNAVAILABLE" for item in nodes
     )
-    report["attribution_invalid"] = sum(
-        item.get("status") == "ATTRIBUTION_INVALID" for item in nodes
+    report["attribution_mismatch"] = sum(
+        item.get("status") == "ATTRIBUTION_MISMATCH" for item in nodes
     )
     report["transport_unknown"] = sum(
-        item.get("status") == "TRANSPORT_UNKNOWN" for item in nodes
+        item.get("transport_unknown") is True for item in nodes
     )
+    report["newly_tested_records"] = len(nodes) - int(
+        report.get("nodes_reused") or 0
+    )
+    report["unavailable_records"] = report["attribution_unavailable"]
+
+
+def systemic_attribution_stop_reason(
+    node_attempts: list[dict[str, Any]],
+) -> str | None:
+    unavailable = [
+        item
+        for item in node_attempts
+        if item.get("status") == "ATTRIBUTION_UNAVAILABLE"
+    ]
+    trailing_unavailable_ids: list[str] = []
+    for item in reversed(node_attempts):
+        if item.get("status") != "ATTRIBUTION_UNAVAILABLE":
+            break
+        node_id = str(item.get("exact_node_id") or "")
+        if node_id not in trailing_unavailable_ids:
+            trailing_unavailable_ids.append(node_id)
+    if len(trailing_unavailable_ids) >= 3:
+        return "STOP_RRC_CONTROL_ATTRIBUTION_SYSTEMIC_UNAVAILABLE"
+    if len(node_attempts) >= 8 and len(unavailable) / len(node_attempts) > 0.25:
+        return "STOP_RRC_CONTROL_ATTRIBUTION_SYSTEMIC_UNAVAILABLE"
+    return None
 
 
 def validate_two_node_calibration(report: dict[str, Any]) -> None:
     nodes = report["node_attempts"]
+    if any(item.get("status") == "ATTRIBUTION_MISMATCH" for item in nodes):
+        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_MISMATCH")
     if (
         len(nodes) != 2
-        or any(item.get("status") != "ATTRIBUTION_VALID" for item in nodes)
+        or any(item.get("status") != "ATTRIBUTION_MATCH" for item in nodes)
         or any(item.get("selector_readback") != item.get("exact_node_name") for item in nodes)
         or any(item.get("result_count") != len(SERVICE_LABELS) for item in nodes)
         or len({item.get("control_exit_ip_hmac") for item in nodes}) != 2
     ):
-        raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
+        raise ProbeError("STOP_RRC_TWO_NODE_CALIBRATION_FAILED")
     report["calibration_status"] = (
         "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_CALIBRATION"
     )
@@ -739,7 +824,10 @@ def main() -> int:
     parser.add_argument("--calibration-only", action="store_true")
     parser.add_argument("--calibration-report", type=Path)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--import-report", type=Path)
     args = parser.parse_args()
+    if args.resume and args.import_report is not None:
+        raise ProbeError("RRC_RESUME_AND_IMPORT_CONFLICT")
 
     skill = load_module(args.skill_script.resolve())
     manifest, payload_path = skill.verify_source_snapshot(args.source_snapshot.resolve())
@@ -784,6 +872,7 @@ def main() -> int:
         "snapshot_node_count": len(manifest["nodes"]),
         "selected_node_count": len(proxies),
         "tool": tool,
+        "run_id": resolve_run_id(resume=False),
         "started_at": iso_now(),
         "status": "RUNNING",
         "production_fingerprint_preserved": False,
@@ -791,6 +880,11 @@ def main() -> int:
         "node_errors": [],
         "node_attempts": [],
         "nodes_reused": 0,
+        "imported_verified_records": 0,
+        "resumed_verified_records": 0,
+        "control_attribution_backends": [
+            backend_id for backend_id, _url in CONTROL_ATTRIBUTION_BACKENDS
+        ],
         "runner_location": "router",
         "runner_scope": "remote",
         "tunnel_local_port_strategy": "dynamic_loopback",
@@ -798,8 +892,13 @@ def main() -> int:
         "resolved_proxy_url_strategy": "remote_loopback_sidecar_port",
         "gid_bypass_verified": False,
     }
+    previous_path: Path | None = None
     if args.resume and args.output.exists():
-        previous = json.loads(args.output.read_text(encoding="utf-8"))
+        previous_path = args.output
+    elif args.import_report is not None:
+        previous_path = args.import_report.resolve()
+    if previous_path is not None:
+        previous = json.loads(previous_path.read_text(encoding="utf-8"))
         reusable = reusable_node_ids(previous, manifest=manifest, tool=tool)
         selected_ids = {
             identities[str(proxy["name"])]
@@ -817,6 +916,11 @@ def main() -> int:
             if item.get("exact_node_id") in reusable
         ]
         report["nodes_reused"] = len(reusable)
+        if args.resume:
+            report["resumed_verified_records"] = len(reusable)
+            report["run_id"] = resolve_run_id(resume=True, previous=previous)
+        else:
+            report["imported_verified_records"] = len(reusable)
     else:
         reusable = set()
     before_fingerprint = skill.remote_production_fingerprint(args.host)
@@ -871,15 +975,21 @@ def main() -> int:
                         "result_count": 0,
                     }
                 )
-                if outcome["status"] == "ATTRIBUTION_INVALID":
+                if outcome["status"] == "ATTRIBUTION_MISMATCH":
                     report["node_attempts"].append(node_entry)
                     update_report_counts(report)
-                    report["status"] = "STOP_RRC_PROXY_ATTRIBUTION_FAILED"
+                    report["status"] = "STOP_RRC_PROXY_ATTRIBUTION_MISMATCH"
                     safe_atomic_json(args.output.resolve(), report)
-                    raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_FAILED")
-                if outcome["status"] == "TRANSPORT_UNKNOWN" and not outcome[
-                    "output_complete"
-                ]:
+                    raise ProbeError("STOP_RRC_PROXY_ATTRIBUTION_MISMATCH")
+                if outcome["status"] == "ATTRIBUTION_UNAVAILABLE":
+                    append_node_error(
+                        report,
+                        manifest=manifest,
+                        identities=identities,
+                        node_name=name,
+                        tool=tool,
+                    )
+                elif outcome["transport_unknown"] and not outcome["output_complete"]:
                     append_node_error(
                         report,
                         manifest=manifest,
@@ -903,6 +1013,13 @@ def main() -> int:
                 report["node_attempts"].append(node_entry)
                 update_report_counts(report)
                 safe_atomic_json(args.output.resolve(), report)
+                systemic_stop = systemic_attribution_stop_reason(
+                    report["node_attempts"]
+                )
+                if systemic_stop is not None:
+                    report["status"] = systemic_stop
+                    safe_atomic_json(args.output.resolve(), report)
+                    raise ProbeError(systemic_stop)
                 reset_sidecar_connections(
                     skill,
                     sidecar.controller_port,

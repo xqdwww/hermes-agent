@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.3"
+SKILL_VERSION = "2.4.4"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 # Canonical source: ef144787970e0a3923a2c41ee6e5be8ca0a21c76
@@ -272,8 +272,8 @@ EVIDENCE_TYPES = {
     "UNKNOWN",
 }
 FUNCTIONAL_RESULT_SCHEMA_VERSION = 1
-RRC_FUNCTIONAL_RESULT_SCHEMA_VERSION = 2
-RRC_FUNCTIONAL_METHOD_VERSION = "regionrestrictioncheck-sidecar-v2"
+RRC_FUNCTIONAL_RESULT_SCHEMA_VERSION = 3
+RRC_FUNCTIONAL_METHOD_VERSION = "regionrestrictioncheck-sidecar-v3"
 SOURCE_REFRESH_OUTCOMES = {
     "SUCCESS_CHANGED",
     "SUCCESS_NOT_MODIFIED",
@@ -1223,7 +1223,7 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
         if is_attributed_rrc and (
             payload.get("status") != "COMPLETE"
             or payload.get("production_fingerprint_preserved") is not True
-            or payload.get("attribution_invalid") != 0
+            or payload.get("attribution_mismatch") != 0
             or payload.get("nodes_completed") != payload.get("selected_node_count")
         ):
             raise ConfigError(
@@ -1253,7 +1253,7 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
                 control_hmac = str(item.get("control_exit_ip_hmac") or "")
                 regioncheck_hmac = str(item.get("regioncheck_exit_ip_hmac") or "")
                 if (
-                    item.get("attribution_status") != "ATTRIBUTION_VALID"
+                    item.get("attribution_status") != "ATTRIBUTION_MATCH"
                     or not control_hmac
                     or control_hmac != regioncheck_hmac
                 ):

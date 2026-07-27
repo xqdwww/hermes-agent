@@ -121,47 +121,65 @@ def test_regioncheck_invocation_is_noninteractive_and_explicit_proxy(monkeypatch
     assert observed["kwargs"]["timeout"] == 30
 
 
-def test_control_geo_is_forced_to_same_ipv4_family_as_regioncheck(monkeypatch) -> None:
-    observed = {}
-
-    class Completed:
-        returncode = 0
-        stdout = '{"ip":"203.0.113.8","country":"JP"}'
-
-    def fake_run(command, **kwargs):
-        observed["command"] = command
-        return Completed()
-
-    monkeypatch.setattr(RRC.subprocess, "run", fake_run)
-    assert RRC.control_geo(
-        proxy_url="http://127.0.0.1:1234",
-        runner_scope="local",
-        host="unused",
-        sleep_fn=lambda _seconds: None,
-    ) == ("203.0.113.8", "JP")
-    assert "--ipv4" in observed["command"]
-
-
-def test_control_geo_retries_once_then_succeeds(monkeypatch) -> None:
-    calls = []
+def test_control_geo_falls_back_across_fresh_ipv4_backends(monkeypatch) -> None:
+    observed = []
 
     class Completed:
         def __init__(self, returncode: int, stdout: str):
             self.returncode = returncode
             self.stdout = stdout
+            self.stderr = ""
 
-    responses = iter([
-        Completed(7, ""),
-        Completed(0, '{"ip":"203.0.113.8","country":"JP"}'),
-    ])
-    monkeypatch.setattr(RRC.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    def fake_run(command, **kwargs):
+        observed.append((command, kwargs))
+        return [
+            Completed(7, ""),
+            Completed(0, "<html>challenge</html>"),
+            Completed(0, '{"ip":"8.8.8.8","country":"US"}'),
+        ][len(observed) - 1]
+
+    monkeypatch.setattr(RRC, "run_in_runner_scope", fake_run)
     assert RRC.control_geo(
         proxy_url="http://127.0.0.1:1234",
         runner_scope="local",
         host="unused",
-        sleep_fn=calls.append,
-    ) == ("203.0.113.8", "JP")
-    assert calls == [1]
+        sleep_fn=lambda _seconds: None,
+    ) == ("8.8.8.8", "US")
+    assert len(observed) == 3
+    assert all("--ipv4" in command for command, _kwargs in observed)
+    assert all("--no-keepalive" in command for command, _kwargs in observed)
+    assert all(
+        command[command.index("--proxy") + 1] == "http://127.0.0.1:1234"
+        for command, _kwargs in observed
+    )
+    assert len({command[-1] for command, _kwargs in observed}) == 3
+
+
+def test_control_geo_rejects_non_public_or_non_ipv4_results(monkeypatch) -> None:
+    class Completed:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    responses = iter(
+        [
+            Completed('{"ip":"10.0.0.1"}'),
+            Completed('{"ip":"2001:4860:4860::8888"}'),
+            Completed('{"ip":"1.1.1.1","country":"AU"}'),
+        ]
+    )
+    monkeypatch.setattr(
+        RRC,
+        "run_in_runner_scope",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    assert RRC.control_geo(
+        proxy_url="http://127.0.0.1:1234",
+        runner_scope="local",
+        host="unused",
+    ) == ("1.1.1.1", "AU")
 
 
 def test_node_transport_failure_records_all_services_without_ip() -> None:
@@ -320,7 +338,7 @@ def test_remote_control_and_regioncheck_receive_same_resolved_proxy_url(
             return Completed(
                 "ChatGPT: Yes\nGoogle Gemini: No\nDisney+: Yes (Region: JP)\n"
             )
-        return Completed('{"ip":"203.0.113.8","country":"JP"}')
+        return Completed('{"ip":"8.8.8.8","country":"US"}')
 
     monkeypatch.setattr(RRC.subprocess, "run", fake_run)
     proxy_url = "http://127.0.0.1:17890"
@@ -330,7 +348,7 @@ def test_remote_control_and_regioncheck_receive_same_resolved_proxy_url(
         runner_scope="remote",
         host="router",
         sleep_fn=lambda _seconds: None,
-    ) == ("203.0.113.8", "JP")
+    ) == ("8.8.8.8", "US")
     code, _ = RRC.run_regioncheck(
         "router",
         30,
@@ -412,7 +430,7 @@ def test_matching_control_and_regioncheck_hmac_accepts_node(monkeypatch) -> None
         sleep_fn=lambda _seconds: None,
     )
 
-    assert outcome["status"] == "ATTRIBUTION_VALID"
+    assert outcome["status"] == "ATTRIBUTION_MATCH"
     assert outcome["control_exit_ip_hmac"] == outcome["regioncheck_exit_ip_hmac"]
     assert outcome["selector_readback"] == "node-a"
     assert skill.connection_resets >= 2
@@ -451,7 +469,7 @@ def test_stale_exit_pollution_retries_once_then_accepts_fresh_exit(
         sleep_fn=lambda _seconds: None,
     )
 
-    assert outcome["status"] == "ATTRIBUTION_VALID"
+    assert outcome["status"] == "ATTRIBUTION_MATCH"
     assert outcome["attribution_attempts"] == 2
 
 
@@ -484,7 +502,7 @@ def test_repeated_exit_mismatch_is_rejected(monkeypatch) -> None:
         sleep_fn=lambda _seconds: None,
     )
 
-    assert outcome["status"] == "ATTRIBUTION_INVALID"
+    assert outcome["status"] == "ATTRIBUTION_MISMATCH"
     assert outcome["attribution_valid"] is False
     assert outcome["attribution_attempts"] == 2
 
@@ -517,7 +535,7 @@ def test_selector_switch_produces_a_different_attributed_exit(monkeypatch) -> No
     ]
 
     assert skill.selections == ["node-tw", "node-us"]
-    assert all(item["status"] == "ATTRIBUTION_VALID" for item in outcomes)
+    assert all(item["status"] == "ATTRIBUTION_MATCH" for item in outcomes)
     assert (
         outcomes[0]["control_exit_ip_hmac"]
         != outcomes[1]["control_exit_ip_hmac"]
@@ -528,14 +546,14 @@ def test_two_node_calibration_requires_distinct_attributed_exits() -> None:
     report = {
         "node_attempts": [
             {
-                "status": "ATTRIBUTION_VALID",
+                "status": "ATTRIBUTION_MATCH",
                 "selector_readback": "node-a",
                 "exact_node_name": "node-a",
                 "control_exit_ip_hmac": "a" * 20,
                 "result_count": 3,
             },
             {
-                "status": "ATTRIBUTION_VALID",
+                "status": "ATTRIBUTION_MATCH",
                 "selector_readback": "node-b",
                 "exact_node_name": "node-b",
                 "control_exit_ip_hmac": "b" * 20,
@@ -550,13 +568,59 @@ def test_two_node_calibration_requires_distinct_attributed_exits() -> None:
     )
 
     report["node_attempts"][1]["control_exit_ip_hmac"] = "a" * 20
-    with pytest.raises(RRC.ProbeError, match="ATTRIBUTION_FAILED"):
+    with pytest.raises(RRC.ProbeError, match="TWO_NODE_CALIBRATION_FAILED"):
         RRC.validate_two_node_calibration(report)
 
 
 def test_only_complete_attribution_records_are_reusable() -> None:
     manifest = {"source_snapshot_id": "snapshot_test", "source_hash": "a" * 64}
-    tool = {"script_sha256": "b" * 64}
+    tool = {
+        "tool_version": RRC.EXPECTED_TOOL_VERSION,
+        "script_sha256": "b" * 64,
+    }
+    previous = {
+        "schema_version": RRC.SCHEMA_VERSION,
+        "probe_method_version": RRC.METHOD_VERSION,
+        **manifest,
+        "tool": tool,
+        "results": [
+            {"exact_node_id": "node-1", "service": service}
+            for service in RRC.SERVICE_LABELS
+        ],
+        "node_attempts": [
+            {
+                "exact_node_id": "node-1",
+                "exact_node_name": "one",
+                "selector_readback": "one",
+                "status": "ATTRIBUTION_MATCH",
+                "attribution_valid": True,
+                "output_complete": True,
+                "control_exit_ip_hmac": "c" * 20,
+                "regioncheck_exit_ip_hmac": "c" * 20,
+            },
+            {
+                "exact_node_id": "node-2",
+                "exact_node_name": "two",
+                "selector_readback": "two",
+                "status": "ATTRIBUTION_MATCH",
+                "attribution_valid": True,
+                "output_complete": False,
+                "control_exit_ip_hmac": "d" * 20,
+                "regioncheck_exit_ip_hmac": "d" * 20,
+            },
+        ],
+    }
+
+    assert RRC.reusable_node_ids(previous, manifest=manifest, tool=tool) == {
+        "node-1"
+    }
+    previous["schema_version"] = 1
+    assert RRC.reusable_node_ids(previous, manifest=manifest, tool=tool) == set()
+
+
+def test_legacy_attribution_valid_record_is_not_reusable() -> None:
+    manifest = {"source_snapshot_id": "snapshot_test", "source_hash": "a" * 64}
+    tool = {"tool_version": RRC.EXPECTED_TOOL_VERSION, "script_sha256": "b" * 64}
     previous = {
         "schema_version": RRC.SCHEMA_VERSION,
         "probe_method_version": RRC.METHOD_VERSION,
@@ -576,25 +640,111 @@ def test_only_complete_attribution_records_are_reusable() -> None:
                 "output_complete": True,
                 "control_exit_ip_hmac": "c" * 20,
                 "regioncheck_exit_ip_hmac": "c" * 20,
-            },
-            {
-                "exact_node_id": "node-2",
-                "exact_node_name": "two",
-                "selector_readback": "two",
-                "status": "ATTRIBUTION_VALID",
-                "attribution_valid": True,
-                "output_complete": False,
-                "control_exit_ip_hmac": "d" * 20,
-                "regioncheck_exit_ip_hmac": "d" * 20,
-            },
+            }
         ],
     }
-
-    assert RRC.reusable_node_ids(previous, manifest=manifest, tool=tool) == {
-        "node-1"
-    }
-    previous["schema_version"] = 1
     assert RRC.reusable_node_ids(previous, manifest=manifest, tool=tool) == set()
+
+
+def test_new_run_id_is_distinct_and_resume_preserves_checkpoint_run_id() -> None:
+    first = RRC.resolve_run_id(resume=False)
+    second = RRC.resolve_run_id(resume=False, previous={"run_id": first})
+    resumed = RRC.resolve_run_id(resume=True, previous={"run_id": first})
+
+    assert first != second
+    assert resumed == first
+    assert len(first) == 32
+
+
+def test_node_local_attribution_unavailable_has_no_service_evidence(
+    monkeypatch,
+) -> None:
+    skill = FakeSkill()
+    monkeypatch.setattr(
+        RRC,
+        "control_geo",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RRC.ControlAttributionUnavailable("CONTROL_ATTRIBUTION_UNAVAILABLE")
+        ),
+    )
+
+    outcome = RRC.probe_node_with_attribution(
+        skill=skill,
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        node_name="node-a",
+        timeout_seconds=217,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert outcome["status"] == "ATTRIBUTION_UNAVAILABLE"
+    assert outcome["raw_values"] == {}
+    assert outcome["attribution_valid"] is False
+
+
+def _attempt(status: str, node_id: str) -> dict:
+    return {"status": status, "exact_node_id": node_id}
+
+
+def test_isolated_unavailable_does_not_stop_run() -> None:
+    attempts = [
+        _attempt("ATTRIBUTION_MATCH", "a"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "b"),
+        _attempt("ATTRIBUTION_MATCH", "c"),
+        _attempt("ATTRIBUTION_MATCH", "d"),
+        _attempt("ATTRIBUTION_MATCH", "e"),
+        _attempt("ATTRIBUTION_MATCH", "f"),
+        _attempt("ATTRIBUTION_MATCH", "g"),
+        _attempt("ATTRIBUTION_MATCH", "h"),
+    ]
+    assert RRC.systemic_attribution_stop_reason(attempts) is None
+
+
+def test_three_consecutive_unavailable_nodes_stop_run() -> None:
+    attempts = [
+        _attempt("ATTRIBUTION_MATCH", "a"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "b"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "c"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "d"),
+    ]
+    assert (
+        RRC.systemic_attribution_stop_reason(attempts)
+        == "STOP_RRC_CONTROL_ATTRIBUTION_SYSTEMIC_UNAVAILABLE"
+    )
+
+
+def test_unavailable_ratio_over_25_percent_after_eight_nodes_stops_run() -> None:
+    attempts = [
+        _attempt("ATTRIBUTION_UNAVAILABLE", "a"),
+        _attempt("ATTRIBUTION_MATCH", "b"),
+        _attempt("ATTRIBUTION_MATCH", "c"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "d"),
+        _attempt("ATTRIBUTION_MATCH", "e"),
+        _attempt("ATTRIBUTION_MATCH", "f"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "g"),
+        _attempt("ATTRIBUTION_MATCH", "h"),
+    ]
+    assert (
+        RRC.systemic_attribution_stop_reason(attempts)
+        == "STOP_RRC_CONTROL_ATTRIBUTION_SYSTEMIC_UNAVAILABLE"
+    )
+
+
+def test_unavailable_ratio_equal_to_25_percent_does_not_stop_run() -> None:
+    attempts = [
+        _attempt("ATTRIBUTION_UNAVAILABLE", "a"),
+        _attempt("ATTRIBUTION_MATCH", "b"),
+        _attempt("ATTRIBUTION_MATCH", "c"),
+        _attempt("ATTRIBUTION_MATCH", "d"),
+        _attempt("ATTRIBUTION_UNAVAILABLE", "e"),
+        _attempt("ATTRIBUTION_MATCH", "f"),
+        _attempt("ATTRIBUTION_MATCH", "g"),
+        _attempt("ATTRIBUTION_MATCH", "h"),
+    ]
+    assert RRC.systemic_attribution_stop_reason(attempts) is None
 
 
 def test_regioncheck_timeout_is_per_node_and_no_global_port_fallback(
