@@ -231,6 +231,7 @@ def test_remote_sidecar_cleanup_requires_exact_process_and_path_postconditions()
     assert "sidecar_config=/tmp/clashverge-openclash-sidecar.token/config.yaml" in command
     assert "sidecar_core=/etc/openclash/core/clash_meta" in command
     assert "stop_sidecar_pid" in command
+    assert 'kill -0 "$pid" 2>/dev/null || return 0' in command
     assert command.count("/proc/[0-9]*") == 2
     assert 'exit 1' in command
     assert "test ! -e /tmp/clashverge-openclash-sidecar.token" in command
