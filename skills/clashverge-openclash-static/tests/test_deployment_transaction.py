@@ -194,7 +194,39 @@ def test_sidecar_runs_as_bypass_gid_and_always_cleans(tmp_path: Path) -> None:
     assert "meta skgid 65534" in combined
     assert "-c 65534:65534" in combined
     assert "CANDIDATE_SIDECAR_CLEANUP=1" in combined
+    assert "sidecar_core=/core" in combined
+    assert "/proc/[0-9]*" in combined
+    assert 'readlink "$proc_dir/exe"' in combined
+    assert '*"$sidecar_config"*) stop_sidecar_pid "$pid"' in combined
     assert combined.count("CANDIDATE_FINGERPRINT=1") == 2
+
+
+def test_remote_sidecar_cleanup_requires_exact_process_and_path_postconditions() -> None:
+    commands: list[str] = []
+
+    def fake_ssh(_host: str, command: str, **_kwargs):
+        commands.append(command)
+        return completed()
+
+    with patch.object(MODULE, "ssh_command", side_effect=fake_ssh):
+        MODULE._stop_remote_sidecar(
+            "router",
+            "/tmp/clashverge-openclash-sidecar.token",
+            "/tmp/clashverge-openclash-sidecar.token.upload",
+            "/tmp/clashverge-openclash-sidecar.lock",
+            "token",
+            "/etc/openclash/core/clash_meta",
+        )
+
+    command = commands[0]
+    assert "set -e" in command
+    assert "sidecar_config=/tmp/clashverge-openclash-sidecar.token/config.yaml" in command
+    assert "sidecar_core=/etc/openclash/core/clash_meta" in command
+    assert "stop_sidecar_pid" in command
+    assert command.count("/proc/[0-9]*") == 2
+    assert 'exit 1' in command
+    assert "test ! -e /tmp/clashverge-openclash-sidecar.token" in command
+    assert "test ! -e /tmp/clashverge-openclash-sidecar.lock" in command
 
 
 def test_activation_failure_rolls_back_running_state() -> None:

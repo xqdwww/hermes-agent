@@ -2327,19 +2327,48 @@ def remote_production_fingerprint(host: str) -> str:
 
 
 def _stop_remote_sidecar(
-    host: str, remote_dir: str, upload_path: str, lock_dir: str, token: str
+    host: str,
+    remote_dir: str,
+    upload_path: str,
+    lock_dir: str,
+    token: str,
+    core_path: str,
 ) -> None:
     command = (
-        "CANDIDATE_SIDECAR_CLEANUP=1; "
+        "CANDIDATE_SIDECAR_CLEANUP=1; set -e; "
         f"if [ \"$(cat {quote_remote(lock_dir + '/owner')} 2>/dev/null)\" = "
         f"{quote_remote(token)} ]; then "
         f"pid_file={quote_remote(remote_dir + '/sidecar.pid')}; "
+        f"sidecar_config={quote_remote(remote_dir + '/config.yaml')}; "
+        f"sidecar_core={quote_remote(core_path)}; "
+        "stop_sidecar_pid() { "
+        "pid=\"$1\"; "
+        "case \"$pid\" in ''|*[!0-9]*) return;; esac; "
+        "kill \"$pid\" 2>/dev/null || true; "
+        "for wait_count in 1 2 3 4 5; do "
+        "kill -0 \"$pid\" 2>/dev/null || return; sleep 1; done; "
+        "kill -9 \"$pid\" 2>/dev/null || true; "
+        "for wait_count in 1 2 3 4 5; do "
+        "kill -0 \"$pid\" 2>/dev/null || return; sleep 1; done; "
+        "}; "
         "if [ -s \"$pid_file\" ]; then "
-        "pid=\"$(cat \"$pid_file\")\"; kill \"$pid\" 2>/dev/null || true; "
-        "for wait_count in 1 2 3 4 5; do kill -0 \"$pid\" 2>/dev/null || break; sleep 1; done; "
-        "kill -9 \"$pid\" 2>/dev/null || true; fi; "
+        "stop_sidecar_pid \"$(cat \"$pid_file\")\"; fi; "
+        "for proc_dir in /proc/[0-9]*; do "
+        "pid=\"${proc_dir##*/}\"; "
+        "[ \"$(readlink \"$proc_dir/exe\" 2>/dev/null)\" = \"$sidecar_core\" ] || continue; "
+        "cmdline=\"$(tr '\\000' ' ' < \"$proc_dir/cmdline\" 2>/dev/null)\"; "
+        "case \"$cmdline\" in *\"$sidecar_config\"*) stop_sidecar_pid \"$pid\";; esac; "
+        "done; "
+        "for proc_dir in /proc/[0-9]*; do "
+        "[ \"$(readlink \"$proc_dir/exe\" 2>/dev/null)\" = \"$sidecar_core\" ] || continue; "
+        "cmdline=\"$(tr '\\000' ' ' < \"$proc_dir/cmdline\" 2>/dev/null)\"; "
+        "case \"$cmdline\" in *\"$sidecar_config\"*) exit 1;; esac; "
+        "done; "
         f"rm -rf {quote_remote(remote_dir)}; rm -f {quote_remote(upload_path)}; "
-        f"rm -rf {quote_remote(lock_dir)}; else rm -f {quote_remote(upload_path)}; fi"
+        f"rm -rf {quote_remote(lock_dir)}; "
+        f"test ! -e {quote_remote(remote_dir)}; "
+        f"test ! -e {quote_remote(lock_dir)}; "
+        f"else rm -f {quote_remote(upload_path)}; fi"
     )
     ssh_command(host, command, capture=True)
 
@@ -2430,7 +2459,9 @@ def remote_candidate_sidecar(
                 tunnel.wait(timeout=5)
         cleanup_error: BaseException | None = None
         try:
-            _stop_remote_sidecar(host, remote_dir, upload_path, lock_dir, token)
+            _stop_remote_sidecar(
+                host, remote_dir, upload_path, lock_dir, token, core_path
+            )
         except BaseException as exc:
             cleanup_error = exc
         try:

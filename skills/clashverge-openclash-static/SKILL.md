@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.10
+version: 2.4.11
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,11 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.10 keeps exact-identity, exact-snapshot functional
+for this Skill. Version 2.4.11 makes candidate-sidecar cleanup identify the
+actual Mihomo child by exact executable and temporary config path instead of
+trusting only the BusyBox `start-stop-daemon` pidfile, and verifies that no
+matching process or owned temporary path remains. Version 2.4.10 keeps
+exact-identity, exact-snapshot functional
 evidence valid when a later baseline reachability probe runs; that unrelated
 probe no longer erases current RRC results. Version 2.4.9 treats a cross-connection masked-exit drift as
 node-local attribution unavailable, with no service evidence, because it does
