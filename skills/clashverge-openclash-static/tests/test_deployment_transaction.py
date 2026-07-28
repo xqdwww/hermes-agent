@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "clashverge_to_openclash.py"
+SKILL = Path(__file__).parents[1] / "SKILL.md"
 SPEC = importlib.util.spec_from_file_location("deployment_converter", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -53,6 +55,12 @@ def transaction(*, running: bool = True) -> MODULE.DeploymentTransaction:
         original_network_artifacts=running,
         original_tun_present=running,
     )
+
+
+def test_runtime_version_matches_authoritative_skill_frontmatter() -> None:
+    match = re.search(r"^version:\s*(\S+)\s*$", SKILL.read_text(), re.MULTILINE)
+    assert match is not None
+    assert MODULE.SKILL_VERSION == match.group(1)
 
 
 def test_upload_candidate_never_reads_or_mutates_production(tmp_path: Path) -> None:
