@@ -437,11 +437,23 @@ def test_gpt_manual_pass_does_not_override_transport_failure() -> None:
 def test_screen_and_false_negative_results_enter_current_candidate_groups() -> None:
     report = base_report()
     report["nodes"][0]["exact_node_id"] = "id-a"
+    report["nodes"][0].update(
+        {
+            "selector_confirmed": True,
+            "base_result": "BASE_PASS",
+            "egress_country": "United States",
+        }
+    )
     report["nodes"][0]["services"]["gpt"]["final_result"] = "SCREEN_PASS"
     report["nodes"][0]["services"]["gemini"]["final_result"] = (
         "PASS_WITH_SCREEN_FALSE_NEGATIVE"
     )
     report["nodes"][0]["services"]["disney"]["final_result"] = "PASS_SUPPORTED_REGION"
+    for service in ("gpt", "gemini"):
+        report["nodes"][0]["services"][service]["functional_result"] = {
+            "attribution_status": "ATTRIBUTION_MATCH",
+            "exit_country": "United States",
+        }
     selections, _, _ = SKILL.merge_lkg_results(
         ["node-a"], {"node-a": 0}, {"nodes": {}}, report["nodes"],
         probable_recapture=False, observed_at="2026-07-22T10:03:00+08:00",
@@ -449,6 +461,157 @@ def test_screen_and_false_negative_results_enter_current_candidate_groups() -> N
     assert selections["gpt"]["automatic"] == ["node-a"]
     assert selections["gemini"]["automatic"] == ["node-a"]
     assert selections["disney"]["automatic"] == ["node-a"]
+
+
+def test_official_hk_policy_overrides_service_screens_without_name_inference() -> None:
+    nodes = []
+    for name, country, attribution_status in (
+        ("neutral-hk", "Hong Kong", "ATTRIBUTION_MATCH"),
+        ("香港-name-only", "United States", "ATTRIBUTION_MATCH"),
+        ("neutral-unknown", "Hong Kong", "ATTRIBUTION_UNAVAILABLE"),
+        ("neutral-country-unknown", "", "ATTRIBUTION_MATCH"),
+    ):
+        services = {
+            service: {
+                "raw_result": "SCREEN_PASS",
+                "final_result": "SCREEN_PASS",
+                "functional_result": {
+                    "result": (
+                        "SCREEN_NEGATIVE" if service == "gemini" else "SCREEN_PASS"
+                    ),
+                    "raw_result": (
+                        "SCREEN_NEGATIVE" if service == "gemini" else "SCREEN_PASS"
+                    ),
+                    "attribution_status": attribution_status,
+                    "exit_country": country,
+                },
+            }
+            for service in SKILL.SERVICE_KEYS
+        }
+        if attribution_status == "ATTRIBUTION_UNAVAILABLE":
+            services["gpt"]["functional_result"] = {}
+            services["gemini"]["functional_result"] = {}
+        nodes.append(
+            {
+                "name": name,
+                "exact_node_id": f"id-{name}",
+                "source_snapshot_id": "snapshot-x",
+                "source_hash": "a" * 64,
+                "selector_confirmed": True,
+                "base_result": "BASE_PASS",
+                "egress_country": country,
+                "services": services,
+            }
+        )
+
+    selections, _, enriched = SKILL.merge_lkg_results(
+        [node["name"] for node in nodes],
+        {node["name"]: index for index, node in enumerate(nodes)},
+        {
+            "nodes": {
+                "neutral-hk": {
+                    "gpt": {
+                        "lkg": True,
+                        "exact_node_id": "id-neutral-hk",
+                    }
+                }
+            }
+        },
+        nodes,
+        probable_recapture=False,
+        observed_at="2026-07-28T12:00:00+08:00",
+    )
+
+    assert "neutral-hk" not in selections["gpt"]["automatic"]
+    assert "neutral-hk" not in selections["gpt"]["historical_lkg"]
+    assert "neutral-hk" not in selections["gpt"]["manual_candidates"]
+    assert "neutral-country-unknown" not in selections["gpt"]["automatic"]
+    assert "neutral-country-unknown" not in selections["gemini"]["automatic"]
+    assert "neutral-country-unknown" in selections["disney"]["automatic"]
+    assert "neutral-hk" in selections["gemini"]["automatic"]
+    assert "香港-name-only" in selections["gpt"]["automatic"]
+    assert "neutral-unknown" not in selections["gpt"]["automatic"]
+    assert "neutral-unknown" not in selections["gemini"]["automatic"]
+
+    by_name = {node["name"]: node for node in enriched}
+    gpt_policy = by_name["neutral-hk"]["services"]["gpt"]["region_policy"]
+    gemini_policy = by_name["neutral-hk"]["services"]["gemini"]["region_policy"]
+    assert gpt_policy["official_service_region_status"] == (
+        "OFFICIAL_REGION_UNSUPPORTED"
+    )
+    assert gpt_policy["final_candidate_decision"] == "EXCLUDE"
+    assert gpt_policy["decision_reason"] == (
+        "SCREEN_PASS_OVERRIDDEN_BY_OFFICIAL_REGION_POLICY"
+    )
+    assert gemini_policy["official_service_region_status"] == (
+        "OFFICIAL_REGION_SUPPORTED"
+    )
+    assert gemini_policy["final_candidate_decision"] == "INCLUDE"
+    assert gemini_policy["decision_reason"] == (
+        "REGION_POLICY_ELIGIBLE_TRANSPORT_PASS"
+    )
+    assert by_name["neutral-hk"]["services"]["gpt"]["functional_result"]["result"] == (
+        "SCREEN_PASS"
+    )
+    assert by_name["neutral-hk"]["services"]["gemini"]["functional_result"][
+        "result"
+    ] == "SCREEN_NEGATIVE"
+
+
+def test_official_hk_gemini_policy_keeps_current_node_failures_excluded() -> None:
+    nodes = []
+    for name, final_result, manual_result, base_result in (
+        ("manual-fail", "EVIDENCE_CONFLICT", "FAIL", "BASE_PASS"),
+        ("transport-fail", "FAIL_TRANSPORT", "NONE", "BASE_FAIL"),
+    ):
+        services = {
+            service: {
+                "raw_result": "SCREEN_PASS",
+                "final_result": "SCREEN_PASS",
+                "functional_result": {
+                    "result": "SCREEN_PASS",
+                    "raw_result": "SCREEN_PASS",
+                    "attribution_status": "ATTRIBUTION_MATCH",
+                    "exit_country": "HK",
+                },
+            }
+            for service in SKILL.SERVICE_KEYS
+        }
+        services["gemini"]["final_result"] = final_result
+        if manual_result != "NONE":
+            services["gemini"]["manual_result"] = {"result": manual_result}
+        nodes.append(
+            {
+                "name": name,
+                "exact_node_id": f"id-{name}",
+                "selector_confirmed": True,
+                "base_result": base_result,
+                "egress_country": "Hong Kong",
+                "services": services,
+            }
+        )
+
+    selections, _, enriched = SKILL.merge_lkg_results(
+        [node["name"] for node in nodes],
+        {node["name"]: index for index, node in enumerate(nodes)},
+        {"nodes": {}},
+        nodes,
+        probable_recapture=False,
+        observed_at="2026-07-28T12:00:00+08:00",
+    )
+
+    assert selections["gemini"]["automatic"] == []
+    reasons = {
+        node["name"]: node["services"]["gemini"]["region_policy"][
+            "decision_reason"
+        ]
+        for node in enriched
+    }
+    assert reasons == {
+        "manual-fail": "MANUAL_FUNCTIONAL_FAIL_OR_EVIDENCE_CONFLICT",
+        "transport-fail": "CURRENT_TRANSPORT_FAILURE",
+    }
+    assert selections["disney"]["automatic"] == ["manual-fail", "transport-fail"]
 
 
 def test_disney_full_chain_outranks_newer_screening_result() -> None:
@@ -535,6 +698,7 @@ def test_functional_loader_accepts_only_complete_attributed_rrc_v8(
         "control_exit_ip_hmac": "c" * 20,
         "regioncheck_exit_ip_hmac": "c" * 20,
         "attribution_status": "ATTRIBUTION_MATCH",
+        "exit_country": "HK",
     }
     payload = {
         "schema_version": 3,
@@ -553,7 +717,12 @@ def test_functional_loader_accepts_only_complete_attributed_rrc_v8(
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert len(SKILL.load_functional_results([path])) == 3
+    loaded = SKILL.load_functional_results([path])
+    assert len(loaded) == 3
+    assert {item["attribution_status"] for item in loaded} == {
+        "ATTRIBUTION_MATCH"
+    }
+    assert {item["exit_country"] for item in loaded} == {"HK"}
 
     payload["status"] = "RUNNING"
     path.write_text(json.dumps(payload), encoding="utf-8")

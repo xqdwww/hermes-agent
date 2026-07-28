@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.11
+version: 2.4.12
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,13 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.11 makes candidate-sidecar cleanup identify the
+for this Skill. Version 2.4.12 inserts a versioned official-service-region
+policy between attributed probe evidence and candidate selection. It excludes
+attributed Hong Kong exits from ChatGPT even after a screen pass, treats Hong
+Kong as Gemini-supported when current transport is healthy and no manual
+failure or evidence conflict exists, never infers country from a node name,
+and preserves the raw RRC result beside the policy decision. Version 2.4.11
+makes candidate-sidecar cleanup identify the
 actual Mihomo child by exact executable and temporary config path instead of
 trusting only the BusyBox `start-stop-daemon` pidfile, and verifies that no
 matching process or owned temporary path remains. Its candidate health probe

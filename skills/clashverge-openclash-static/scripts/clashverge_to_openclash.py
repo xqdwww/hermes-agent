@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.11"
+SKILL_VERSION = "2.4.12"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -204,6 +204,7 @@ REMOTE_CANDIDATE_DIR = "/etc/openclash/config/.clashverge-candidates"
 LKG_SCHEMA_VERSION = 1
 PROBE_SCHEMA_VERSION = 1
 PROBE_VERSION = "3"
+SERVICE_REGION_POLICY_VERSION = "2026-07-28.1"
 MANUAL_RESULT_SCHEMA_VERSION = 1
 SOURCE_SNAPSHOT_SCHEMA_VERSION = 1
 SOURCE_REFRESH_PROTOCOL_VERSION = 1
@@ -1308,6 +1309,10 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
                     "result": result,
                     "raw_result": raw_result,
                     "error_category": error,
+                    "attribution_status": str(
+                        item.get("attribution_status") or ""
+                    ),
+                    "exit_country": str(item.get("exit_country") or "UNKNOWN"),
                 }
             )
     return accepted
@@ -1360,7 +1365,8 @@ def apply_functional_results_to_report(
             service_result["functional_result"] = {
                 key: latest.get(key) for key in (
                     "result", "tested_at", "method", "source_snapshot_id",
-                    "source_hash", "exact_node_id", "error_category", "raw_result"
+                    "source_hash", "exact_node_id", "error_category", "raw_result",
+                    "attribution_status", "exit_country",
                 )
             }
             if service == "disney" and latest.get("raw_result") in {
@@ -1633,6 +1639,154 @@ def probable_unified_egress(nodes: Sequence[dict[str, Any]]) -> bool:
     return len(declared_regions) >= 2 and len(signatures) == 1
 
 
+def normalize_exit_country(value: Any) -> str:
+    normalized = str(value or "").strip().upper().replace("_", " ")
+    aliases = {
+        "HONG KONG": "HK",
+        "HONGKONG": "HK",
+        "HK": "HK",
+        "UNITED STATES": "US",
+        "UNITED STATES OF AMERICA": "US",
+        "USA": "US",
+        "US": "US",
+        "JAPAN": "JP",
+        "JP": "JP",
+        "TAIWAN": "TW",
+        "TW": "TW",
+        "SINGAPORE": "SG",
+        "SG": "SG",
+        "MALAYSIA": "MY",
+        "MY": "MY",
+        "SOUTH KOREA": "KR",
+        "KOREA, REPUBLIC OF": "KR",
+        "KR": "KR",
+        "GERMANY": "DE",
+        "DE": "DE",
+        "VIET NAM": "VN",
+        "VIETNAM": "VN",
+        "VN": "VN",
+    }
+    return aliases.get(normalized, "UNKNOWN")
+
+
+def service_region_policy(
+    service: str,
+    node: dict[str, Any],
+    service_result: dict[str, Any],
+    *,
+    existing_candidate: bool,
+) -> dict[str, Any]:
+    functional = service_result.get("functional_result", {})
+    attribution_status = str(functional.get("attribution_status") or "")
+    attributed = attribution_status == "ATTRIBUTION_MATCH"
+    functional_country = normalize_exit_country(functional.get("exit_country"))
+    recorded_country = normalize_exit_country(node.get("egress_country"))
+    exit_country = functional_country
+    if (
+        exit_country == "UNKNOWN"
+        and node.get("selector_confirmed") is True
+        and node.get("base_result") == "BASE_PASS"
+    ):
+        exit_country = recorded_country
+
+    rrc_result = str(
+        functional.get("raw_result")
+        or functional.get("result")
+        or service_result.get("raw_result")
+        or "UNKNOWN"
+    )
+    manual_result = str(
+        service_result.get("manual_result", {}).get("result") or "NONE"
+    )
+    final_result = str(service_result.get("final_result") or "UNKNOWN")
+    transport_failed = (
+        final_result == "FAIL_TRANSPORT"
+        or str(functional.get("result") or "") == "FAIL_TRANSPORT"
+        or node.get("base_result") != "BASE_PASS"
+    )
+    manual_failed = manual_result == "FAIL" or final_result in {
+        "MANUAL_OVERRIDE_FAIL",
+        "EVIDENCE_CONFLICT",
+    }
+
+    policy = {
+        "region_policy_version": SERVICE_REGION_POLICY_VERSION,
+        "exit_country": exit_country,
+        "attribution_status": attribution_status or "UNAVAILABLE",
+        "official_service_region_status": "NO_POLICY_OVERRIDE",
+        "rrc_result": rrc_result,
+        "manual_result": manual_result,
+        "final_candidate_decision": (
+            "INCLUDE" if existing_candidate else "EXCLUDE"
+        ),
+        "policy_action": "USE_EXISTING_RULES",
+        "decision_reason": "EXISTING_EVIDENCE_RULE",
+        "candidate_basis": "EXISTING_EVIDENCE_RULE",
+    }
+    if service not in {"gpt", "gemini"}:
+        return policy
+
+    if not attributed or exit_country == "UNKNOWN":
+        policy.update(
+            {
+                "official_service_region_status": "UNKNOWN_ATTRIBUTION",
+                "final_candidate_decision": "EXCLUDE",
+                "policy_action": "EXCLUDE",
+                "decision_reason": "ATTRIBUTION_UNAVAILABLE",
+                "candidate_basis": "ATTRIBUTION_REQUIRED",
+            }
+        )
+        return policy
+
+    if exit_country != "HK":
+        return policy
+
+    if service == "gpt":
+        reason = "OFFICIAL_REGION_UNSUPPORTED"
+        if rrc_result == "SCREEN_PASS":
+            reason = "SCREEN_PASS_OVERRIDDEN_BY_OFFICIAL_REGION_POLICY"
+        policy.update(
+            {
+                "official_service_region_status": "OFFICIAL_REGION_UNSUPPORTED",
+                "final_candidate_decision": "EXCLUDE",
+                "policy_action": "EXCLUDE",
+                "decision_reason": reason,
+                "candidate_basis": "OFFICIAL_REGION_POLICY",
+            }
+        )
+        return policy
+
+    policy["official_service_region_status"] = "OFFICIAL_REGION_SUPPORTED"
+    if manual_failed:
+        policy.update(
+            {
+                "final_candidate_decision": "EXCLUDE",
+                "policy_action": "EXCLUDE",
+                "decision_reason": "MANUAL_FUNCTIONAL_FAIL_OR_EVIDENCE_CONFLICT",
+                "candidate_basis": "CURRENT_NODE_FAILURE",
+            }
+        )
+    elif transport_failed:
+        policy.update(
+            {
+                "final_candidate_decision": "EXCLUDE",
+                "policy_action": "EXCLUDE",
+                "decision_reason": "CURRENT_TRANSPORT_FAILURE",
+                "candidate_basis": "CURRENT_NODE_FAILURE",
+            }
+        )
+    else:
+        policy.update(
+            {
+                "final_candidate_decision": "INCLUDE",
+                "policy_action": "INCLUDE",
+                "decision_reason": "REGION_POLICY_ELIGIBLE_TRANSPORT_PASS",
+                "candidate_basis": "REGION_POLICY_ELIGIBLE_TRANSPORT_PASS",
+            }
+        )
+    return policy
+
+
 def merge_lkg_results(
     current_names: Sequence[str],
     source_order: dict[str, int],
@@ -1668,10 +1822,48 @@ def merge_lkg_results(
             prior_node_id = str(prior.get("exact_node_id", ""))
             identity_matches = not exact_node_id or not prior_node_id or exact_node_id == prior_node_id
             prior_lkg = bool(prior.get("lkg")) and identity_matches
+            existing_candidate = (
+                final_result
+                in {
+                    "DEFINITIVE_AUTOMATED_PASS",
+                    "PASS_SUPPORTED_REGION",
+                    "SCREEN_PASS",
+                }
+                or (
+                    service in {"gpt", "gemini"}
+                    and final_result
+                    in {
+                        "MANUAL_OVERRIDE_PASS",
+                        "PASS_WITH_SCREEN_FALSE_NEGATIVE",
+                    }
+                )
+            )
+            region_policy = service_region_policy(
+                service,
+                item,
+                service_result,
+                existing_candidate=existing_candidate,
+            )
+            service_result["region_policy"] = region_policy
+            service_result["policy_evidence_type"] = region_policy[
+                "decision_reason"
+            ]
+            policy_action = region_policy["policy_action"]
 
             if probable_recapture:
                 lkg = prior_lkg
                 action = "LKG_UNCHANGED_PROBABLE_RECAPTURE"
+            elif (
+                policy_action == "EXCLUDE"
+                and region_policy["decision_reason"]
+                in {
+                    "ATTRIBUTION_UNAVAILABLE",
+                    "OFFICIAL_REGION_UNSUPPORTED",
+                    "SCREEN_PASS_OVERRIDDEN_BY_OFFICIAL_REGION_POLICY",
+                }
+            ):
+                lkg = False
+                action = "LKG_REMOVED_SERVICE_REGION_POLICY"
             elif final_result in PASS_RESULTS:
                 lkg = True
                 action = "LKG_ADDED_OR_REFRESHED"
@@ -1699,23 +1891,25 @@ def merge_lkg_results(
                     "source": "manual_override" if service_result.get("override") else "probe",
                     "lkg": lkg,
                     "exact_node_id": exact_node_id or prior_node_id or None,
+                    "region_policy_version": SERVICE_REGION_POLICY_VERSION,
+                    "exit_country": region_policy["exit_country"],
+                    "official_service_region_status": region_policy[
+                        "official_service_region_status"
+                    ],
                 }
 
             item["lkg_merge"][service] = action
-            is_current_candidate = (
-                final_result in {
-                    "DEFINITIVE_AUTOMATED_PASS", "PASS_SUPPORTED_REGION", "SCREEN_PASS"
-                }
-                or (
-                    service in {"gpt", "gemini"}
-                    and final_result in {
-                        "MANUAL_OVERRIDE_PASS", "PASS_WITH_SCREEN_FALSE_NEGATIVE"
-                    }
-                )
-            )
+            is_current_candidate = existing_candidate
+            if policy_action == "INCLUDE":
+                is_current_candidate = True
+            elif policy_action == "EXCLUDE":
+                is_current_candidate = False
             item["enters_auto"][service] = is_current_candidate
             item["enters_manual_candidate"][service] = (
-                not probable_recapture and not lkg and final_result in PENDING_RESULTS
+                not probable_recapture
+                and not lkg
+                and final_result in PENDING_RESULTS
+                and policy_action == "USE_EXISTING_RULES"
             )
         enriched.append(item)
 
@@ -2630,6 +2824,7 @@ def validate_probe_report_safe(report: dict[str, Any]) -> None:
 def annotate_probe_semantics(
     report: dict[str, Any], nodes: Sequence[dict[str, Any]]
 ) -> None:
+    report["region_policy_version"] = SERVICE_REGION_POLICY_VERSION
     report["service_semantics"] = {
         "gpt": "regionrestrictioncheck_screen_or_snapshot_bound_manual_use",
         "gemini": "regionrestrictioncheck_screen_or_snapshot_bound_manual_use",

@@ -535,6 +535,10 @@ def service_result(
         "override": override,
         "final_result": final or override or raw,
         "evidence": {},
+        "functional_result": {
+            "attribution_status": "ATTRIBUTION_MATCH",
+            "exit_country": "United States",
+        },
     }
 
 
@@ -549,6 +553,7 @@ def probe_node(
         "name": name,
         "selector_confirmed": True,
         "base_result": "BASE_PASS",
+        "egress_country": "United States",
         "services": {
             "gpt": gpt or service_result("UNKNOWN"),
             "gemini": gemini or service_result("UNKNOWN"),
@@ -700,7 +705,11 @@ def test_v3_reconcile_adds_current_source_node_without_faking_probe(tmp_path) ->
     assert new_name in written["nodes_added_without_probe"]
     assert new_node["base_result"] == "NOT_PROBED_CURRENT_SOURCE"
     assert new_node["services"]["gpt"]["final_result"] == "MANUAL_OVERRIDE_PASS"
-    assert new_name in selections["gpt"]["automatic"]
+    assert new_name not in selections["gpt"]["automatic"]
+    assert (
+        new_node["services"]["gpt"]["region_policy"]["decision_reason"]
+        == "ATTRIBUTION_UNAVAILABLE"
+    )
     assert written["definitive_pass_counts"]["gemini"] == 0
     assert "GEMINI_CURRENT_SCREEN_OR_MANUAL_CANDIDATE_MISSING" in written[
         "activation_blocked_reasons"
