@@ -1723,10 +1723,10 @@ def service_region_policy(
         "decision_reason": "EXISTING_EVIDENCE_RULE",
         "candidate_basis": "EXISTING_EVIDENCE_RULE",
     }
-    if service not in {"gpt", "gemini"}:
+    if service not in {"gpt", "gemini"} or exit_country != "HK":
         return policy
 
-    if not attributed or exit_country == "UNKNOWN":
+    if not attributed:
         policy.update(
             {
                 "official_service_region_status": "UNKNOWN_ATTRIBUTION",
@@ -1736,9 +1736,6 @@ def service_region_policy(
                 "candidate_basis": "ATTRIBUTION_REQUIRED",
             }
         )
-        return policy
-
-    if exit_country != "HK":
         return policy
 
     if service == "gpt":

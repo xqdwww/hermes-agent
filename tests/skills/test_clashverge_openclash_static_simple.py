@@ -705,11 +705,7 @@ def test_v3_reconcile_adds_current_source_node_without_faking_probe(tmp_path) ->
     assert new_name in written["nodes_added_without_probe"]
     assert new_node["base_result"] == "NOT_PROBED_CURRENT_SOURCE"
     assert new_node["services"]["gpt"]["final_result"] == "MANUAL_OVERRIDE_PASS"
-    assert new_name not in selections["gpt"]["automatic"]
-    assert (
-        new_node["services"]["gpt"]["region_policy"]["decision_reason"]
-        == "ATTRIBUTION_UNAVAILABLE"
-    )
+    assert new_name in selections["gpt"]["automatic"]
     assert written["definitive_pass_counts"]["gemini"] == 0
     assert "GEMINI_CURRENT_SCREEN_OR_MANUAL_CANDIDATE_MISSING" in written[
         "activation_blocked_reasons"
