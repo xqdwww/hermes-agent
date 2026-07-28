@@ -40,7 +40,10 @@ The front-matter `version` field is the authoritative release-version source
 for this Skill. Version 2.4.11 makes candidate-sidecar cleanup identify the
 actual Mihomo child by exact executable and temporary config path instead of
 trusting only the BusyBox `start-stop-daemon` pidfile, and verifies that no
-matching process or owned temporary path remains. Version 2.4.10 keeps
+matching process or owned temporary path remains. Its candidate health probe
+also walks the temporary `PROBE` selector until one static node reaches the
+204 endpoint, so a dead default node cannot reject an otherwise valid
+candidate. Version 2.4.10 keeps
 exact-identity, exact-snapshot functional
 evidence valid when a later baseline reachability probe runs; that unrelated
 probe no longer erases current RRC results. Version 2.4.9 treats a cross-connection masked-exit drift as

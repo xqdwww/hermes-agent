@@ -152,6 +152,10 @@ def test_candidate_sidecar_strips_dataplane_features() -> None:
     assert result["tun"] == {"enable": False}
     assert result["allow-lan"] is False
     assert result["bind-address"] == "127.0.0.1"
+    assert result["proxy-groups"] == [
+        {"name": "PROBE", "type": "select", "proxies": ["n"]}
+    ]
+    assert result["rules"] == ["MATCH,PROBE"]
     assert result["dns"].get("listen") is None
     assert "listeners" not in result
     assert "tunnels" not in result
@@ -236,6 +240,51 @@ def test_remote_sidecar_cleanup_requires_exact_process_and_path_postconditions()
     assert 'exit 1' in command
     assert "test ! -e /tmp/clashverge-openclash-sidecar.token" in command
     assert "test ! -e /tmp/clashverge-openclash-sidecar.lock" in command
+
+
+def test_candidate_probe_continues_after_node_failure(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate.yaml"
+    candidate.write_text(
+        """
+proxies:
+  - {name: dead, type: ss, server: example.invalid, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: alive, type: ss, server: example.invalid, port: 2, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: 默认代理, type: select, proxies: [dead, alive]}
+rules: [MATCH,默认代理]
+""".strip()
+    )
+
+    class Sidecar:
+        mixed_port = 27890
+        controller_port = 29090
+
+    class SidecarContext:
+        def __enter__(self):
+            return Sidecar()
+
+        def __exit__(self, *_args):
+            return False
+
+    with (
+        patch.object(MODULE, "validate_config"),
+        patch.object(MODULE, "remote_candidate_sidecar", return_value=SidecarContext()),
+        patch.object(MODULE, "validate_probe_runtime"),
+        patch.object(MODULE, "select_probe_node", return_value=True) as select,
+        patch.object(
+            MODULE,
+            "curl_probe_once",
+            side_effect=[
+                {"curl_code": 28, "http_status": None},
+                {"curl_code": 0, "http_status": 204},
+            ],
+        ),
+    ):
+        MODULE.probe_uploaded_candidate(
+            candidate, host="router", core_path="/core"
+        )
+
+    assert [call.args[1] for call in select.call_args_list] == ["dead", "alive"]
 
 
 def test_activation_failure_rolls_back_running_state() -> None:

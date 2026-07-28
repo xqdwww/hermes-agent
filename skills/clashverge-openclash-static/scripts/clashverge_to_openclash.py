@@ -2523,6 +2523,7 @@ def run_remote_service_probe(
 
 def build_candidate_sidecar_config(data: dict[str, Any]) -> dict[str, Any]:
     config = deepcopy(data)
+    proxy_names = [str(proxy["name"]) for proxy in static_proxy_objects(config)]
     for key in (
         *CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS,
         "listeners",
@@ -2539,6 +2540,14 @@ def build_candidate_sidecar_config(data: dict[str, Any]) -> dict[str, Any]:
             "external-controller": f"127.0.0.1:{REMOTE_SIDECAR_CONTROLLER_PORT}",
             "secret": "",
             "mode": "rule",
+            "proxy-groups": [
+                {
+                    "name": "PROBE",
+                    "type": "select",
+                    "proxies": proxy_names,
+                }
+            ],
+            "rules": ["MATCH,PROBE"],
             "tun": {"enable": False},
             "dns": {
                 "enable": True,
@@ -2578,13 +2587,23 @@ def probe_uploaded_candidate(
         with remote_candidate_sidecar(
             config_path, host=host, core_path=core_path
         ) as sidecar:
-            evidence = curl_probe_once(
-                "https://www.gstatic.com/generate_204",
-                sidecar.mixed_port,
-                workdir=workdir,
-            )
-            if evidence.get("curl_code") != 0 or evidence.get("http_status") != 204:
-                raise ConfigError("CANDIDATE_PROBE_FAILED")
+            validate_probe_runtime(sidecar.controller_port)
+            for proxy in static_proxy_objects(data):
+                if not select_probe_node(
+                    sidecar.controller_port, str(proxy["name"])
+                ):
+                    continue
+                evidence = curl_probe_once(
+                    "https://www.gstatic.com/generate_204",
+                    sidecar.mixed_port,
+                    workdir=workdir,
+                )
+                if (
+                    evidence.get("curl_code") == 0
+                    and evidence.get("http_status") == 204
+                ):
+                    return
+            raise ConfigError("CANDIDATE_PROBE_FAILED")
 
 
 def validate_probe_report_safe(report: dict[str, Any]) -> None:
