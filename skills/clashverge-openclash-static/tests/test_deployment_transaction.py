@@ -314,6 +314,30 @@ def test_activation_failure_rolls_back_running_state() -> None:
     assert any("[rule4]" in command for command in commands)
 
 
+def test_rejected_candidate_sha_cannot_enter_activation_transaction() -> None:
+    rejected_sha = next(iter(MODULE.REJECTED_CANDIDATE_SHA256))
+    candidate = MODULE.UploadedCandidate(
+        "/etc/openclash/config/.clashverge-candidates/rejected.candidate",
+        "/etc/openclash/config/rejected.yaml",
+    )
+    with (
+        patch.object(
+            MODULE, "ssh_command", return_value=completed(rejected_sha + "\n")
+        ),
+        patch.object(
+            MODULE,
+            "read_remote_openclash_state",
+            return_value=remote_state(running=True),
+        ),
+    ):
+        with pytest.raises(
+            MODULE.ConfigError, match="REJECTED_REGION_POLICY_REGRESSION"
+        ):
+            MODULE.activate_uploaded_candidate(
+                candidate, host="router", core_path="/core"
+            )
+
+
 @pytest.mark.parametrize(
     ("running", "expected_action"), [(True, "restart"), (False, "start")]
 )

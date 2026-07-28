@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.12
+version: 2.4.13
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,12 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.12 inserts a versioned official-service-region
+for this Skill. Version 2.4.13 scopes official region policy strictly to exits
+whose recorded country is the attributed policy region, so an unknown country
+does not erase otherwise valid service evidence. It permits manual evidence to
+move to a new snapshot only after full connection-identity HMAC equality and
+permanently blocks activation of candidates explicitly rejected for a known
+selection regression. Version 2.4.12 inserts a versioned official-service-region
 policy between attributed probe evidence and candidate selection. It excludes
 attributed Hong Kong exits from ChatGPT even after a screen pass, treats Hong
 Kong as Gemini-supported when current transport is healthy and no manual

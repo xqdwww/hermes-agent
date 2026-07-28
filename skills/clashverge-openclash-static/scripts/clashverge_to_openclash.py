@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.12"
+SKILL_VERSION = "2.4.13"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -205,6 +205,10 @@ LKG_SCHEMA_VERSION = 1
 PROBE_SCHEMA_VERSION = 1
 PROBE_VERSION = "3"
 SERVICE_REGION_POLICY_VERSION = "2026-07-28.1"
+REJECTED_CANDIDATE_SHA256 = {
+    "799c2bba5eb2cb35673fd322a621a3bec4b6ca23b03954fc91c3b7761906cf74":
+        "REJECTED_REGION_POLICY_REGRESSION",
+}
 MANUAL_RESULT_SCHEMA_VERSION = 1
 SOURCE_SNAPSHOT_SCHEMA_VERSION = 1
 SOURCE_REFRESH_PROTOCOL_VERSION = 1
@@ -642,6 +646,86 @@ def stable_node_identity(proxy: dict[str, Any], key: bytes) -> str:
     # inside the HMAC input and never enter manifests or logs.
     identity = {k: v for k, v in proxy.items() if k not in {"name", "udp"}}
     return "node_" + identity_hmac(key, identity)[:24]
+
+
+def migrate_manual_evidence_by_connection_identity(
+    manual_results: Sequence[dict[str, str]],
+    old_proxies: Sequence[dict[str, Any]],
+    current_proxies: Sequence[dict[str, Any]],
+    current_manifest: dict[str, Any],
+    key: bytes,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rebind manual evidence only after full connection-identity HMAC equality."""
+    old_by_name = {str(proxy.get("name")): proxy for proxy in old_proxies}
+    current_by_name = {str(proxy.get("name")): proxy for proxy in current_proxies}
+    current_ids = {
+        str(item.get("exact_node_name")): str(item.get("exact_node_id"))
+        for item in current_manifest.get("nodes", [])
+        if isinstance(item, dict)
+    }
+    snapshot_id = str(current_manifest.get("source_snapshot_id") or "")
+    migrated: list[dict[str, Any]] = []
+    retest: list[dict[str, Any]] = []
+    for item in manual_results:
+        name = str(item.get("node") or "")
+        old_proxy = old_by_name.get(name)
+        current_proxy = current_by_name.get(name)
+        current_id = current_ids.get(name, "")
+        if old_proxy is None or current_proxy is None or not current_id:
+            retest.append(
+                {
+                    "service": item.get("service"),
+                    "node": name,
+                    "status": "MANUAL_EVIDENCE_RETEST_REQUIRED",
+                    "reason": "CONNECTION_IDENTITY_UNAVAILABLE",
+                }
+            )
+            continue
+        old_identity = {
+            key: value
+            for key, value in old_proxy.items()
+            if key not in {"name", "udp"}
+        }
+        current_identity = {
+            key: value
+            for key, value in current_proxy.items()
+            if key not in {"name", "udp"}
+        }
+        old_hmac = identity_hmac(key, old_identity)
+        current_hmac = identity_hmac(key, current_identity)
+        if not hmac.compare_digest(old_hmac, current_hmac):
+            retest.append(
+                {
+                    "service": item.get("service"),
+                    "node": name,
+                    "status": "MANUAL_EVIDENCE_RETEST_REQUIRED",
+                    "reason": "CONNECTION_IDENTITY_CHANGED",
+                    "old_identity_hmac": old_hmac,
+                    "current_identity_hmac": current_hmac,
+                }
+            )
+            continue
+        migrated.append(
+            {
+                "service": item["service"],
+                "node": name,
+                "result": item["result"],
+                "tested_at": item["tested_at"],
+                "method": item["method"],
+                "source_snapshot_id": snapshot_id,
+                "exact_node_id": current_id,
+                "evidence_type": (
+                    "MANUAL_FUNCTIONAL_PASS"
+                    if item["result"] == "PASS"
+                    else "MANUAL_FUNCTIONAL_FAIL"
+                ),
+                "provenance": "USER_MANUAL_TEST_MIGRATED_IDENTITY_MATCH",
+                "candidate_member": item["result"] == "PASS",
+                "identity_hmac": current_hmac,
+                "identity_match": True,
+            }
+        )
+    return migrated, retest
 
 
 def clash_verge_paths(source: Path | None = None) -> dict[str, Path]:
@@ -1164,6 +1248,9 @@ def load_manual_results(path: Path | None) -> list[dict[str, str]]:
         method = str(item.get("method", ""))
         exact_node_id = str(item.get("exact_node_id", ""))
         source_snapshot_id = str(item.get("source_snapshot_id", ""))
+        provenance = str(item.get("provenance", ""))
+        evidence_type = str(item.get("evidence_type", ""))
+        identity_match = item.get("identity_match")
         if service not in SERVICE_KEYS:
             raise ConfigError(f"Manual result {index} has an invalid service.")
         if not node or result not in {"PASS", "FAIL"} or not tested_at:
@@ -1171,6 +1258,16 @@ def load_manual_results(path: Path | None) -> list[dict[str, str]]:
         parse_aware_timestamp(tested_at, field=f"manual result {index}")
         if method not in DEFINITIVE_MANUAL_METHODS:
             raise ConfigError(f"Manual result {index} is not a definitive use test.")
+        if provenance and provenance != "USER_MANUAL_TEST_MIGRATED_IDENTITY_MATCH":
+            raise ConfigError(f"Manual result {index} has invalid provenance.")
+        if provenance and (
+            identity_match is not True
+            or evidence_type
+            not in {"MANUAL_FUNCTIONAL_PASS", "MANUAL_FUNCTIONAL_FAIL"}
+        ):
+            raise ConfigError(
+                f"Manual result {index} has invalid migrated-identity evidence."
+            )
         accepted.append(
             {
                 "service": service,
@@ -1180,6 +1277,9 @@ def load_manual_results(path: Path | None) -> list[dict[str, str]]:
                 "method": method,
                 "exact_node_id": exact_node_id,
                 "source_snapshot_id": source_snapshot_id,
+                "provenance": provenance,
+                "evidence_type": evidence_type,
+                "identity_match": identity_match,
             }
         )
     return accepted
@@ -1464,8 +1564,14 @@ def apply_manual_results_to_report(
                         and exact_or_flag_normalized_match(node_name, item["node"])
                     )
                 )
-                and parse_aware_timestamp(item["tested_at"], field="manual result")
-                >= probe_timestamp
+                and (
+                    item.get("provenance")
+                    == "USER_MANUAL_TEST_MIGRATED_IDENTITY_MATCH"
+                    or parse_aware_timestamp(
+                        item["tested_at"], field="manual result"
+                    )
+                    >= probe_timestamp
+                )
             ]
             if not candidates:
                 continue
@@ -1508,6 +1614,14 @@ def apply_manual_results_to_report(
                 "method": latest["method"],
                 "source_snapshot_id": latest.get("source_snapshot_id"),
                 "exact_node_id": latest.get("exact_node_id"),
+                "evidence_type": latest.get("evidence_type")
+                or (
+                    "MANUAL_FUNCTIONAL_PASS"
+                    if latest["result"] == "PASS"
+                    else "MANUAL_FUNCTIONAL_FAIL"
+                ),
+                "provenance": latest.get("provenance"),
+                "identity_match": latest.get("identity_match"),
             }
 
     updated["manual_results"] = {
@@ -1521,6 +1635,9 @@ def apply_manual_results_to_report(
                 "method": item["method"],
                 "source_snapshot_id": item.get("source_snapshot_id"),
                 "exact_node_id": item.get("exact_node_id"),
+                "evidence_type": item.get("evidence_type"),
+                "provenance": item.get("provenance"),
+                "identity_match": item.get("identity_match"),
             }
             for index, item in enumerate(manual_results)
             if index not in matched
@@ -3965,6 +4082,21 @@ def activate_uploaded_candidate(
             "REMOTE_STOPPED_DATAPLANE_INCONSISTENT: repair stale OpenClash "
             "DNS/firewall/policy-route/TUN state before activation"
         )
+
+    digest_command = (
+        "OPENCLASH_CANDIDATE_REJECTION_CHECK=1; set -e; "
+        f"[ -f {quote_remote(candidate.candidate_path)} ]; "
+        f"sha256sum {quote_remote(candidate.candidate_path)} | awk '{{print $1}}'"
+    )
+    try:
+        candidate_sha = (
+            ssh_command(host, digest_command, capture=True).stdout or ""
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("REMOTE_CANDIDATE_IDENTITY_UNAVAILABLE") from exc
+    rejection = REJECTED_CANDIDATE_SHA256.get(candidate_sha)
+    if rejection:
+        raise ConfigError(f"{rejection}: candidate activation is permanently blocked")
 
     transaction = DeploymentTransaction(
         remote_path=remote_path,

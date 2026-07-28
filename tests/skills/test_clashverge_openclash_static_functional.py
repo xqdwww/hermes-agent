@@ -614,6 +614,86 @@ def test_official_hk_gemini_policy_keeps_current_node_failures_excluded() -> Non
     assert selections["disney"]["automatic"] == ["manual-fail", "transport-fail"]
 
 
+def test_manual_evidence_migrates_only_after_full_connection_identity_match() -> None:
+    key = b"k" * 32
+    old_proxy = {
+        "name": "node-a",
+        "type": "hysteria2",
+        "server": "old.example",
+        "port": 443,
+        "password": "sensitive",
+        "sni": "edge.example",
+    }
+    current_proxy = dict(old_proxy)
+    manual = [{
+        "service": "gemini",
+        "node": "node-a",
+        "result": "FAIL",
+        "tested_at": "2026-07-20T15:14:02+08:00",
+        "method": "logged_in_browser_actual_generation",
+    }]
+    manifest_data = {
+        "source_snapshot_id": "snapshot-current",
+        "nodes": [{"exact_node_name": "node-a", "exact_node_id": "node-current"}],
+    }
+
+    migrated, retest = SKILL.migrate_manual_evidence_by_connection_identity(
+        manual, [old_proxy], [current_proxy], manifest_data, key
+    )
+
+    assert retest == []
+    assert migrated[0]["source_snapshot_id"] == "snapshot-current"
+    assert migrated[0]["exact_node_id"] == "node-current"
+    assert migrated[0]["evidence_type"] == "MANUAL_FUNCTIONAL_FAIL"
+    assert migrated[0]["candidate_member"] is False
+    assert migrated[0]["identity_match"] is True
+    assert "server" not in migrated[0]
+    assert "password" not in migrated[0]
+
+    changed = dict(current_proxy)
+    changed["server"] = "changed.example"
+    migrated, retest = SKILL.migrate_manual_evidence_by_connection_identity(
+        manual, [old_proxy], [changed], manifest_data, key
+    )
+    assert migrated == []
+    assert retest[0]["status"] == "MANUAL_EVIDENCE_RETEST_REQUIRED"
+    assert retest[0]["reason"] == "CONNECTION_IDENTITY_CHANGED"
+    assert "server" not in retest[0]
+
+
+def test_migrated_manual_failure_is_snapshot_bound_and_can_precede_probe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "migrated.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "results": [{
+            "service": "gemini",
+            "node": "node-a",
+            "result": "FAIL",
+            "tested_at": "2026-07-20T15:14:02+08:00",
+            "method": "logged_in_browser_actual_generation",
+            "source_snapshot_id": "snapshot-x",
+            "exact_node_id": "id-a",
+            "evidence_type": "MANUAL_FUNCTIONAL_FAIL",
+            "provenance": "USER_MANUAL_TEST_MIGRATED_IDENTITY_MATCH",
+            "identity_match": True,
+        }],
+    }), encoding="utf-8")
+    report = base_report()
+    report["run_timestamp"] = "2026-07-27T21:00:00+08:00"
+
+    result = SKILL.apply_manual_results_to_report(
+        report, SKILL.load_manual_results(path), manifest()
+    )
+
+    service = result["nodes"][0]["services"]["gemini"]
+    assert service["final_result"] == "MANUAL_OVERRIDE_FAIL"
+    assert service["manual_result"]["provenance"] == (
+        "USER_MANUAL_TEST_MIGRATED_IDENTITY_MATCH"
+    )
+
+
 def test_disney_full_chain_outranks_newer_screening_result() -> None:
     full_chain = functional("PASS", service="disney")
     full_chain["method"] = "disney-full-chain-v2"
