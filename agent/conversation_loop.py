@@ -25,6 +25,7 @@ import ssl
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
@@ -66,6 +67,22 @@ from agent.retry_utils import (
 )
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.guided_book_dispatch import (
+    AGY_TOOL_NAME,
+    DISPATCH_BLOCKED_NOTICE,
+    apply_agy_failure_fallback,
+    build_agy_predispatch_args,
+    build_guided_predispatch_plan,
+    cap_guided_tool_calls,
+    guided_meta_runtime_note,
+    read_agy_delivery,
+    record_agy_delivery,
+    record_dispatch_block,
+    record_predispatch_start,
+    resolve_guided_book_dispatch,
+    sanitize_guided_meta_response,
+    should_block_direct_answer,
+)
 from hermes_constants import PARTIAL_STREAM_STUB_ID
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
@@ -77,6 +94,105 @@ logger = logging.getLogger(__name__)
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
+
+
+def _execute_guided_predispatch_tool(
+    agent: Any,
+    messages: list[dict[str, Any]],
+    conversation_history: list[dict[str, Any]],
+    effective_task_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[str, str | None]:
+    tool_call_id = f"guided-{uuid.uuid4().hex}"
+    tool_call = SimpleNamespace(
+        id=tool_call_id,
+        type="function",
+        function=SimpleNamespace(
+            name=tool_name,
+            arguments=json.dumps(arguments, ensure_ascii=False),
+        ),
+    )
+    assistant_message = SimpleNamespace(content=None, tool_calls=[tool_call])
+    assistant_record = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": tool_call.function.arguments,
+                },
+            }
+        ],
+    }
+    messages.append(assistant_record)
+    agent._emit_interim_assistant_message(assistant_record)
+    try:
+        agent._flush_messages_to_session_db(messages, conversation_history)
+    except Exception:
+        logger.debug("Guided pre-dispatch tool-call persistence failed", exc_info=True)
+    agent._execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        api_call_count=0,
+    )
+    for message in reversed(messages):
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and message.get("tool_call_id") == tool_call_id
+        ):
+            content = message.get("content")
+            return tool_call_id, content if isinstance(content, str) else None
+    return tool_call_id, None
+
+
+def _run_guided_book_predispatch(
+    agent: Any,
+    messages: list[dict[str, Any]],
+    conversation_history: list[dict[str, Any]],
+    effective_task_id: str,
+):
+    decision = resolve_guided_book_dispatch(messages, getattr(agent, "tools", None))
+    if decision.guided_mode_active:
+        record_predispatch_start(agent, decision)
+    plan = build_guided_predispatch_plan(messages, getattr(agent, "tools", None))
+    if plan is None:
+        return None
+    if not plan.decision.agy_tool_available:
+        record_dispatch_block(agent)
+        return "blocked", None
+
+    retrieval_result = None
+    if (
+        plan.retrieval_args is not None
+        and "book_notes_retrieval" in agent.valid_tool_names
+    ):
+        _, retrieval_result = _execute_guided_predispatch_tool(
+            agent,
+            messages,
+            conversation_history,
+            effective_task_id,
+            "book_notes_retrieval",
+            plan.retrieval_args,
+        )
+
+    agy_args = build_agy_predispatch_args(plan, retrieval_result)
+    agy_call_id, _ = _execute_guided_predispatch_tool(
+        agent,
+        messages,
+        conversation_history,
+        effective_task_id,
+        AGY_TOOL_NAME,
+        agy_args,
+    )
+    delivery = read_agy_delivery(messages, {agy_call_id})
+    record_agy_delivery(agent, delivery)
+    return "attempted", delivery
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -665,6 +781,67 @@ def run_conversation(
     # over instead of spinning. Reset here so each turn starts fresh. See #26080.
     agent._auth_pool_refresh_counts = {}
 
+    # DeepSeek thinking mode rejects a specific ``tool_choice`` with HTTP 400.
+    # Guided literary turns therefore use a narrow pre-dispatch that executes
+    # the existing sensitive tools through the normal dispatcher before any
+    # controller-model request.
+    _guided_predispatch = _run_guided_book_predispatch(
+        agent,
+        messages,
+        conversation_history,
+        effective_task_id,
+    )
+    _guided_meta_callbacks = None
+    _guided_meta_runtime_context = None
+    if _guided_predispatch is not None:
+        _guided_status, _guided_delivery = _guided_predispatch
+        if _guided_status == "blocked":
+            final_response = DISPATCH_BLOCKED_NOTICE
+            _turn_exit_reason = "guided_predispatch_blocked"
+        elif _guided_delivery.succeeded and _guided_delivery.response:
+            final_response = _guided_delivery.response
+            _turn_exit_reason = "guided_agy_predispatch_verbatim"
+        if final_response is not None:
+            messages.append({"role": "assistant", "content": final_response})
+            agent._safe_print(f"\n{final_response}\n")
+            agent._fire_stream_delta(final_response)
+            from agent.turn_finalizer import finalize_turn
+            return finalize_turn(
+                agent,
+                final_response=final_response,
+                api_call_count=api_call_count,
+                interrupted=interrupted,
+                failed=failed,
+                messages=messages,
+                conversation_history=conversation_history,
+                effective_task_id=effective_task_id,
+                turn_id=turn_id,
+                user_message=user_message,
+                original_user_message=original_user_message,
+                _should_review_memory=_should_review_memory,
+                _turn_exit_reason=_turn_exit_reason,
+            )
+    _guided_evidence = getattr(agent, "_guided_book_dispatch_evidence", None)
+    if (
+        isinstance(_guided_evidence, dict)
+        and _guided_evidence.get("turn_kind") == "meta_question"
+    ):
+        _meta_runtime_note = guided_meta_runtime_note(messages)
+        _meta_runtime_context = (
+            "[Guided runtime facts for this meta answer: "
+            f"The current controller model is {agent.model} "
+            f"from provider {agent.provider}. {_meta_runtime_note} "
+            "Answer the user's meta question only and do not ask a book-"
+            "discussion follow-up.]"
+        )
+        _guided_meta_runtime_context = _meta_runtime_context
+        _guided_meta_callbacks = (
+            agent.stream_delta_callback,
+            agent._stream_callback,
+        )
+        agent.stream_delta_callback = None
+        agent._stream_callback = None
+
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
     # all run inside Codex). Default Hermes path is bypassed entirely.
@@ -828,6 +1005,15 @@ def run_conversation(
                 agent.session_id or "-",
             )
 
+        _request_last_user_idx = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get("role") == "user"
+            ),
+            -1,
+        )
         api_messages = []
         for idx, msg in enumerate(messages):
             api_msg = msg.copy()
@@ -837,14 +1023,20 @@ def run_conversation(
             # with target="user_message" (the default).  Both are
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
-            if idx == current_turn_user_idx and msg.get("role") == "user":
+            if msg.get("role") == "user":
                 _injections = []
-                if _ext_prefetch_cache:
-                    _fenced = build_memory_context_block(_ext_prefetch_cache)
-                    if _fenced:
-                        _injections.append(_fenced)
-                if _plugin_user_context:
-                    _injections.append(_plugin_user_context)
+                if idx == current_turn_user_idx:
+                    if _ext_prefetch_cache:
+                        _fenced = build_memory_context_block(_ext_prefetch_cache)
+                        if _fenced:
+                            _injections.append(_fenced)
+                    if _plugin_user_context:
+                        _injections.append(_plugin_user_context)
+                if (
+                    idx == _request_last_user_idx
+                    and _guided_meta_runtime_context
+                ):
+                    _injections.append(_guided_meta_runtime_context)
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
@@ -4573,6 +4765,15 @@ def run_conversation(
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0
             
+            # Guided Mode B uses a specific-tool request choice. Keep its
+            # per-turn tool count bounded even if a provider returns extras.
+            _guided_dispatch = resolve_guided_book_dispatch(
+                messages, getattr(agent, "tools", None)
+            )
+            assistant_message.tool_calls = cap_guided_tool_calls(
+                _guided_dispatch, assistant_message.tool_calls
+            )
+
             # Check for tool calls
             if assistant_message.tool_calls:
                 if not agent.quiet_mode:
@@ -4936,6 +5137,34 @@ def run_conversation(
                                     pass
                         break
 
+                # ── Guided AGY verbatim delivery ──────────────────────
+                # A successful literary turn is already the final user-facing
+                # answer. Do not send it through DeepSeek for a second pass.
+                _agy_tc_ids = {
+                    tc.id
+                    for tc in assistant_message.tool_calls
+                    if tc.function.name == AGY_TOOL_NAME
+                }
+                if _agy_tc_ids:
+                    _agy_delivery = read_agy_delivery(messages, _agy_tc_ids)
+                    record_agy_delivery(agent, _agy_delivery)
+                    if _agy_delivery.succeeded and _agy_delivery.response:
+                        _turn_exit_reason = "guided_agy_verbatim"
+                        final_response = _agy_delivery.response
+                        messages.append({
+                            "role": "assistant",
+                            "content": final_response,
+                        })
+                        if final_response:
+                            agent._safe_print(f"\n{final_response}\n")
+                            if agent.stream_delta_callback:
+                                try:
+                                    agent.stream_delta_callback(final_response)
+                                    agent.stream_delta_callback(None)
+                                except Exception:
+                                    pass
+                        break
+
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
@@ -5012,6 +5241,25 @@ def run_conversation(
             else:
                 # No tool calls - this is the final response
                 final_response = assistant_message.content or ""
+                if should_block_direct_answer(agent):
+                    record_dispatch_block(agent)
+                    final_response = DISPATCH_BLOCKED_NOTICE
+                    assistant_message.content = final_response
+                else:
+                    final_response = apply_agy_failure_fallback(
+                        agent, final_response
+                    )
+                    if _guided_meta_callbacks is not None:
+                        final_response = sanitize_guided_meta_response(
+                            final_response
+                        )
+                        (
+                            agent.stream_delta_callback,
+                            agent._stream_callback,
+                        ) = _guided_meta_callbacks
+                        _guided_meta_callbacks = None
+                        agent._fire_stream_delta(final_response)
+                    assistant_message.content = final_response
                 
                 # Fix: unmute output when entering the no-tool-call branch
                 # so the user can see empty-response warnings and recovery
@@ -5575,6 +5823,16 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
+    if _guided_meta_callbacks is not None:
+        final_response = sanitize_guided_meta_response(final_response or "")
+        (
+            agent.stream_delta_callback,
+            agent._stream_callback,
+        ) = _guided_meta_callbacks
+        _guided_meta_callbacks = None
+        if final_response:
+            agent._fire_stream_delta(final_response)
+
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
     # result dict is returned exactly as before.
