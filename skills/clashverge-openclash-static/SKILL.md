@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.4.13
+version: 2.5.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,15 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.4.13 scopes official region policy strictly to exits
+for this Skill. Version 2.5.0 adds resumable candidate preparation from one
+verified frozen snapshot and one complete RegionRestrictionCheck artifact. It
+rejects snapshot manifests mistakenly passed as `--source`, audits source
+coverage by exact stable IDs, adapts RRC output without a hand-written wrapper,
+migrates manual/LKG evidence only by connection identity, journals every
+candidate stage, reports bounded redacted subprocess output, and reaps only
+expired sidecar leases with exact process/config matching. Activation remains a
+separate command and is deliberately absent from `prepare-candidate`. Version
+2.4.13 scopes official region policy strictly to exits
 whose recorded country is the attributed policy region, so an unknown country
 does not erase otherwise valid service evidence. It permits manual evidence to
 move to a new snapshot only after full connection-identity HMAC equality and
@@ -164,6 +172,32 @@ python3 scripts/clashverge_to_openclash.py all \
 This probes through the isolated router sidecar, uploads an immutable candidate,
 and leaves UCI, the selected production YAML, service state, firewall, policy
 routes, DNS, and TUN untouched. `--no-activate` is an equivalent explicit spelling.
+
+For an already frozen snapshot and completed RRC run, use the resumable path.
+It never refreshes, reruns RRC, or activates; rerunning the same command verifies
+the journal binding and resumes safely after local generation, upload, or
+candidate-sidecar interruption:
+
+```bash
+python3 scripts/clashverge_to_openclash.py prepare-candidate \
+  --source-snapshot /private/path/snapshot_current.json \
+  --rrc-results /private/path/regioncheck-full-current.json \
+  --state-path ~/.hermes/state/clashverge-openclash-static/service-probe-lkg.json \
+  --workdir /private/path/candidate-current \
+  --upload
+```
+
+To audit and migrate old manual evidence during the same preparation, also pass
+`--previous-source-snapshot` and `--previous-manual-results`. A stable-ID match
+may survive a display-name change; changed or unprovable connection identity is
+reported as `MANUAL_EVIDENCE_RETEST_REQUIRED` and is not inherited. The workdir
+contains the private run journal, exact identity-coverage audit, migration audit,
+reconciled report/state, candidate, and redacted audit YAML.
+
+`--source` is exclusively the live Clash Verge effective YAML with its sibling
+`profiles.yaml`. A frozen JSON manifest must always use `--source-snapshot`;
+argument-type errors are reported as `STOP_SOURCE_ARGUMENT_ERROR`, not source
+identity drift.
 
 ### “测试 OpenClash 节点”
 

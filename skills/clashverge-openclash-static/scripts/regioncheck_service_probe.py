@@ -1181,6 +1181,22 @@ def main() -> int:
     if args.calibration_only:
         validate_two_node_calibration(report)
     report["completed_at"] = iso_now()
+    report["run_timestamp"] = report["completed_at"]
+    expected_ids = {
+        identities[str(proxy["name"])]
+        for proxy in proxies
+    }
+    attempted_ids = {
+        str(item.get("exact_node_id") or "")
+        for item in report["node_attempts"]
+    }
+    report["identity_coverage"] = {
+        "expected_node_count": len(expected_ids),
+        "attempted_node_count": len(attempted_ids),
+        "missing_node_ids": sorted(expected_ids - attempted_ids),
+        "extra_node_ids": sorted(attempted_ids - expected_ids),
+        "exact_id_set_equal": expected_ids == attempted_ids,
+    }
     safe_atomic_json(args.output.resolve(), report)
     print("COMPLETE")
     return 0

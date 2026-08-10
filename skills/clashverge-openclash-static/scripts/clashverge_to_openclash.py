@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.4.13"
+SKILL_VERSION = "2.5.0"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -212,8 +212,10 @@ REJECTED_CANDIDATE_SHA256 = {
 MANUAL_RESULT_SCHEMA_VERSION = 1
 SOURCE_SNAPSHOT_SCHEMA_VERSION = 1
 SOURCE_REFRESH_PROTOCOL_VERSION = 1
+PREPARATION_JOURNAL_SCHEMA_VERSION = 1
 DEFAULT_SOURCE_FRESHNESS_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MIN_NODE_RETENTION_RATIO = 0.50
+REMOTE_SIDECAR_LOCK_STALE_SECONDS = 30
 DEFAULT_SOURCE_IDENTITY_KEY = (
     Path.home() / ".hermes/state/clashverge-openclash-static/source-identity.key"
 )
@@ -409,6 +411,26 @@ def run(
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
+
+
+def subprocess_failure_diagnostic(exc: subprocess.CalledProcessError) -> str:
+    """Return a bounded, secret-redacted failure tail for operator recovery."""
+
+    parts = [str(exc.stderr or ""), str(exc.stdout or exc.output or "")]
+    text = "\n".join(part for part in parts if part).strip()
+    text = re.sub(
+        r"(?im)^(proxy-authorization|authorization):[^\r\n]*$",
+        r"\1: REDACTED",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(token|password|passwd|cookie|secret)=([^\s&]+)",
+        r"\1=REDACTED",
+        text,
+    )
+    lines = text.splitlines()[-12:]
+    tail = "\n".join(lines)[-2000:] or "NO_CAPTURED_OUTPUT"
+    return f"exit_code={exc.returncode}; output_tail={tail}"
 
 
 def find_default_source() -> Path:
@@ -658,6 +680,14 @@ def migrate_manual_evidence_by_connection_identity(
     """Rebind manual evidence only after full connection-identity HMAC equality."""
     old_by_name = {str(proxy.get("name")): proxy for proxy in old_proxies}
     current_by_name = {str(proxy.get("name")): proxy for proxy in current_proxies}
+    current_by_identity: dict[str, list[dict[str, Any]]] = {}
+    for proxy in current_proxies:
+        identity = {
+            field: value
+            for field, value in proxy.items()
+            if field not in {"name", "udp"}
+        }
+        current_by_identity.setdefault(identity_hmac(key, identity), []).append(proxy)
     current_ids = {
         str(item.get("exact_node_name")): str(item.get("exact_node_id"))
         for item in current_manifest.get("nodes", [])
@@ -669,9 +699,7 @@ def migrate_manual_evidence_by_connection_identity(
     for item in manual_results:
         name = str(item.get("node") or "")
         old_proxy = old_by_name.get(name)
-        current_proxy = current_by_name.get(name)
-        current_id = current_ids.get(name, "")
-        if old_proxy is None or current_proxy is None or not current_id:
+        if old_proxy is None:
             retest.append(
                 {
                     "service": item.get("service"),
@@ -682,16 +710,57 @@ def migrate_manual_evidence_by_connection_identity(
             )
             continue
         old_identity = {
-            key: value
-            for key, value in old_proxy.items()
-            if key not in {"name", "udp"}
-        }
-        current_identity = {
-            key: value
-            for key, value in current_proxy.items()
-            if key not in {"name", "udp"}
+            field: value
+            for field, value in old_proxy.items()
+            if field not in {"name", "udp"}
         }
         old_hmac = identity_hmac(key, old_identity)
+        identity_matches = current_by_identity.get(old_hmac, [])
+        if len(identity_matches) != 1:
+            current_same_name = current_by_name.get(name)
+            current_hmac = ""
+            reason = "CONNECTION_IDENTITY_UNAVAILABLE"
+            if current_same_name is not None:
+                current_identity = {
+                    field: value
+                    for field, value in current_same_name.items()
+                    if field not in {"name", "udp"}
+                }
+                current_hmac = identity_hmac(key, current_identity)
+                reason = "CONNECTION_IDENTITY_CHANGED"
+            retest_entry = {
+                "service": item.get("service"),
+                "node": name,
+                "status": "MANUAL_EVIDENCE_RETEST_REQUIRED",
+                "reason": reason,
+            }
+            if current_hmac:
+                retest_entry.update(
+                    {
+                        "old_identity_hmac": old_hmac,
+                        "current_identity_hmac": current_hmac,
+                    }
+                )
+            retest.append(retest_entry)
+            continue
+        current_proxy = identity_matches[0]
+        current_name = str(current_proxy.get("name") or "")
+        current_id = current_ids.get(current_name, "")
+        if not current_id:
+            retest.append(
+                {
+                    "service": item.get("service"),
+                    "node": name,
+                    "status": "MANUAL_EVIDENCE_RETEST_REQUIRED",
+                    "reason": "CONNECTION_IDENTITY_UNAVAILABLE",
+                }
+            )
+            continue
+        current_identity = {
+            field: value
+            for field, value in current_proxy.items()
+            if field not in {"name", "udp"}
+        }
         current_hmac = identity_hmac(key, current_identity)
         if not hmac.compare_digest(old_hmac, current_hmac):
             retest.append(
@@ -708,7 +777,7 @@ def migrate_manual_evidence_by_connection_identity(
         migrated.append(
             {
                 "service": item["service"],
-                "node": name,
+                "node": current_name,
                 "result": item["result"],
                 "tested_at": item["tested_at"],
                 "method": item["method"],
@@ -737,6 +806,27 @@ def clash_verge_paths(source: Path | None = None) -> dict[str, Path]:
         "verge": base / "verge.yaml",
         "config": base / "config.yaml",
     }
+
+
+def validate_live_source_contract(
+    paths: dict[str, Path], *, explicit_source: bool
+) -> None:
+    """Reject source/snapshot type confusion before source-identity checks."""
+
+    effective = paths["effective"]
+    if effective.suffix.lower() == ".json":
+        raise ConfigError(
+            "STOP_SOURCE_ARGUMENT_ERROR: --source expects the live Clash Verge "
+            "effective YAML; pass a snapshot manifest with --source-snapshot"
+        )
+    if not effective.is_file():
+        label = "--source" if explicit_source else "discovered live source"
+        raise ConfigError(f"STOP_SOURCE_ARGUMENT_ERROR: {label} is not a readable file")
+    if not paths["profiles"].is_file():
+        raise ConfigError(
+            "STOP_SOURCE_ARGUMENT_ERROR: profiles.yaml is not beside the live "
+            "effective YAML; use --source-snapshot for frozen artifacts"
+        )
 
 
 def load_optional_yaml(path: Path) -> dict[str, Any]:
@@ -996,6 +1086,226 @@ def verify_source_snapshot(manifest_path: Path) -> tuple[dict[str, Any], Path]:
     return manifest, payload
 
 
+def _manifest_identity_maps(
+    manifest: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str]]:
+    id_to_name: dict[str, str] = {}
+    name_to_id: dict[str, str] = {}
+    for item in manifest.get("nodes", []):
+        if not isinstance(item, dict):
+            raise ConfigError("STOP_IDENTITY_COVERAGE_INVALID_MANIFEST")
+        node_id = str(item.get("exact_node_id") or "")
+        name = str(item.get("exact_node_name") or "")
+        if not node_id or not name or node_id in id_to_name or name in name_to_id:
+            raise ConfigError("STOP_IDENTITY_COVERAGE_INVALID_MANIFEST")
+        id_to_name[node_id] = name
+        name_to_id[name] = node_id
+    if len(id_to_name) != int(manifest.get("node_count", len(id_to_name))):
+        raise ConfigError("STOP_IDENTITY_COVERAGE_INVALID_MANIFEST")
+    return id_to_name, name_to_id
+
+
+def audit_snapshot_identity_coverage(
+    previous: dict[str, Any], current: dict[str, Any]
+) -> dict[str, Any]:
+    """Compare frozen snapshots by stable ID and prove both count equations."""
+
+    previous_by_id, previous_by_name = _manifest_identity_maps(previous)
+    current_by_id, current_by_name = _manifest_identity_maps(current)
+    matching_ids = sorted(set(previous_by_id) & set(current_by_id))
+    added_ids = sorted(set(current_by_id) - set(previous_by_id))
+    deleted_ids = sorted(set(previous_by_id) - set(current_by_id))
+    renamed = [
+        {
+            "exact_node_id": node_id,
+            "previous_name": previous_by_id[node_id],
+            "current_name": current_by_id[node_id],
+        }
+        for node_id in matching_ids
+        if previous_by_id[node_id] != current_by_id[node_id]
+    ]
+    identity_changed = [
+        {
+            "exact_node_name": name,
+            "previous_node_id": previous_by_name[name],
+            "current_node_id": current_by_name[name],
+        }
+        for name in sorted(set(previous_by_name) & set(current_by_name))
+        if previous_by_name[name] != current_by_name[name]
+    ]
+    return {
+        "previous_snapshot_id": previous.get("source_snapshot_id"),
+        "current_snapshot_id": current.get("source_snapshot_id"),
+        "previous_node_count": len(previous_by_id),
+        "current_node_count": len(current_by_id),
+        "identity_match_count": len(matching_ids),
+        "identity_match_node_ids": matching_ids,
+        "renamed_identity_match": renamed,
+        "identity_changed": identity_changed,
+        "added_node_ids": added_ids,
+        "deleted_node_ids": deleted_ids,
+        "current_count_closed": len(matching_ids) + len(added_ids)
+        == len(current_by_id),
+        "previous_count_closed": len(matching_ids) + len(deleted_ids)
+        == len(previous_by_id),
+    }
+
+
+def build_probe_report_from_rrc(
+    rrc: dict[str, Any], snapshot_manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Adapt one complete RRC v8 result into the offline reconciliation shape."""
+
+    expected_id_to_name, _ = _manifest_identity_maps(snapshot_manifest)
+    if (
+        rrc.get("schema_version") != RRC_FUNCTIONAL_RESULT_SCHEMA_VERSION
+        or rrc.get("probe_method_version") != RRC_FUNCTIONAL_METHOD_VERSION
+        or rrc.get("source_snapshot_id")
+        != snapshot_manifest.get("source_snapshot_id")
+        or rrc.get("source_hash") != snapshot_manifest.get("source_hash")
+        or rrc.get("status") != "COMPLETE"
+        or rrc.get("production_fingerprint_preserved") is not True
+        or int(rrc.get("attribution_mismatch") or 0) != 0
+        or int(rrc.get("selected_node_count") or -1) != len(expected_id_to_name)
+        or int(rrc.get("nodes_completed") or -1) != len(expected_id_to_name)
+    ):
+        raise ConfigError("STOP_RRC_ARTIFACT_BINDING_INVALID")
+    attempts_by_id: dict[str, dict[str, Any]] = {}
+    for attempt in rrc.get("node_attempts", []):
+        if not isinstance(attempt, dict):
+            raise ConfigError("STOP_RRC_IDENTITY_COVERAGE_INCOMPLETE")
+        node_id = str(attempt.get("exact_node_id") or "")
+        name = str(attempt.get("exact_node_name") or "")
+        if (
+            node_id not in expected_id_to_name
+            or expected_id_to_name[node_id] != name
+            or node_id in attempts_by_id
+        ):
+            raise ConfigError("STOP_RRC_IDENTITY_COVERAGE_INCOMPLETE")
+        attempts_by_id[node_id] = attempt
+    missing = sorted(set(expected_id_to_name) - set(attempts_by_id))
+    extra = sorted(set(attempts_by_id) - set(expected_id_to_name))
+    if missing or extra:
+        raise ConfigError("STOP_RRC_IDENTITY_COVERAGE_INCOMPLETE")
+
+    nodes: list[dict[str, Any]] = []
+    for manifest_node in snapshot_manifest.get("nodes", []):
+        node_id = str(manifest_node["exact_node_id"])
+        name = str(manifest_node["exact_node_name"])
+        attempt = attempts_by_id[node_id]
+        attributed_transport = (
+            attempt.get("status") == "ATTRIBUTION_MATCH"
+            and attempt.get("attribution_valid") is True
+            and attempt.get("output_complete") is True
+            and attempt.get("transport_unknown") is not True
+        )
+        nodes.append(
+            {
+                "name": name,
+                "exact_node_name": name,
+                "exact_node_id": node_id,
+                "source_snapshot_id": snapshot_manifest["source_snapshot_id"],
+                "source_hash": snapshot_manifest["source_hash"],
+                "selector_confirmed": attempt.get("selector_readback") == name,
+                "observed_at": attempt.get("completed_at")
+                or rrc.get("completed_at"),
+                "base_result": (
+                    "BASE_PASS"
+                    if attributed_transport
+                    else str(attempt.get("status") or "UNKNOWN")
+                ),
+                "egress_country": attempt.get("exit_country") or "UNKNOWN",
+                "services": {
+                    service: {
+                        "raw_result": "UNKNOWN",
+                        "override": None,
+                        "final_result": "UNKNOWN",
+                        "evidence": {},
+                    }
+                    for service in SERVICE_KEYS
+                },
+                "reason_code": (
+                    "RRC_ATTRIBUTED_TRANSPORT_PASS"
+                    if attributed_transport
+                    else str(attempt.get("status") or "UNKNOWN")
+                ),
+            }
+        )
+    completed_at = str(rrc.get("completed_at") or rrc.get("started_at") or "")
+    parse_aware_timestamp(completed_at, field="RRC run")
+    report = {
+        "schema_version": PROBE_SCHEMA_VERSION,
+        "probe_version": PROBE_VERSION,
+        "run_timestamp": completed_at,
+        "source_snapshot_id": snapshot_manifest["source_snapshot_id"],
+        "source_hash": snapshot_manifest["source_hash"],
+        "nodes": nodes,
+        "probable_tun_or_upstream_recapture": False,
+        "adapter_source": RRC_FUNCTIONAL_METHOD_VERSION,
+        "identity_coverage": {
+            "expected_node_count": len(expected_id_to_name),
+            "attempted_node_count": len(attempts_by_id),
+            "missing_node_ids": missing,
+            "extra_node_ids": extra,
+            "exact_id_set_equal": not missing and not extra,
+        },
+    }
+    validate_probe_report_safe(report)
+    return report
+
+
+def load_or_initialize_preparation_journal(
+    path: Path, binding: dict[str, Any]
+) -> dict[str, Any]:
+    """Open a resumable journal, refusing to cross artifact identities."""
+
+    path = path.expanduser().resolve()
+    if path.exists():
+        journal = load_json_object(path)
+        if (
+            journal.get("schema_version") != PREPARATION_JOURNAL_SCHEMA_VERSION
+            or journal.get("binding") != binding
+        ):
+            raise ConfigError("STOP_PREPARE_RESUME_BINDING_MISMATCH")
+        journal["status"] = "RUNNING"
+        journal["resumed_at"] = iso_now()
+        atomic_write_json(journal, path, private_parent=True)
+        return journal
+    journal = {
+        "schema_version": PREPARATION_JOURNAL_SCHEMA_VERSION,
+        "skill_version": SKILL_VERSION,
+        "created_at": iso_now(),
+        "updated_at": iso_now(),
+        "status": "RUNNING",
+        "binding": binding,
+        "completed_stages": [],
+        "last_error": None,
+    }
+    atomic_write_json(journal, path, private_parent=True)
+    return journal
+
+
+def record_preparation_stage(
+    path: Path,
+    journal: dict[str, Any],
+    stage: str,
+    *,
+    details: dict[str, Any] | None = None,
+    status: str | None = None,
+) -> None:
+    stages = journal.setdefault("completed_stages", [])
+    if stage not in stages:
+        stages.append(stage)
+    journal["last_completed_stage"] = stage
+    journal["updated_at"] = iso_now()
+    journal["last_error"] = None
+    if details:
+        journal.setdefault("stage_details", {})[stage] = details
+    if status:
+        journal["status"] = status
+    atomic_write_json(journal, path, private_parent=True)
+
+
 def prepare_source_snapshot(
     *,
     source: Path | None,
@@ -1012,6 +1322,7 @@ def prepare_source_snapshot(
         return manifest, payload, {"live_source_reread_after_snapshot": False}
     key = load_or_create_identity_key(identity_key_path)
     paths = clash_verge_paths(source)
+    validate_live_source_contract(paths, explicit_source=source is not None)
     profile = active_remote_profile(paths)
     before_state = capture_clash_verge_state(paths, key)
     before = safe_source_summary(paths["effective"], key)
@@ -2682,6 +2993,94 @@ def _stop_remote_sidecar(
     ssh_command(host, command, capture=True)
 
 
+def recover_stale_remote_sidecar_lock(host: str, core_path: str) -> str:
+    """Reap only an expired lock and its exact core/config process."""
+
+    lock_dir = "/tmp/clashverge-openclash-sidecar.lock"
+    reaper = f"{lock_dir}.reap.{uuid.uuid4().hex}"
+    command = (
+        "CANDIDATE_SIDECAR_RECOVER=1; set -e; "
+        f"lock={quote_remote(lock_dir)}; reaper={quote_remote(reaper)}; "
+        f"sidecar_core={quote_remote(core_path)}; "
+        "if [ ! -d \"$lock\" ]; then echo ABSENT; exit 0; fi; "
+        "now=\"$(date +%s)\"; "
+        "stamp=\"$(cat \"$lock/heartbeat\" 2>/dev/null || "
+        "stat -c %Y \"$lock\" 2>/dev/null || echo \"$now\")\"; "
+        "case \"$stamp\" in ''|*[!0-9]*) echo INVALID; exit 76;; esac; "
+        f"if [ $((now-stamp)) -le {REMOTE_SIDECAR_LOCK_STALE_SECONDS} ]; then "
+        "echo ACTIVE; exit 0; fi; "
+        "mv \"$lock\" \"$reaper\"; "
+        "owner=\"$(cat \"$reaper/owner\" 2>/dev/null || true)\"; "
+        "case \"$owner\" in ''|*[!0-9a-f]*) rm -rf \"$reaper\"; "
+        "echo INVALID; exit 76;; esac; "
+        "[ \"${#owner}\" -eq 32 ] || { rm -rf \"$reaper\"; "
+        "echo INVALID; exit 76; }; "
+        "remote_dir=\"/tmp/clashverge-openclash-sidecar.$owner\"; "
+        "sidecar_config=\"$remote_dir/config.yaml\"; "
+        "stop_exact_pid() { pid=\"$1\"; case \"$pid\" in ''|*[!0-9]*) return;; esac; "
+        "[ \"$(readlink /proc/\"$pid\"/exe 2>/dev/null)\" = \"$sidecar_core\" ] "
+        "|| return; cmdline=\"$(tr '\\000' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null)\"; "
+        "case \"$cmdline\" in *\"$sidecar_config\"*) kill \"$pid\" 2>/dev/null "
+        "|| true; for wait_count in 1 2 3 4 5; do kill -0 \"$pid\" "
+        "2>/dev/null || return; sleep 1; done; kill -9 \"$pid\" 2>/dev/null "
+        "|| true;; esac; }; "
+        "if [ -s \"$remote_dir/sidecar.pid\" ]; then "
+        "stop_exact_pid \"$(cat \"$remote_dir/sidecar.pid\")\"; fi; "
+        "for proc_dir in /proc/[0-9]*; do pid=\"${proc_dir##*/}\"; "
+        "[ \"$(readlink \"$proc_dir/exe\" 2>/dev/null)\" = \"$sidecar_core\" ] "
+        "|| continue; cmdline=\"$(tr '\\000' ' ' < \"$proc_dir/cmdline\" 2>/dev/null)\"; "
+        "case \"$cmdline\" in *\"$sidecar_config\"*) kill \"$pid\" 2>/dev/null "
+        "|| true;; esac; done; "
+        "for proc_dir in /proc/[0-9]*; do "
+        "[ \"$(readlink \"$proc_dir/exe\" 2>/dev/null)\" = \"$sidecar_core\" ] "
+        "|| continue; cmdline=\"$(tr '\\000' ' ' < \"$proc_dir/cmdline\" 2>/dev/null)\"; "
+        "case \"$cmdline\" in *\"$sidecar_config\"*) echo INVALID; exit 77;; esac; done; "
+        "rm -rf \"$remote_dir\" \"$reaper\"; "
+        "rm -f \"/tmp/clashverge-openclash-sidecar.$owner.upload\"; "
+        "echo STALE_CLEANED"
+    )
+    try:
+        result = ssh_command(host, command, capture=True)
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError(
+            "CANDIDATE_SIDECAR_STALE_LOCK_RECOVERY_FAILED: "
+            + subprocess_failure_diagnostic(exc)
+        ) from exc
+    lines = (result.stdout or "").strip().splitlines()
+    # Empty stdout is accepted for compatibility with mocked transport runners;
+    # the real remote command always emits one of the explicit statuses.
+    status = lines[-1] if lines else "ABSENT"
+    if status == "ACTIVE":
+        raise ConfigError("CANDIDATE_SIDECAR_LOCK_ACTIVE: retry after the active lease exits")
+    if status not in {"ABSENT", "STALE_CLEANED"}:
+        raise ConfigError("CANDIDATE_SIDECAR_LOCK_INVALID")
+    return status
+
+
+def _remote_sidecar_guard_command(
+    remote_dir: str, lock_dir: str, token: str, core_path: str
+) -> str:
+    """Keep a lease heartbeat and clean exact sidecar state on SSH disconnect."""
+
+    return (
+        "CANDIDATE_SIDECAR_GUARD=1; set -e; "
+        f"lock={quote_remote(lock_dir)}; token={quote_remote(token)}; "
+        f"remote_dir={quote_remote(remote_dir)}; sidecar_core={quote_remote(core_path)}; "
+        "sidecar_config=\"$remote_dir/config.yaml\"; "
+        "cleanup() { if [ \"$(cat \"$lock/owner\" 2>/dev/null)\" = \"$token\" ]; then "
+        "pid=\"$(cat \"$remote_dir/sidecar.pid\" 2>/dev/null || true)\"; "
+        "case \"$pid\" in ''|*[!0-9]*) ;; *) "
+        "if [ \"$(readlink /proc/\"$pid\"/exe 2>/dev/null)\" = \"$sidecar_core\" ]; then "
+        "cmdline=\"$(tr '\\000' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null)\"; "
+        "case \"$cmdline\" in *\"$sidecar_config\"*) kill \"$pid\" 2>/dev/null "
+        "|| true;; esac; fi;; esac; rm -rf \"$remote_dir\" \"$lock\"; fi; }; "
+        "trap cleanup EXIT HUP INT TERM; "
+        "while [ \"$(cat \"$lock/owner\" 2>/dev/null)\" = \"$token\" ]; do "
+        "date +%s > \"$lock/heartbeat.tmp\"; "
+        "mv \"$lock/heartbeat.tmp\" \"$lock/heartbeat\"; sleep 5; done"
+    )
+
+
 @contextmanager
 def remote_candidate_sidecar(
     config_path: Path,
@@ -2695,6 +3094,7 @@ def remote_candidate_sidecar(
     lock_dir = "/tmp/clashverge-openclash-sidecar.lock"
     local_mixed = reserve_loopback_port()
     local_controller = reserve_loopback_port()
+    recover_stale_remote_sidecar_lock(host, core_path)
     before = remote_production_fingerprint(host)
     tunnel: subprocess.Popen[Any] | None = None
     primary_error: BaseException | None = None
@@ -2715,6 +3115,7 @@ def remote_candidate_sidecar(
             "CANDIDATE_SIDECAR_SETUP=1; set -e; "
             f"mkdir {quote_remote(lock_dir)}; "
             f"printf '%s\\n' {quote_remote(token)} > {quote_remote(lock_dir + '/owner')}; "
+            f"date +%s > {quote_remote(lock_dir + '/heartbeat')}; "
             f"mkdir {quote_remote(remote_dir)}; "
             f"mv {quote_remote(upload_path)} {quote_remote(remote_dir + '/config.yaml')}; "
             f"chmod 700 {quote_remote(remote_dir)}; "
@@ -2736,7 +3137,7 @@ def remote_candidate_sidecar(
         tunnel = subprocess.Popen(
             [
                 "ssh",
-                "-N",
+                "-T",
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -2748,6 +3149,9 @@ def remote_candidate_sidecar(
                 "-L",
                 f"127.0.0.1:{local_controller}:127.0.0.1:{REMOTE_SIDECAR_CONTROLLER_PORT}",
                 host,
+                _remote_sidecar_guard_command(
+                    remote_dir, lock_dir, token, core_path
+                ),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -4217,6 +4621,303 @@ def deploy(
     return activate_uploaded_candidate(candidate, host=host, core_path=core_path)
 
 
+def rebind_lkg_state_by_exact_identity(
+    state: dict[str, Any], snapshot_manifest: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Carry LKG state across display-name changes only by exact stable ID."""
+
+    rebound = deepcopy(state)
+    nodes = rebound.get("nodes")
+    if not isinstance(nodes, dict):
+        raise ConfigError("Unsupported LKG state schema")
+    id_to_name, _ = _manifest_identity_maps(snapshot_manifest)
+    moved: list[dict[str, str]] = []
+    for old_name in list(nodes):
+        service_state = nodes.get(old_name)
+        if not isinstance(service_state, dict):
+            continue
+        exact_ids = {
+            str(value.get("exact_node_id") or "")
+            for value in service_state.values()
+            if isinstance(value, dict) and value.get("exact_node_id")
+        }
+        if len(exact_ids) != 1:
+            continue
+        exact_id = next(iter(exact_ids))
+        current_name = id_to_name.get(exact_id)
+        if not current_name or current_name == old_name:
+            continue
+        target = nodes.setdefault(current_name, {})
+        for service, value in service_state.items():
+            if service not in target:
+                target[service] = value
+        del nodes[old_name]
+        moved.append(
+            {
+                "exact_node_id": exact_id,
+                "previous_name": old_name,
+                "current_name": current_name,
+            }
+        )
+    return rebound, {"renamed_lkg_entries_rebound": moved, "rebound_count": len(moved)}
+
+
+def _artifact_hash(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    resolved = path.expanduser().resolve()
+    return sha256_file(resolved) if resolved.is_file() else "ABSENT"
+
+
+def prepare_candidate_from_frozen_artifacts(args: argparse.Namespace) -> dict[str, Any]:
+    """Build and optionally sidecar-verify a candidate, never activate it."""
+
+    workdir = args.workdir.expanduser().resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(workdir, 0o700)
+    journal_path = (
+        args.journal.expanduser().resolve()
+        if args.journal
+        else workdir / "candidate-preparation-state.json"
+    )
+    snapshot_manifest, source = verify_source_snapshot(args.source_snapshot)
+    rrc_path = args.rrc_results.expanduser().resolve()
+    rrc = load_json_object(rrc_path)
+    binding = {
+        "source_snapshot_id": snapshot_manifest["source_snapshot_id"],
+        "source_hash": snapshot_manifest["source_hash"],
+        "source_manifest_sha256": sha256_file(args.source_snapshot.expanduser().resolve()),
+        "rrc_sha256": sha256_file(rrc_path),
+        "previous_source_manifest_sha256": _artifact_hash(
+            args.previous_source_snapshot
+        ),
+        "state_sha256": _artifact_hash(args.state_path),
+        "manual_results_sha256": _artifact_hash(args.manual_results),
+        "previous_manual_results_sha256": _artifact_hash(
+            args.previous_manual_results
+        ),
+        "additional_functional_sha256": [
+            sha256_file(path.expanduser().resolve())
+            for path in args.functional_results
+        ],
+        "output_name": args.output_name,
+        "audit_name": args.audit_name,
+        "upload_requested": bool(args.upload),
+        "remote_name": args.remote_name,
+    }
+    existed = journal_path.exists()
+    journal = load_or_initialize_preparation_journal(journal_path, binding)
+    if existed:
+        journal["resume_count"] = int(journal.get("resume_count") or 0) + 1
+        atomic_write_json(journal, journal_path, private_parent=True)
+    try:
+        baseline_report = build_probe_report_from_rrc(rrc, snapshot_manifest)
+        baseline_path = workdir / "rrc-reconciliation-baseline.json"
+        atomic_write_json(baseline_report, baseline_path, private_parent=True)
+        record_preparation_stage(
+            journal_path,
+            journal,
+            "ARTIFACTS_VERIFIED",
+            details={
+                "snapshot_node_count": snapshot_manifest["node_count"],
+                "rrc_identity_coverage": baseline_report["identity_coverage"],
+            },
+        )
+
+        if args.previous_source_snapshot:
+            previous_manifest, previous_source = verify_source_snapshot(
+                args.previous_source_snapshot
+            )
+            identity_audit = audit_snapshot_identity_coverage(
+                previous_manifest, snapshot_manifest
+            )
+        else:
+            previous_manifest = None
+            previous_source = None
+            identity_audit = {
+                "previous_snapshot_id": None,
+                "current_snapshot_id": snapshot_manifest["source_snapshot_id"],
+                "current_node_count": snapshot_manifest["node_count"],
+                "identity_baseline": "NOT_PROVIDED",
+                "current_count_closed": True,
+            }
+        identity_audit_path = workdir / "identity-coverage-audit.json"
+        atomic_write_json(identity_audit, identity_audit_path, private_parent=True)
+        record_preparation_stage(
+            journal_path,
+            journal,
+            "IDENTITY_COVERAGE_AUDITED",
+            details={"audit_path": str(identity_audit_path)},
+        )
+
+        current_manual = load_manual_results(args.manual_results)
+        migrated: list[dict[str, Any]] = []
+        retest: list[dict[str, Any]] = []
+        if args.previous_manual_results and not previous_manifest:
+            raise ConfigError(
+                "STOP_MANUAL_EVIDENCE_MIGRATION_INPUT: "
+                "--previous-source-snapshot is required"
+            )
+        if args.previous_manual_results and previous_manifest and previous_source:
+            key = load_or_create_identity_key(args.source_identity_key)
+            migrated, retest = migrate_manual_evidence_by_connection_identity(
+                load_manual_results(args.previous_manual_results),
+                static_proxy_objects(load_yaml(previous_source)),
+                static_proxy_objects(load_yaml(source)),
+                snapshot_manifest,
+                key,
+            )
+        prepared_manual_path = workdir / "snapshot-bound-manual-results.json"
+        atomic_write_json(
+            {
+                "schema_version": MANUAL_RESULT_SCHEMA_VERSION,
+                "results": [*current_manual, *migrated],
+            },
+            prepared_manual_path,
+            private_parent=True,
+        )
+        migration_path = workdir / "manual-evidence-migration-audit.json"
+        atomic_write_json(
+            {
+                "source_snapshot_id": snapshot_manifest["source_snapshot_id"],
+                "migrated_count": len(migrated),
+                "retest_required_count": len(retest),
+                "retest_required": retest,
+            },
+            migration_path,
+            private_parent=True,
+        )
+        record_preparation_stage(
+            journal_path,
+            journal,
+            "MANUAL_EVIDENCE_RECONCILED",
+            details={
+                "migrated_count": len(migrated),
+                "retest_required_count": len(retest),
+            },
+        )
+
+        reconcile_state_path = args.state_path.expanduser().resolve()
+        if reconcile_state_path.is_file():
+            rebound_state, rebound_audit = rebind_lkg_state_by_exact_identity(
+                load_json_object(reconcile_state_path), snapshot_manifest
+            )
+            reconcile_state_path = workdir / "identity-rebound-lkg-input.json"
+            atomic_write_json(rebound_state, reconcile_state_path, private_parent=True)
+        else:
+            rebound_audit = {"renamed_lkg_entries_rebound": [], "rebound_count": 0}
+            reconcile_state_path = workdir / "empty-lkg-input.json"
+            atomic_write_json(
+                {
+                    "schema_version": LKG_SCHEMA_VERSION,
+                    "updated_at": iso_now(),
+                    "nodes": {},
+                },
+                reconcile_state_path,
+                private_parent=True,
+            )
+
+        report_output = workdir / "candidate-probe-report.json"
+        state_output = workdir / "candidate-lkg-state.json"
+        selections, _report = reconcile_existing_probe(
+            load_yaml(source),
+            state_path=reconcile_state_path,
+            probe_report_path=baseline_path,
+            manual_results_path=prepared_manual_path,
+            functional_results_paths=[rrc_path, *args.functional_results],
+            report_output_path=report_output,
+            state_output_path=state_output,
+            snapshot_manifest=snapshot_manifest,
+        )
+        record_preparation_stage(
+            journal_path,
+            journal,
+            "SERVICE_EVIDENCE_RECONCILED",
+            details={"lkg_identity_rebind": rebound_audit},
+        )
+
+        output = workdir / args.output_name
+        audit_output = workdir / args.audit_name
+        transform_file(source, output, audit_output, selections)
+        candidate_sha = sha256_file(output)
+        record_preparation_stage(
+            journal_path,
+            journal,
+            "CANDIDATE_GENERATED",
+            details={
+                "candidate_path": str(output),
+                "candidate_sha256": candidate_sha,
+            },
+        )
+
+        uploaded: UploadedCandidate | None = None
+        if args.upload:
+            uploaded = upload_candidate(
+                output,
+                host=args.host,
+                remote_name=args.remote_name,
+                core_path=args.core_path,
+            )
+            record_preparation_stage(
+                journal_path,
+                journal,
+                "CANDIDATE_UPLOADED",
+                details={"candidate_path": uploaded.candidate_path},
+            )
+            probe_uploaded_candidate(
+                output,
+                host=args.host,
+                core_path=args.core_path,
+                candidate_path=uploaded.candidate_path,
+            )
+            record_preparation_stage(
+                journal_path,
+                journal,
+                "CANDIDATE_SIDECAR_VERIFIED",
+                details={"production_state_changed": False},
+            )
+        final_status = (
+            "READY_FOR_EXPLICIT_ACTIVATE_APPROVAL"
+            if uploaded
+            else "CANDIDATE_GENERATED_NOT_UPLOADED"
+        )
+        record_preparation_stage(
+            journal_path,
+            journal,
+            "PREPARATION_COMPLETE",
+            details={"activated": False},
+            status=final_status,
+        )
+        return {
+            "status": final_status,
+            "resumed": existed,
+            "source_snapshot_id": snapshot_manifest["source_snapshot_id"],
+            "candidate_path": str(output),
+            "candidate_sha256": candidate_sha,
+            "remote_candidate_path": uploaded.candidate_path if uploaded else None,
+            "journal_path": str(journal_path),
+            "identity_audit_path": str(identity_audit_path),
+            "manual_migration_audit_path": str(migration_path),
+            "probe_report_path": str(report_output),
+            "state_output_path": str(state_output),
+            "activated": False,
+        }
+    except BaseException as exc:
+        journal["status"] = "FAILED_RECOVERABLE"
+        journal["failed_at"] = iso_now()
+        journal["last_error"] = (
+            subprocess_failure_diagnostic(exc)
+            if isinstance(exc, subprocess.CalledProcessError)
+            else re.sub(
+                r"(?i)\b(token|password|passwd|cookie|secret)=([^\s&]+)",
+                r"\1=REDACTED",
+                str(exc),
+            )[-2000:]
+        )
+        atomic_write_json(journal, journal_path, private_parent=True)
+        raise
+
+
 def print_summary(data: dict[str, Any], output: Path, audit_output: Path | None) -> None:
     groups = {group["name"]: group for group in data["proxy-groups"]}
     print(f"output={output}")
@@ -4477,6 +5178,32 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_p.add_argument("--output", type=Path, required=True)
     reconcile_p.add_argument("--audit-output", type=Path)
 
+    prepare_p = sub.add_parser(
+        "prepare-candidate",
+        help=(
+            "Resume candidate generation from one frozen snapshot and complete RRC "
+            "artifacts; optionally upload and sidecar-test, but never activate."
+        ),
+    )
+    prepare_p.add_argument("--source-snapshot", type=Path, required=True)
+    prepare_p.add_argument("--rrc-results", type=Path, required=True)
+    prepare_p.add_argument("--previous-source-snapshot", type=Path)
+    prepare_p.add_argument("--manual-results", type=Path)
+    prepare_p.add_argument("--previous-manual-results", type=Path)
+    prepare_p.add_argument(
+        "--functional-results", type=Path, action="append", default=[]
+    )
+    prepare_p.add_argument("--state-path", type=Path, default=DEFAULT_LKG_STATE_PATH)
+    prepare_p.add_argument("--source-identity-key", type=Path, default=DEFAULT_SOURCE_IDENTITY_KEY)
+    prepare_p.add_argument("--workdir", type=Path, required=True)
+    prepare_p.add_argument("--output-name", default="openclash-candidate.yaml")
+    prepare_p.add_argument("--audit-name", default="openclash-candidate-audit.yaml")
+    prepare_p.add_argument("--journal", type=Path)
+    prepare_p.add_argument("--upload", action="store_true")
+    prepare_p.add_argument("--host", default="root@192.168.10.1")
+    prepare_p.add_argument("--remote-name")
+    prepare_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
+
     selfcheck_p = sub.add_parser(
         "self-check",
         help="Run read-only runtime self-check and report version/environment info.",
@@ -4537,6 +5264,7 @@ def runtime_self_check() -> dict[str, Any]:
         "service_check_backend": "RegionRestrictionCheck",
         "browser_probe_gate": False,
         "deployment_mode": "upload_candidate_then_independent_activate",
+        "candidate_preparation_mode": "resumable_frozen_artifacts",
         "duplicate_skill_paths": duplicate_paths,
         "pass": sync_commit not in {"UNRECORDED", "INVALID"},
     }
@@ -4760,6 +5488,25 @@ def main() -> int:
             print("activated=false")
             return 0
 
+        if args.command == "prepare-candidate":
+            result = prepare_candidate_from_frozen_artifacts(args)
+            for key in (
+                "status",
+                "resumed",
+                "source_snapshot_id",
+                "candidate_path",
+                "candidate_sha256",
+                "remote_candidate_path",
+                "journal_path",
+                "identity_audit_path",
+                "manual_migration_audit_path",
+                "probe_report_path",
+                "state_output_path",
+                "activated",
+            ):
+                print(f"{key}={result[key]}")
+            return 0
+
         if args.command == "deploy":
             manifest, _ = verify_source_snapshot(args.source_snapshot)
             remote = deploy(
@@ -4837,7 +5584,7 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as exc:
-        print(f"ERROR: command failed with exit code {exc.returncode}", file=sys.stderr)
+        print(f"ERROR: command failed: {subprocess_failure_diagnostic(exc)}", file=sys.stderr)
         return exc.returncode or 1
 
 
