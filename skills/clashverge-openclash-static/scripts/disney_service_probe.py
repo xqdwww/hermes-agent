@@ -216,15 +216,31 @@ def run_chain(proxy_port: int) -> dict[str, Any]:
 
 def validate_safe_report(report: dict[str, Any]) -> None:
     forbidden = {"assertion", "token", "refresh_token", "authorization", "body", "raw"}
-    def walk(value: Any) -> None:
+    stage_names = {"devices", "token", "graphql", "redirect"}
+    stage_fields = {"curl_code", "http_status", "attempts"}
+
+    def walk(value: Any, *, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, dict):
+            if path and path[-1] == "stages":
+                if not set(value).issubset(stage_names):
+                    raise RuntimeError("DISNEY_REPORT_STAGE_SCHEMA")
+                for stage_name, stage in value.items():
+                    if not isinstance(stage, dict) or set(stage) != stage_fields:
+                        raise RuntimeError("DISNEY_REPORT_STAGE_SCHEMA")
+                    if not all(
+                        item is None or type(item) is int
+                        for item in stage.values()
+                    ):
+                        raise RuntimeError("DISNEY_REPORT_STAGE_SCHEMA")
+                    walk(stage, path=(*path, str(stage_name)))
+                return
             for key, child in value.items():
                 if str(key).lower() in forbidden:
                     raise RuntimeError("DISNEY_REPORT_SENSITIVE_FIELD")
-                walk(child)
+                walk(child, path=(*path, str(key)))
         elif isinstance(value, list):
             for child in value:
-                walk(child)
+                walk(child, path=path)
     walk(report)
 
 

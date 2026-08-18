@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.6.0"
+SKILL_VERSION = "2.6.1"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"

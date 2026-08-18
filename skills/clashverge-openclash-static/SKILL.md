@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.6.0
+version: 2.6.1
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,11 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.6.0 makes the formal candidate update one resumable
+for this Skill. Version 2.6.1 gives Disney's redacted `token` stage a strict
+status-only schema while continuing to reject assertion, token, refresh-token,
+authorization, body, or raw-response payload fields outside that fixed stage
+namespace. Version 2.6.0
+makes the formal candidate update one resumable
 orchestration: refresh and freeze one source snapshot, run the mature
 RegionRestrictionCheck backend with two distinct current-run attributed
 sentinels, execute the Disney devices → token → GraphQL → redirect chain,

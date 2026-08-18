@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 
 SKILL_ROOT = Path(__file__).parents[1]
@@ -24,10 +26,123 @@ REGIONCHECK = load_module(
     "formal_regioncheck_probe",
     SKILL_ROOT / "scripts" / "regioncheck_service_probe.py",
 )
+DISNEY = load_module(
+    "formal_disney_probe",
+    SKILL_ROOT / "scripts" / "disney_service_probe.py",
+)
 CONVERTER = load_module(
     "formal_update_converter",
     SKILL_ROOT / "scripts" / "clashverge_to_openclash.py",
 )
+
+
+def test_disney_safe_report_allows_redacted_token_stage() -> None:
+    DISNEY.validate_safe_report(
+        {
+            "nodes": [
+                {
+                    "result": "PASS_SUPPORTED_REGION",
+                    "stages": {
+                        "devices": {"curl_code": 0, "http_status": 200, "attempts": 1},
+                        "token": {"curl_code": 0, "http_status": 200, "attempts": 1},
+                        "graphql": {"curl_code": 0, "http_status": 200, "attempts": 1},
+                        "redirect": {"curl_code": 0, "http_status": 200, "attempts": 1},
+                    },
+                }
+            ]
+        }
+    )
+
+
+def test_disney_chain_discards_transient_credentials_before_validation() -> None:
+    responses = [
+        {
+            "curl_code": 0,
+            "http_status": 200,
+            "attempts": 1,
+            "raw": json.dumps({"assertion": "transient-assertion"}),
+        },
+        {
+            "curl_code": 0,
+            "http_status": 200,
+            "attempts": 1,
+            "raw": json.dumps({"refresh_token": "transient-refresh-token"}),
+        },
+        {
+            "curl_code": 0,
+            "http_status": 200,
+            "attempts": 1,
+            "raw": json.dumps(
+                {
+                    "extensions": {
+                        "sdk": {
+                            "session": {
+                                "location": {"countryCode": "US"},
+                                "inSupportedLocation": True,
+                            }
+                        }
+                    }
+                }
+            ),
+        },
+        {
+            "curl_code": 0,
+            "http_status": 200,
+            "attempts": 1,
+            "raw": "ignored body",
+            "effective_url": "https://www.disneyplus.com/home",
+        },
+    ]
+
+    with patch.object(DISNEY, "curl_request", side_effect=responses):
+        outcome = DISNEY.run_chain(17890)
+
+    assert outcome["result"] == "PASS_SUPPORTED_REGION"
+    DISNEY.validate_safe_report({"nodes": [outcome]})
+    serialized = json.dumps(outcome)
+    assert "transient-assertion" not in serialized
+    assert "transient-refresh-token" not in serialized
+
+
+@pytest.mark.parametrize("forbidden", ["token", "assertion", "refresh_token", "body", "raw"])
+def test_disney_safe_report_still_rejects_sensitive_payload_fields(forbidden: str) -> None:
+    with pytest.raises(RuntimeError, match="DISNEY_REPORT_SENSITIVE_FIELD"):
+        DISNEY.validate_safe_report(
+            {
+                "nodes": [
+                    {
+                        "stages": {
+                            "devices": {
+                                "curl_code": 0,
+                                "http_status": 200,
+                                "attempts": 1,
+                            }
+                        },
+                        forbidden: "secret",
+                    }
+                ]
+            }
+        )
+
+
+def test_disney_safe_report_rejects_payload_hidden_in_token_stage() -> None:
+    with pytest.raises(RuntimeError, match="DISNEY_REPORT_STAGE_SCHEMA"):
+        DISNEY.validate_safe_report(
+            {
+                "nodes": [
+                    {
+                        "stages": {
+                            "token": {
+                                "curl_code": 0,
+                                "http_status": 200,
+                                "attempts": 1,
+                                "raw": "secret",
+                            }
+                        }
+                    }
+                ]
+            }
+        )
 
 
 def test_auto_calibration_requires_two_distinct_attributed_exits() -> None:
