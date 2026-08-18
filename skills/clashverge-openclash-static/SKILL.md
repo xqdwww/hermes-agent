@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.5.1
+version: 2.6.0
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,17 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.5.1 lets the authenticated source-only helper run
+for this Skill. Version 2.6.0 makes the formal candidate update one resumable
+orchestration: refresh and freeze one source snapshot, run the mature
+RegionRestrictionCheck backend with two distinct current-run attributed
+sentinels, execute the Disney devices → token → GraphQL → redirect chain,
+reconcile snapshot-bound evidence, generate the candidate, and optionally
+upload plus sidecar-test it. The snapshot-scoped journal reuses only complete,
+identity-bound probe artifacts. `all --deploy --no-activate` is a compatibility
+alias for this mature path; it no longer runs the legacy HTTP screen probe.
+The combined `all --deploy --activate` form fails before refresh or router
+contact because activation remains a separately approved transaction. Version
+2.5.1 lets the authenticated source-only helper run
 beside a normal Clash Verge 2.5.2 process on a separate loopback port, discovers
 the helper from `$HERMES_HOME/bin/clash-verge-source-refresh`, rejects port
 collisions, and fails closed when the live source changes during download.
@@ -168,17 +178,30 @@ production service or data plane.
 
 ### “更新 OpenClash 节点，但不要启用”
 
-Export, transform, upload, and remotely validate, but do not switch the active profile or restart:
+Run the complete formal candidate workflow, but do not switch the active profile
+or restart OpenClash:
 
 ```bash
-python3 scripts/clashverge_to_openclash.py all \
+python3 scripts/clashverge_to_openclash.py update-candidate \
   --refresh-adapter scripts/clash_verge_source_refresh_adapter.py \
-  --deploy
+  --upload
 ```
 
-This probes through the isolated router sidecar, uploads an immutable candidate,
-and leaves UCI, the selected production YAML, service state, firewall, policy
-routes, DNS, and TUN untouched. `--no-activate` is an equivalent explicit spelling.
+This runs RegionRestrictionCheck and the Disney full chain through isolated
+router sidecars, uploads one immutable candidate, validates it, and leaves UCI,
+the selected production YAML, service state, firewall, policy routes, DNS, and
+TUN untouched. `all --deploy --no-activate` is a compatibility alias for this
+same mature workflow. Never use `all --deploy --activate`; it is rejected before
+refresh and router contact. Activate only the verified immutable candidate with
+the independent `activate` subcommand after explicit approval.
+
+When previous snapshot-bound manual evidence exists, pass both
+`--previous-source-snapshot` and `--previous-manual-results`. The formal workflow
+migrates it only after exact connection-identity equality; omission means the
+old manual evidence is not current evidence. A failed run prints a private
+`formal_update_journal_path`. Resume from its frozen snapshot with
+`update-candidate --source-snapshot <manifest> ...`; complete RRC or Disney
+artifacts bound to that snapshot are verified and skipped instead of rerun.
 
 For an already frozen snapshot and completed RRC run, use the resumable path.
 It never refreshes, reruns RRC, or activates; rerunning the same command verifies

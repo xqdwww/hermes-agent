@@ -912,6 +912,32 @@ def validate_two_node_calibration(report: dict[str, Any]) -> None:
     )
 
 
+def auto_calibration_sentinels(
+    node_attempts: list[dict[str, Any]],
+) -> list[str]:
+    """Return two complete attributed nodes with different observed exits."""
+
+    sentinels: list[str] = []
+    exit_hmacs: set[str] = set()
+    for item in node_attempts:
+        exit_hmac = str(item.get("control_exit_ip_hmac") or "")
+        name = str(item.get("exact_node_name") or "")
+        if (
+            item.get("status") != "ATTRIBUTION_MATCH"
+            or item.get("output_complete") is not True
+            or item.get("result_count") != len(SERVICE_LABELS)
+            or not exit_hmac
+            or not name
+            or exit_hmac in exit_hmacs
+        ):
+            continue
+        sentinels.append(name)
+        exit_hmacs.add(exit_hmac)
+        if len(sentinels) == 2:
+            break
+    return sentinels
+
+
 def require_preserved_production_fingerprint(before: str, after: str) -> None:
     if before != after:
         raise ProbeError("CANDIDATE_SIDECAR_PRODUCTION_STATE_CHANGED")
@@ -930,6 +956,14 @@ def main() -> int:
     parser.add_argument("--node", action="append", default=[])
     parser.add_argument("--calibration-only", action="store_true")
     parser.add_argument("--calibration-report", type=Path)
+    parser.add_argument(
+        "--auto-calibrate",
+        action="store_true",
+        help=(
+            "Derive two current-run attributed sentinels with distinct exits before "
+            "enforcing systemic attribution gates."
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--import-report", type=Path)
     args = parser.parse_args()
@@ -953,7 +987,7 @@ def main() -> int:
     if args.calibration_only:
         if len(proxies) != 2 or not args.node:
             raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRES_EXACTLY_TWO_NODES")
-    elif len(proxies) > 2:
+    elif len(proxies) > 2 and not args.auto_calibrate:
         if args.calibration_report is None:
             raise ProbeError("RRC_TWO_NODE_CALIBRATION_REQUIRED")
         calibration_payload = validate_calibration_report(
@@ -1001,6 +1035,8 @@ def main() -> int:
         "resolved_proxy_url_strategy": "remote_loopback_sidecar_port",
         "gid_bypass_verified": False,
         "systemic_gate_confirmations": [],
+        "auto_calibration_requested": bool(args.auto_calibrate),
+        "auto_calibration_status": "PENDING" if args.auto_calibrate else "NOT_REQUESTED",
     }
     previous_path: Path | None = None
     if args.resume and args.output.exists():
@@ -1058,6 +1094,8 @@ def main() -> int:
                 for item in (calibration_payload or {}).get("node_attempts", [])
                 if item.get("status") == "ATTRIBUTION_MATCH"
             ]
+            if args.auto_calibrate:
+                sentinel_names = auto_calibration_sentinels(report["node_attempts"])
             last_confirmed_unavailable_count = 0
             for proxy in proxies:
                 name = str(proxy["name"])
@@ -1128,11 +1166,26 @@ def main() -> int:
                     node_entry["result_count"] = len(SERVICE_LABELS)
                 report["node_attempts"].append(node_entry)
                 update_report_counts(report)
+                if args.auto_calibrate:
+                    sentinel_names = auto_calibration_sentinels(
+                        report["node_attempts"]
+                    )
+                    if len(sentinel_names) == 2:
+                        report["auto_calibration_status"] = (
+                            "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_AUTO_CALIBRATION"
+                        )
                 safe_atomic_json(args.output.resolve(), report)
                 systemic_stop = systemic_attribution_stop_reason(
                     report["node_attempts"]
                 )
                 if systemic_stop is not None:
+                    if args.auto_calibrate and len(sentinel_names) < 2:
+                        reset_sidecar_connections(
+                            skill,
+                            sidecar.controller_port,
+                            sleep_seconds=max(0.0, args.node_interval),
+                        )
+                        continue
                     unavailable_count = int(report["attribution_unavailable"])
                     if unavailable_count > last_confirmed_unavailable_count:
                         healthy, confirmations = (
@@ -1180,6 +1233,16 @@ def main() -> int:
     update_report_counts(report)
     if args.calibration_only:
         validate_two_node_calibration(report)
+    if args.auto_calibrate:
+        sentinel_names = auto_calibration_sentinels(report["node_attempts"])
+        if len(sentinel_names) != 2:
+            report["status"] = "STOP_RRC_AUTO_CALIBRATION_FAILED"
+            report["auto_calibration_status"] = "FAILED"
+            safe_atomic_json(args.output.resolve(), report)
+            raise ProbeError("STOP_RRC_AUTO_CALIBRATION_FAILED")
+        report["auto_calibration_status"] = (
+            "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_AUTO_CALIBRATION"
+        )
     report["completed_at"] = iso_now()
     report["run_timestamp"] = report["completed_at"]
     expected_ids = {

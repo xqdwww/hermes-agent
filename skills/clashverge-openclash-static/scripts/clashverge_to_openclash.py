@@ -185,7 +185,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.5.1"
+SKILL_VERSION = "2.6.0"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -1335,7 +1335,7 @@ def prepare_source_snapshot(
     else:
         if refresh_adapter is None:
             raise ConfigError(
-                "STOP_SOURCE_REFRESH_FAILED: Clash Verge 2.5.1 exposes update_profile only "
+                "STOP_SOURCE_REFRESH_FAILED: the installed Clash Verge exposes update_profile only "
                 "inside Tauri; configure the authenticated custom source-refresh bridge"
             )
         receipt = run_source_refresh_adapter(
@@ -4671,6 +4671,197 @@ def _artifact_hash(path: Path | None) -> str | None:
     return sha256_file(resolved) if resolved.is_file() else "ABSENT"
 
 
+def run_probe_command(command: list[str]) -> None:
+    """Run a bundled probe without echoing arguments or unbounded output."""
+
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError(
+            "FORMAL_SERVICE_PROBE_FAILED: " + subprocess_failure_diagnostic(exc)
+        ) from exc
+
+
+def _rrc_artifact_complete(path: Path, manifest: dict[str, Any]) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        report = load_json_object(path)
+    except ConfigError:
+        return False
+    coverage = report.get("identity_coverage", {})
+    return (
+        report.get("status") == "COMPLETE"
+        and report.get("source_snapshot_id") == manifest["source_snapshot_id"]
+        and report.get("source_hash") == manifest["source_hash"]
+        and report.get("production_fingerprint_preserved") is True
+        and report.get("auto_calibration_status")
+        == "PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_AUTO_CALIBRATION"
+        and coverage.get("exact_id_set_equal") is True
+        and coverage.get("expected_node_count") == manifest["node_count"]
+    )
+
+
+def _disney_artifact_complete(path: Path, manifest: dict[str, Any]) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        report = load_json_object(path)
+    except ConfigError:
+        return False
+    nodes = report.get("nodes")
+    return (
+        report.get("source_snapshot_id") == manifest["source_snapshot_id"]
+        and report.get("source_hash") == manifest["source_hash"]
+        and report.get("production_fingerprint_preserved") is True
+        and isinstance(nodes, list)
+        and len(nodes) == manifest["node_count"]
+    )
+
+
+def orchestrate_formal_candidate_update(args: argparse.Namespace) -> dict[str, Any]:
+    """Refresh, run mature service probes, and prepare one candidate; never activate."""
+
+    workdir = args.workdir.expanduser().resolve()
+    if not 0 < args.min_node_retention_ratio <= 1:
+        raise ConfigError("--min-node-retention-ratio must be in (0, 1].")
+    manifest, _source, source_runtime = prepare_source_snapshot(
+        source=args.source,
+        workdir=workdir,
+        refresh_adapter=args.refresh_adapter,
+        no_refresh=args.no_refresh_source,
+        source_snapshot=args.source_snapshot,
+        identity_key_path=args.source_identity_key,
+        refresh_timeout=args.refresh_timeout,
+        min_node_retention_ratio=args.min_node_retention_ratio,
+    )
+    manifest_value = source_runtime.get("manifest_path") or args.source_snapshot
+    if not manifest_value:
+        raise ConfigError("STOP_FORMAL_UPDATE_SNAPSHOT_PATH_MISSING")
+    manifest_path = Path(manifest_value).expanduser().resolve()
+    run_dir = workdir / f"formal-update-{manifest['source_snapshot_id']}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(run_dir, 0o700)
+    journal_path = run_dir / "formal-update-state.json"
+    journal = {
+        "schema_version": 1,
+        "skill_version": SKILL_VERSION,
+        "source_snapshot_id": manifest["source_snapshot_id"],
+        "source_hash": manifest["source_hash"],
+        "snapshot_node_count": manifest["node_count"],
+        "production_activation_allowed": False,
+        "updated_at": iso_now(),
+        "stages": {"SOURCE_SNAPSHOT_VERIFIED": "COMPLETE"},
+    }
+    if journal_path.is_file():
+        previous = load_json_object(journal_path)
+        if (
+            previous.get("source_snapshot_id") != manifest["source_snapshot_id"]
+            or previous.get("source_hash") != manifest["source_hash"]
+        ):
+            raise ConfigError("STOP_FORMAL_UPDATE_JOURNAL_BINDING_MISMATCH")
+        journal = previous
+        journal["updated_at"] = iso_now()
+    atomic_write_json(journal, journal_path, private_parent=True)
+
+    script_dir = Path(__file__).resolve().parent
+    rrc_path = run_dir / "regioncheck-full.json"
+    disney_path = run_dir / "disney-full-chain.json"
+    try:
+        if not _rrc_artifact_complete(rrc_path, manifest):
+            run_probe_command(
+                [
+                    sys.executable,
+                    str(script_dir / "regioncheck_service_probe.py"),
+                    "--skill-script",
+                    str(Path(__file__).resolve()),
+                    "--source-snapshot",
+                    str(manifest_path),
+                    "--output",
+                    str(rrc_path),
+                    "--host",
+                    args.host,
+                    "--core-path",
+                    args.core_path,
+                    "--timeout",
+                    str(args.rrc_timeout),
+                    "--node-interval",
+                    str(args.rrc_node_interval),
+                    "--auto-calibrate",
+                ]
+            )
+        if not _rrc_artifact_complete(rrc_path, manifest):
+            raise ConfigError("STOP_FORMAL_UPDATE_RRC_ARTIFACT_INCOMPLETE")
+        journal.setdefault("stages", {})["REGION_RESTRICTION_CHECK"] = "COMPLETE"
+        journal["updated_at"] = iso_now()
+        atomic_write_json(journal, journal_path, private_parent=True)
+
+        if not _disney_artifact_complete(disney_path, manifest):
+            run_probe_command(
+                [
+                    sys.executable,
+                    str(script_dir / "disney_service_probe.py"),
+                    "--skill-script",
+                    str(Path(__file__).resolve()),
+                    "--source-snapshot",
+                    str(manifest_path),
+                    "--output",
+                    str(disney_path),
+                    "--host",
+                    args.host,
+                    "--core-path",
+                    args.core_path,
+                ]
+            )
+        if not _disney_artifact_complete(disney_path, manifest):
+            raise ConfigError("STOP_FORMAL_UPDATE_DISNEY_ARTIFACT_INCOMPLETE")
+        journal.setdefault("stages", {})["DISNEY_FULL_CHAIN"] = "COMPLETE"
+        journal["updated_at"] = iso_now()
+        atomic_write_json(journal, journal_path, private_parent=True)
+
+        prepare_args = argparse.Namespace(
+            source_snapshot=manifest_path,
+            rrc_results=rrc_path,
+            previous_source_snapshot=args.previous_source_snapshot,
+            manual_results=args.manual_results,
+            previous_manual_results=args.previous_manual_results,
+            functional_results=[disney_path, *args.functional_results],
+            state_path=args.state_path,
+            source_identity_key=args.source_identity_key,
+            workdir=run_dir / "candidate",
+            output_name="openclash-candidate.yaml",
+            audit_name="openclash-candidate-audit.yaml",
+            journal=None,
+            upload=args.upload,
+            host=args.host,
+            remote_name=args.remote_name,
+            core_path=args.core_path,
+        )
+        result = prepare_candidate_from_frozen_artifacts(prepare_args)
+        journal.setdefault("stages", {})["CANDIDATE_PREPARATION"] = "COMPLETE"
+        journal["status"] = result["status"]
+        journal["updated_at"] = iso_now()
+        atomic_write_json(journal, journal_path, private_parent=True)
+        result["formal_update_journal_path"] = str(journal_path)
+        return result
+    except BaseException as exc:
+        journal["status"] = "FAILED_RECOVERABLE"
+        journal["last_error"] = re.sub(
+            r"(?i)\b(token|password|passwd|cookie|secret)=([^\s&]+)",
+            r"\1=REDACTED",
+            str(exc),
+        )[-2000:]
+        journal["updated_at"] = iso_now()
+        atomic_write_json(journal, journal_path, private_parent=True)
+        print(f"formal_update_journal_path={journal_path}", file=sys.stderr)
+        raise
+
+
 def prepare_candidate_from_frozen_artifacts(args: argparse.Namespace) -> dict[str, Any]:
     """Build and optionally sidecar-verify a candidate, never activate it."""
 
@@ -5090,8 +5281,35 @@ def build_parser() -> argparse.ArgumentParser:
     all_p.add_argument("--output-name", default="openclash-simple-final.yaml")
     all_p.add_argument("--audit-name", default="openclash-simple-final-audit.yaml")
     all_p.add_argument("--deploy", action="store_true")
+    all_p.add_argument("--previous-source-snapshot", type=Path)
+    all_p.add_argument("--previous-manual-results", type=Path)
+    all_p.add_argument("--rrc-timeout", type=int, default=45)
+    all_p.add_argument("--rrc-node-interval", type=float, default=3.0)
     add_probe_args(all_p)
     add_deploy_args(all_p)
+
+    update_p = sub.add_parser(
+        "update-candidate",
+        help=(
+            "Refresh one snapshot, run mature RRC and Disney probes, then prepare "
+            "one candidate without activation."
+        ),
+    )
+    update_p.add_argument(
+        "--workdir", type=Path, default=Path.home() / "Desktop/openclash-static-work"
+    )
+    add_source_args(update_p)
+    update_p.add_argument("--state-path", type=Path, default=DEFAULT_LKG_STATE_PATH)
+    update_p.add_argument("--manual-results", type=Path)
+    update_p.add_argument("--previous-source-snapshot", type=Path)
+    update_p.add_argument("--previous-manual-results", type=Path)
+    update_p.add_argument("--functional-results", type=Path, action="append", default=[])
+    update_p.add_argument("--upload", action="store_true")
+    update_p.add_argument("--host", default="root@192.168.10.1")
+    update_p.add_argument("--remote-name")
+    update_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
+    update_p.add_argument("--rrc-timeout", type=int, default=45)
+    update_p.add_argument("--rrc-node-interval", type=float, default=3.0)
 
     refresh_p = sub.add_parser(
         "refresh-source",
@@ -5343,6 +5561,25 @@ def main() -> int:
             return 0
 
         if args.command == "all":
+            if args.activate:
+                raise ConfigError(
+                    "STOP_LEGACY_ONE_SHOT_ACTIVATION_UNSUPPORTED: "
+                    "prepare and upload with update-candidate, then request explicit activate"
+                )
+            if args.deploy:
+                args.upload = True
+                result = orchestrate_formal_candidate_update(args)
+                for key in (
+                    "status",
+                    "source_snapshot_id",
+                    "candidate_path",
+                    "candidate_sha256",
+                    "remote_candidate_path",
+                    "formal_update_journal_path",
+                    "activated",
+                ):
+                    print(f"{key}={result[key]}")
+                return 0
             workdir = args.workdir.expanduser().resolve()
             if not 0 < args.min_node_retention_ratio <= 1:
                 raise ConfigError("--min-node-retention-ratio must be in (0, 1].")
@@ -5406,6 +5643,20 @@ def main() -> int:
                 )
                 print(f"remote_config={remote}")
                 print(f"activated={str(args.activate).lower()}")
+            return 0
+
+        if args.command == "update-candidate":
+            result = orchestrate_formal_candidate_update(args)
+            for key in (
+                "status",
+                "source_snapshot_id",
+                "candidate_path",
+                "candidate_sha256",
+                "remote_candidate_path",
+                "formal_update_journal_path",
+                "activated",
+            ):
+                print(f"{key}={result[key]}")
             return 0
 
         if args.command in {"refresh-source", "snapshot-source"}:

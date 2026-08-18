@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -61,6 +61,56 @@ def test_runtime_version_matches_authoritative_skill_frontmatter() -> None:
     match = re.search(r"^version:\s*(\S+)\s*$", SKILL.read_text(), re.MULTILINE)
     assert match is not None
     assert MODULE.SKILL_VERSION == match.group(1)
+
+
+def test_legacy_combined_activation_stops_before_refresh_or_router(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(MODULE, "runtime_self_check", lambda: {})
+    refresh = MagicMock(side_effect=AssertionError("refresh must not run"))
+    ssh = MagicMock(side_effect=AssertionError("router must not be contacted"))
+    monkeypatch.setattr(MODULE, "prepare_source_snapshot", refresh)
+    monkeypatch.setattr(MODULE, "ssh_command", ssh)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "all", "--deploy", "--activate"],
+    )
+
+    assert MODULE.main() == 1
+    assert "STOP_LEGACY_ONE_SHOT_ACTIVATION_UNSUPPORTED" in capsys.readouterr().err
+    refresh.assert_not_called()
+    ssh.assert_not_called()
+
+
+def test_all_deploy_routes_to_formal_probe_orchestration(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(MODULE, "runtime_self_check", lambda: {})
+    legacy_probe = MagicMock(
+        side_effect=AssertionError("legacy HTTP probe must not run")
+    )
+    formal = MagicMock(
+        return_value={
+            "status": "READY_FOR_EXPLICIT_ACTIVATE_APPROVAL",
+            "source_snapshot_id": "snapshot-test",
+            "candidate_path": "/local/candidate.yaml",
+            "candidate_sha256": "a" * 64,
+            "remote_candidate_path": "/remote/candidate",
+            "formal_update_journal_path": "/local/journal.json",
+            "activated": False,
+        }
+    )
+    monkeypatch.setattr(MODULE, "run_remote_service_probe", legacy_probe)
+    monkeypatch.setattr(MODULE, "orchestrate_formal_candidate_update", formal)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "all", "--deploy", "--no-activate"],
+    )
+
+    assert MODULE.main() == 0
+    assert "READY_FOR_EXPLICIT_ACTIVATE_APPROVAL" in capsys.readouterr().out
+    formal.assert_called_once()
+    legacy_probe.assert_not_called()
 
 
 def test_upload_candidate_never_reads_or_mutates_production(tmp_path: Path) -> None:
