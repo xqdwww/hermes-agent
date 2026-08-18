@@ -124,7 +124,9 @@ def test_private_snapshot_requires_0600_and_hash(tmp_path) -> None:
 
 def test_stopped_app_is_temporarily_started_refreshed_and_stopped(tmp_path, monkeypatch, capsys) -> None:
     request, app_home, _ = fixture(tmp_path)
-    token = app_home / ".source-refresh-adapter-token"
+    helper_home = ADAPTER.prepare_helper_home(app_home, tmp_path)
+    monkeypatch.setattr(ADAPTER, "prepare_helper_home", lambda *_args: helper_home)
+    token = helper_home / ".source-refresh-adapter-token"
     token.write_text("token")
     token.chmod(0o600)
     binary = tmp_path / "clash-verge"
@@ -143,7 +145,7 @@ def test_stopped_app_is_temporarily_started_refreshed_and_stopped(tmp_path, monk
         return process
 
     monkeypatch.setattr(ADAPTER.subprocess, "Popen", popen)
-    snapshot = app_home / ".source-refresh-snapshot-nonce.yaml"
+    snapshot = helper_home / ".source-refresh-snapshot-nonce.yaml"
     snapshot.write_text("proxies:\n- {name: new, type: ss}\n")
     snapshot.chmod(0o600)
     snapshot_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
@@ -203,6 +205,8 @@ def test_bridge_binary_is_discovered_from_hermes_home(tmp_path, monkeypatch) -> 
 
 def test_running_normal_app_starts_isolated_source_bridge(tmp_path, monkeypatch, capsys) -> None:
     request, app_home, _ = fixture(tmp_path)
+    helper_home = ADAPTER.prepare_helper_home(app_home, tmp_path)
+    monkeypatch.setattr(ADAPTER, "prepare_helper_home", lambda *_args: helper_home)
     binary = tmp_path / "clash-verge-source-refresh"
     binary.write_text("binary")
     binary.chmod(0o700)
@@ -212,7 +216,7 @@ def test_running_normal_app_starts_isolated_source_bridge(tmp_path, monkeypatch,
     monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=33332: True)
     process = FakeProcess()
     launch: dict[str, object] = {}
-    token = app_home / ".source-refresh-adapter-token"
+    token = helper_home / ".source-refresh-adapter-token"
 
     def popen(*args, **kwargs):
         launch.update(kwargs)
@@ -221,7 +225,7 @@ def test_running_normal_app_starts_isolated_source_bridge(tmp_path, monkeypatch,
         return process
 
     monkeypatch.setattr(ADAPTER.subprocess, "Popen", popen)
-    snapshot = app_home / ".source-refresh-snapshot-running.yaml"
+    snapshot = helper_home / ".source-refresh-snapshot-running.yaml"
     snapshot.write_text("proxies:\n- {name: current, type: ss}\n")
     snapshot.chmod(0o600)
     digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
@@ -251,73 +255,45 @@ def test_running_normal_app_starts_isolated_source_bridge(tmp_path, monkeypatch,
     assert result["outcome"] == "SUCCESS_NOT_MODIFIED"
     assert result["app_state_before"] == "RUNNING"
     assert result["temporary_app_started"] is True
+    assert launch["env"]["CLASH_VERGE_SOURCE_REFRESH_HOME"] == str(helper_home)
+    assert launch["env"]["CLASH_VERGE_SOURCE_REFRESH_HOME"] != str(app_home)
     assert launch["env"]["CLASH_VERGE_SOURCE_REFRESH_PORT"] == "33332"
     assert process.waited is True and process.terminated is False
 
 
-@pytest.mark.parametrize("download_path", ["CLASH_PROXY", "SYSTEM_PROXY"])
-def test_running_source_adapter_refreshes_without_restarting_app(
-    tmp_path, monkeypatch, capsys, download_path
-) -> None:
-    request, app_home, _ = fixture(tmp_path)
-    token = app_home / ".source-refresh-adapter-token"
-    token.write_text("token")
-    token.chmod(0o600)
-    snapshot = app_home / ".source-refresh-snapshot-running.yaml"
-    snapshot.write_text("proxies:\n- {name: current, type: ss}\n")
-    snapshot.chmod(0o600)
-    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+def test_existing_bridge_port_fails_closed_without_reuse(tmp_path, monkeypatch, capsys) -> None:
+    request, _app_home, _ = fixture(tmp_path)
     monkeypatch.setattr(ADAPTER, "port_open", lambda _port: True)
-    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=ADAPTER.PORT: True)
     monkeypatch.setattr(
         ADAPTER.subprocess,
         "Popen",
-        lambda *_a, **_k: pytest.fail("running source adapter must not be restarted"),
+        lambda *_a, **_k: pytest.fail("occupied bridge port must not be reused or restarted"),
     )
-
-    def post(_path, _token, body, timeout=10, port=ADAPTER.PORT):
-        return 200, {
-            "outcome": "SUCCESS_NOT_MODIFIED",
-            "request_nonce": body["request_nonce"],
-            "profile_identity": "masked",
-            "source_identity_verified": True,
-            "content_hash_before": "a" * 64,
-            "content_hash_after": "a" * 64,
-            "parsed_node_count_before": 1,
-            "parsed_node_count_after": 1,
-            "download_path_used": download_path,
-            "enhanced_snapshot_path": str(snapshot),
-            "enhanced_snapshot_hash": digest,
-            "enhanced_snapshot_node_count": 1,
-            "started_at": "start",
-            "completed_at": "end",
-        }
-
-    monkeypatch.setattr(ADAPTER, "post", post)
     result = run_main(monkeypatch, request, capsys)
-    assert result["outcome"] == "SUCCESS_NOT_MODIFIED"
-    assert result["temporary_app_started"] is False
-    assert result["download_path_used"] == download_path
+    assert result == {"app_state_before": "RUNNING", "outcome": "FAIL_ADAPTER_PORT_IN_USE"}
 
 
-def test_running_app_nonce_mismatch_does_not_overwrite_concurrent_source(tmp_path, monkeypatch, capsys) -> None:
-    request, app_home, remote = fixture(tmp_path)
-    before = remote.read_bytes()
-    token = app_home / ".source-refresh-adapter-token"
-    token.write_text("token")
-    token.chmod(0o600)
-    monkeypatch.setattr(ADAPTER, "port_open", lambda _port: True)
-    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=ADAPTER.PORT: True)
+def test_source_commit_rejects_concurrent_live_change(tmp_path) -> None:
+    _request, app_home, live_profile = fixture(tmp_path)
+    live_profiles = app_home / "profiles.yaml"
+    helper_home = ADAPTER.prepare_helper_home(app_home, tmp_path)
+    helper_profile = helper_home / "profiles" / live_profile.name
+    helper_profiles = helper_home / "profiles.yaml"
+    backups = {
+        live_profile: live_profile.read_bytes(),
+        live_profiles: live_profiles.read_bytes(),
+    }
+    live_profiles.write_bytes(b"concurrent-change")
 
-    def post(_path, _token, _body, timeout=10, port=ADAPTER.PORT):
-        remote.write_bytes(b"corrupt")
-        return 200, {"outcome": "SUCCESS_CHANGED", "request_nonce": "wrong"}
-
-    monkeypatch.setattr(ADAPTER, "post", post)
-    result = run_main(monkeypatch, request, capsys)
-    assert result["outcome"] == "FAIL_NONCE_MISMATCH"
-    assert remote.read_bytes() != before
-    assert remote.read_bytes() == b"corrupt"
+    with pytest.raises(ValueError, match="FAIL_CONCURRENT_SOURCE_CHANGE"):
+        ADAPTER.commit_source_files(
+            live_profile,
+            helper_profile,
+            live_profiles,
+            helper_profiles,
+            backups,
+        )
+    assert live_profiles.read_bytes() == b"concurrent-change"
 
 
 def test_receipt_never_contains_subscription_url_or_token(tmp_path, monkeypatch, capsys) -> None:
@@ -351,6 +327,22 @@ def test_built_app_local_source_end_to_end(tmp_path) -> None:
     with socket.socket() as check:
         check.settimeout(0.2)
         assert check.connect_ex(("127.0.0.1", ADAPTER.PORT)) != 0
+
+    class StockAppHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            return
+
+    stock_server: ThreadingHTTPServer | None = None
+    with socket.socket() as check:
+        check.settimeout(0.2)
+        if check.connect_ex(("127.0.0.1", ADAPTER.APP_PORT)) != 0:
+            stock_server = ThreadingHTTPServer(("127.0.0.1", ADAPTER.APP_PORT), StockAppHandler)
+            stock_thread = threading.Thread(target=stock_server.serve_forever, daemon=True)
+            stock_thread.start()
 
     new_source = b"""proxies:
 - name: new-node
@@ -407,7 +399,7 @@ rules: [MATCH,PROXY]
         receipt = json.loads(completed.stdout)
         assert receipt["outcome"] == "SUCCESS_CHANGED", receipt
         assert receipt["download_path_used"] == "DIRECT"
-        assert receipt["app_state_before"] == "STOPPED"
+        assert receipt["app_state_before"] == "RUNNING"
         assert receipt["temporary_app_started"] is True
         assert b"new-node" in remote.read_bytes()
         assert effective.read_bytes() == effective_before
@@ -424,3 +416,6 @@ rules: [MATCH,PROXY]
     finally:
         server.shutdown()
         server.server_close()
+        if stock_server is not None:
+            stock_server.shutdown()
+            stock_server.server_close()
