@@ -41,6 +41,7 @@ from agent.tool_dispatch_helpers import (
     _plan_tool_batch_segments,
     make_tool_result_message,
 )
+from agent.tool_guardrails import ToolGuardrailDecision
 from tools.terminal_tool import (
     get_active_env,
 )
@@ -52,6 +53,24 @@ from tools.tool_result_storage import (
 from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context_window
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_file_checkpoint(
+    agent,
+    function_name: str,
+    function_args: dict,
+    effective_task_id: str,
+) -> None:
+    """Checkpoint the same workspace path that the file tool will mutate."""
+    file_path = function_args.get("path", "")
+    if not file_path:
+        return
+
+    from tools.file_tools import _resolve_path_for_task
+
+    resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
+    work_dir = agent._checkpoint_mgr.get_working_dir_for_path(str(resolved_path))
+    agent._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
 
 
 def _safe_tool_callback_args(function_name: str, function_args: dict, tool_call_id: str = "") -> dict:
@@ -409,6 +428,33 @@ def _tool_search_scoped_names(agent) -> frozenset:
     except Exception:
         pass
     return names
+
+
+def _apply_tool_request_middleware_for_agent(
+    agent,
+    *,
+    function_name: str,
+    function_args: dict,
+    effective_task_id: str,
+    tool_call_id: str,
+) -> tuple[dict, list[dict[str, Any]]]:
+    try:
+        from hermes_cli.middleware import apply_tool_request_middleware
+
+        result = apply_tool_request_middleware(
+            function_name,
+            function_args,
+            task_id=effective_task_id or "",
+            session_id=getattr(agent, "session_id", "") or "",
+            tool_call_id=tool_call_id or "",
+            turn_id=getattr(agent, "_current_turn_id", "") or "",
+            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+        )
+        payload = result.payload if isinstance(result.payload, dict) else function_args
+        return payload, list(result.trace)
+    except Exception as exc:
+        logger.debug("tool_request middleware error: %s", exc)
+        return function_args, []
 
 
 @dataclass

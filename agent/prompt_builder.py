@@ -1976,6 +1976,10 @@ def _build_skills_system_prompt_inner(
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
+    # Both the snapshot and cold-scan paths feed the same provenance and
+    # collision-labeling pass below.
+    visible_entries: list[dict] = []
+    skill_entries: list[dict] = []
     skill_count = 0
     hidden_skill_count = 0
 
@@ -2225,7 +2229,10 @@ def _build_skills_system_prompt_inner(
                 if name in seen:
                     continue
                 seen.add(name)
-                index_lines.append(f"    - {name}")
+                if desc:
+                    index_lines.append(f"    - {name}: {desc}")
+                else:
+                    index_lines.append(f"    - {name}")
 
         result = (
             "## Skills (mandatory)\n"

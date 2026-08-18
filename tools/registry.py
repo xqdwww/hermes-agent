@@ -16,6 +16,7 @@ Import chain (circular-import safe):
 
 import ast
 import copy
+import functools
 import importlib
 import json
 import logging
@@ -28,6 +29,41 @@ from typing import Callable, Dict, List, Optional, Set
 from hermes_constants import hermes_home_key
 
 logger = logging.getLogger(__name__)
+
+# Cap exception-derived tool errors before they enter model context. Logs keep
+# a longer (still bounded) prefix for diagnostics.
+_MAX_TOOL_ERROR_CHARS = 2048
+_TOOL_ERROR_TRUNCATION_MARKER = "… [truncated]"
+_MAX_LOGGED_ERROR_CHARS = 8192
+
+
+def _bound_error_text(text: str) -> str:
+    if len(text) <= _MAX_TOOL_ERROR_CHARS:
+        return text
+    logger.debug(
+        "tool error body truncated for context (%d chars): %s",
+        len(text),
+        text[:_MAX_LOGGED_ERROR_CHARS],
+    )
+    return text[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
+
+
+def _bound_json_error_result(result: str) -> str:
+    """Trim an oversized JSON ``error`` field at the dispatch boundary."""
+    if len(result) <= _MAX_TOOL_ERROR_CHARS or '"error"' not in result:
+        return result
+    try:
+        payload = json.loads(result)
+    except ValueError:
+        return result
+    if not isinstance(payload, dict):
+        return result
+    error = payload.get("error")
+    if not isinstance(error, str) or len(error) <= _MAX_TOOL_ERROR_CHARS:
+        return result
+    payload["error"] = _bound_error_text(error)
+    return json.dumps(payload, ensure_ascii=False)
+
 
 SENSITIVE_PERSISTENCE_PROTOCOL = "sensitive_tool_persistence_v1"
 STANDARD_PRIVACY_POLICY = {"class": "standard"}

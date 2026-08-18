@@ -18,25 +18,24 @@ from agent.context_compressor import (
 from hermes_state import SessionDB
 
 
-def ContextCompressor(*args, **kwargs):
-    """Legacy context-compressor tests opt into replacement explicitly.
+class StubProviderError(Exception):
+    def __init__(self, message, *, status_code=None, response=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = response
+
+
+class ContextCompressor(_ContextCompressor):
+    """Legacy tests opt into replacement while retaining the full class API.
 
     Default shadow-only behavior is covered by test_compression_safety.py.
     """
-    kwargs.setdefault("allow_llm_replacement", True)
-    kwargs.setdefault("allow_tool_call_arg_truncation", True)
-    kwargs.setdefault("allow_multimodal_stripping", True)
-    return _ContextCompressor(*args, **kwargs)
 
-
-for _attr in (
-    "_with_summary_prefix",
-    "_strip_summary_prefix",
-    "_is_context_summary_content",
-    "_compute_threshold_tokens",
-    "_coerce_max_tokens",
-):
-    setattr(ContextCompressor, _attr, getattr(_ContextCompressor, _attr))
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_llm_replacement", True)
+        kwargs.setdefault("allow_tool_call_arg_truncation", True)
+        kwargs.setdefault("allow_multimodal_stripping", True)
+        super().__init__(*args, **kwargs)
 
 
 @pytest.fixture()
@@ -547,7 +546,15 @@ class TestCompress:
             {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}", "_db_persisted": True}
             for i in range(10)
         ]
-        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
+        # Exercise the assembled-message path with a successful summary. A
+        # summary failure intentionally preserves the original transcript
+        # under the local no-loss policy and therefore never reaches the
+        # terminal persistence-marker sweep.
+        with patch.object(
+            compressor,
+            "_generate_summary",
+            return_value="Validated compacted context",
+        ):
             result = compressor.compress(msgs)
         assert len(result) < len(msgs)
         assert all("_db_persisted" not in msg for msg in result)
@@ -566,7 +573,11 @@ class TestCompress:
         ]
         # Make the per-site helper leak the marker (dict.copy keeps it).
         with patch.object(_cc, "_fresh_compaction_message_copy", lambda m: m.copy()), \
-             patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
+             patch.object(
+                 compressor,
+                 "_generate_summary",
+                 return_value="Validated compacted context",
+             ):
             result = compressor.compress(msgs)
         assert len(result) < len(msgs)
         assert all("_db_persisted" not in msg for msg in result), (
@@ -1010,8 +1021,8 @@ class TestAuthFailureAborts:
         assert c._last_summary_fallback_used is False
         assert c._last_summary_dropped_count == 0
 
-    def test_402_quota_with_retry_uses_existing_fallback(self):
-        """A reset-window quota remains transient instead of aborting compression."""
+    def test_402_quota_with_retry_preserves_context(self):
+        """A reset-window quota remains transient without dropping context."""
         err = StubProviderError(
             "quota exceeded, please retry after the window resets",
             status_code=402,
@@ -1028,10 +1039,10 @@ class TestAuthFailureAborts:
         with patch("agent.context_compressor.call_llm", side_effect=err):
             result = c.compress(msgs, current_tokens=999999, force=True)
 
-        assert result != msgs
+        assert result == msgs
         assert c._last_summary_auth_failure is False
-        assert c._last_compress_aborted is False
-        assert c._last_summary_fallback_used is True
+        assert c._last_compress_aborted is True
+        assert c._last_summary_fallback_used is False
 
 
     def test_403_also_flags_auth_failure(self):
@@ -1659,6 +1670,8 @@ class TestAbortOnSummaryFailure:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "summary text."
 
+        c = self._make_compressor()
+        msgs = self._make_msgs()
 
         with patch("agent.context_compressor.call_llm", side_effect=Exception("boom")):
             c.compress(msgs)
@@ -1768,6 +1781,13 @@ class TestCompressWithClient:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "summary text."
 
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=2,
+                protect_last_n=2,
+            )
 
         msgs = [
             {"role": "system", "content": [{"type": "text", "text": "system prompt"}]},
@@ -2247,6 +2267,13 @@ class TestCompressWithClient:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "summary text."
 
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=1,
+                protect_last_n=2,
+            )
 
         # Head: [system, user]        → last head = user
         # Tail: [assistant, user, assistant] → first tail = assistant
@@ -3490,7 +3517,7 @@ class TestDoubleCompactionSummaryRole:
         """
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "summary of resumed turns"
+        mock_response.choices[0].message.content = "summary of resumed turns."
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(
@@ -3571,7 +3598,7 @@ class TestSummaryPromptBounding:
         too — a pathological rehydrated handoff must not blow up the prompt."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "updated summary"
+        mock_response.choices[0].message.content = "updated summary."
 
         with patch("agent.context_compressor.get_model_context_length", return_value=272000):
             c = ContextCompressor(model="test", quiet_mode=True)
@@ -4011,9 +4038,8 @@ class TestPreLlmFeasibilityCheck:
 
         assert compressor._fallback_compression_streak == 1
 
-    def test_real_fallback_still_feeds_streak(self, compressor):
-        """Negative control: a genuine summary-failure fallback boundary
-        (no feasibility skip) must keep incrementing the streak breaker."""
+    def test_real_summary_failure_aborts_without_feeding_fallback_streak(self, compressor):
+        """The local no-loss policy aborts a genuine summary failure."""
         compressor._ineffective_compression_count = 1
         msgs = self._make_messages(content="filler " * 3000)  # fat middle → no skip
 
@@ -4021,9 +4047,6 @@ class TestPreLlmFeasibilityCheck:
             compressor.compress(list(msgs), force=False)
 
         assert compressor._last_feasibility_skip is False
-        assert compressor._last_summary_fallback_used is True
-        compressor.record_completed_compaction(
-            used_fallback=compressor._last_summary_fallback_used,
-            feasibility_skip=compressor._last_feasibility_skip,
-        )
-        assert compressor._fallback_compression_streak == 1
+        assert compressor._last_summary_fallback_used is False
+        assert compressor._last_compress_aborted is True
+        assert compressor._fallback_compression_streak == 0

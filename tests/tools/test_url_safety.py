@@ -517,10 +517,10 @@ class TestIPv4MappedIPv6SSRF:
     Python's ipaddress module treats as distinct from the plain IPv4 address.
     """
 
-    @pytest.mark.parametrize("ip, url", [
-        ("::ffff:169.254.169.254", "http://aws-metadata.internal/"),
+    @pytest.mark.parametrize("ip_str", [
+        "::ffff:169.254.169.254",
         # in the CGNAT range, so a different block branch than link-local
-        ("::ffff:100.100.100.200", "http://aliyun-metadata.internal/"),
+        "::ffff:100.100.100.200",
     ])
     def test_ipv4_mapped_blocked_ips(self, ip_str):
         """IPv4-mapped IPv6 addresses that should be blocked."""

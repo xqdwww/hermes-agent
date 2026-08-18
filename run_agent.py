@@ -509,6 +509,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        requested_provider: str = None,
         runtime_capabilities: List[str] = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""

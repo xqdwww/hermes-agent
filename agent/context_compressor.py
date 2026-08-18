@@ -40,6 +40,7 @@ from agent.model_metadata import (
     estimate_tokens_rough,
 )
 from agent.redact import redact_sensitive_text
+from agent.turn_context import drop_stale_api_content
 from agent.compression_safety import (
     classify_text_block,
     compression_metadata_line,
@@ -47,6 +48,7 @@ from agent.compression_safety import (
     validate_compressed_text,
     write_raw_ref,
 )
+from tools.todo_tool import TODO_INJECTION_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -1641,11 +1643,33 @@ def _strip_historical_media_with_raw_ref(
     return (result if stripped_count else messages), stripped_count, raw_ref_missing
 
 
-def _reduced_tool_card(summary: str, original: str, *, reason: str) -> str | None:
+def _reduced_tool_card(
+    summary: str,
+    original: str,
+    *,
+    reason: str,
+    max_chars: int | None = None,
+) -> str | None:
     """Return a reducer card with a raw_ref, or None if raw persistence failed."""
     raw_ref = write_raw_ref(original, block_type="tool_output")
     if not raw_ref:
         return None
+    if max_chars is not None:
+        # Clarify summaries deliberately stay below the pruning floor so a
+        # later pass cannot repeatedly compact or deduplicate the user's
+        # answer.  Keep the raw reference in a compact form: the full generic
+        # compression metadata line is itself larger than that floor.
+        marker = f" [raw_ref={raw_ref}]"
+        body_limit = max_chars - len(marker)
+        if body_limit <= 0:
+            return None
+        if len(summary) > body_limit:
+            truncation_marker = "...[truncated]"
+            summary = (
+                summary[: max(0, body_limit - len(truncation_marker))].rstrip()
+                + truncation_marker
+            )
+        return f"{summary}{marker}"
     body = summary
     meta = compression_metadata_line(
         block_type="tool_output",
@@ -1657,6 +1681,28 @@ def _reduced_tool_card(summary: str, original: str, *, reason: str) -> str | Non
         raw_ref=raw_ref,
     )
     return f"{body}\n{meta}"
+
+
+def _image_part_label(part: Dict[str, Any]) -> str:
+    """Render an image content block as a compact, reusable label."""
+    url = ""
+    if isinstance(part.get("image_url"), dict):
+        url = str(part["image_url"].get("url") or "")
+    elif isinstance(part.get("image_url"), str):
+        url = part["image_url"]
+    elif isinstance(part.get("url"), str):
+        url = part["url"]
+    if url.startswith(("http://", "https://")):
+        return f"[image: {url}]"
+    return "[image]"
+
+
+def _str_arg(args: dict, key: str, default: str = "") -> str:
+    """Return a tool argument as a safe string."""
+    value = args.get(key, default)
+    if isinstance(value, str):
+        return value
+    return str(value) if value is not None else default
 
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
@@ -2964,18 +3010,23 @@ class ContextCompressor(ContextEngine):
         self.allow_tool_call_arg_truncation = bool(allow_tool_call_arg_truncation)
         self._last_context_reducer_diagnostics: Dict[str, Any] = {}
 
-        self.context_length = get_model_context_length(
-            model, base_url=base_url, api_key=api_key,
-            config_context_length=config_context_length,
-            provider=provider,
-        )
-        # Small-context threshold floor: models under 512K trigger at >=75%
-        # so compaction doesn't fire with half the window still free (the
-        # incompressible floor makes 50%-triggered compaction thrash on
-        # 128K-262K models). Raise-only; must run AFTER context_length is
-        # resolved and BEFORE threshold_tokens is derived. The pre-floor
-        # value is kept so update_model() can re-derive for a new window
-        # (switching small -> large must drop back to the configured value).
+        # Micro-compaction is opt-in because each pass rewrites already-sent
+        # history and therefore breaks the prompt-cache prefix.
+        self._micro_compact_enabled: bool = False
+        self._micro_compact_cursor: int = 0
+        self._micro_compact_rolling_summary: str = ""
+        self._micro_compact_consecutive_failures: int = 0
+        self._micro_compact_last_failure_cursor: int = -1
+        self._micro_compact_defrag_threshold_tokens: int = 2000
+        self._flush_scan_cursor_invalidated: bool = False
+        self._micro_compact_passes: int = 0
+        self._micro_compact_tokens_saved_total: int = 0
+        self._micro_compact_every_n_turns: int = 1
+        self._micro_compact_turns_since_pass: int = 0
+
+        # Context-length resolution is deliberately deferred to first access;
+        # probing /models synchronously here can block AIAgent construction.
+        self._config_context_length = config_context_length
         self._configured_threshold_percent = self.threshold_percent
         self._resolved_context_length: int | None = None
         self._threshold_tokens: int | None = None
@@ -3073,6 +3124,9 @@ class ContextCompressor(ContextEngine):
         # succeeded.  Silent recovery would hide the broken config.
         self._last_aux_model_failure_error: Optional[str] = None
         self._last_aux_model_failure_model: Optional[str] = None
+        self._last_compression_telemetry: Optional[Dict[str, Any]] = None
+        self._active_compression_telemetry: Optional[Dict[str, Any]] = None
+        self._compression_telemetry_seed: Optional[Dict[str, Any]] = None
         self._last_shadow_summary_preview: Optional[str] = None
         self._last_context_replacement_applied: bool = False
         self._reset_context_reducer_diagnostics()
@@ -3612,12 +3666,12 @@ class ContextCompressor(ContextEngine):
                 if not self.allow_multimodal_stripping:
                     if _content_has_images(content):
                         self._record_context_bypass("multimodal_no_raw_ref_bypass")
-                    continue
+                    return False
                 original = json.dumps(content, ensure_ascii=False, default=str)
                 raw_ref = write_raw_ref(original, block_type="multimodal_tool_output")
                 if not raw_ref:
                     self._record_context_bypass("multimodal_raw_ref_missing_bypass")
-                    continue
+                    return False
                 stripped = _strip_image_parts_from_parts(content)
                 if stripped is not None:
                     compressed_text = json.dumps(stripped, ensure_ascii=False, default=str)
@@ -3636,21 +3690,21 @@ class ContextCompressor(ContextEngine):
                             ),
                         },
                     ]
-                    result[i] = {**msg, "content": stripped}
+                    result[idx] = {**msg, "content": stripped}
                     pruned += 1
                     return True
                 return False
             if isinstance(content, dict) and content.get("_multimodal"):
                 if not self.allow_multimodal_stripping:
                     self._record_context_bypass("multimodal_no_raw_ref_bypass")
-                    continue
+                    return False
                 original = json.dumps(content, ensure_ascii=False, default=str)
                 raw_ref = write_raw_ref(original, block_type="multimodal_tool_output")
                 if not raw_ref:
                     self._record_context_bypass("multimodal_raw_ref_missing_bypass")
-                    continue
+                    return False
                 summary = f"[screenshot removed] {(content.get('text_summary') or '')[:200]}"
-                result[i] = {**msg, "content": summary + "\n" + compression_metadata_line(block_type="multimodal_tool_output", original=original, compressed=summary, compression_applied=True, fallback_used=False, reason="raw_ref_backed_multimodal_tool_output_stripping", raw_ref=raw_ref)}
+                result[idx] = {**msg, "content": summary + "\n" + compression_metadata_line(block_type="multimodal_tool_output", original=original, compressed=summary, compression_applied=True, fallback_used=False, reason="raw_ref_backed_multimodal_tool_output_stripping", raw_ref=raw_ref)}
                 pruned += 1
                 return True
             if not isinstance(content, str):
@@ -3658,19 +3712,37 @@ class ContextCompressor(ContextEngine):
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
                 return False
             if content.startswith("[Duplicate tool output"):
-                continue
-            # Only prune if the content is substantial (>200 chars)
-            if len(content) > 200:
-                call_id = msg.get("tool_call_id", "")
-                tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
-                replacement = _reduced_tool_card(
-                    _summarize_tool_result(tool_name, tool_args, content), content, reason="old_tool_output"
-                )
-                if replacement:
-                    result[i] = {**msg, "content": replacement}
-                    self._last_context_reducer_diagnostics["raw_ref_reducer_applied"] = True
-                    self._last_context_reducer_diagnostics["safe_for_replacement"] = True
-                    pruned += 1
+                return False
+            # Already replaced by a prior prune/pressure pass (1-line summary).
+            if content.startswith("[") and " chars)" in content and len(content) < 400:
+                return False
+            if content.startswith("[screenshot removed"):
+                return False
+            if len(content) <= min_prune_chars:
+                return False
+            call_id = msg.get("tool_call_id", "")
+            tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
+            if spare_protected_skills and tool_name == "skill_view" and protected_skills:
+                try:
+                    _args = json.loads(tool_args) if tool_args else {}
+                except (json.JSONDecodeError, TypeError):
+                    _args = {}
+                _skill = _args.get("name", "") if isinstance(_args, dict) else ""
+                if isinstance(_skill, str) and _skill.lower() in protected_skills:
+                    return False
+            replacement = _reduced_tool_card(
+                _summarize_tool_result(tool_name, tool_args, content),
+                content,
+                reason="old_tool_output",
+                max_chars=_PRUNE_MIN_CHARS if tool_name == "clarify" else None,
+            )
+            if not replacement:
+                return False
+            result[idx] = {**msg, "content": replacement}
+            self._last_context_reducer_diagnostics["raw_ref_reducer_applied"] = True
+            self._last_context_reducer_diagnostics["safe_for_replacement"] = True
+            pruned += 1
+            return True
 
         def _truncate_tool_call_args_at(idx: int) -> bool:
             """Shrink large tool_call argument payloads at ``idx``."""
@@ -7387,8 +7459,49 @@ This compaction should PRIORITISE preserving all information related to the focu
             )
 
         # Phase 3: Generate structured summary / shadow preview.
-        summary_focus_topic = focus_topic or self._derive_auto_focus_topic(messages)
-        summary = self._generate_summary(turns_to_summarize, focus_topic=summary_focus_topic)
+        # Skip an expensive auxiliary-model call when a prior real-usage
+        # ineffectiveness strike shows that this tiny middle window cannot
+        # produce meaningful savings. Manual /compress still forces the call.
+        feasibility_skip = False
+        if not force and self._ineffective_compression_count >= 1:
+            middle_tokens = telemetry.get("middle_window_tokens")
+            if middle_tokens is None:
+                middle_tokens = estimate_messages_tokens_rough(turns_to_summarize)
+            if middle_tokens < int(
+                self.threshold_tokens * _FEASIBILITY_SKIP_MIDDLE_FRACTION
+            ):
+                feasibility_skip = True
+                self._last_feasibility_skip = True
+                self._prellm_skip_count += 1
+                telemetry["prellm_skip_count"] = self._prellm_skip_count
+                if not self.quiet_mode:
+                    logger.warning(
+                        "Compression: middle section (%d tokens at indices "
+                        "%d-%d) is below %.0f%% of threshold (%d tokens) — "
+                        "skipping LLM summarization, proceeding with "
+                        "deterministic message dropping. prellm_skip_count=%d",
+                        middle_tokens,
+                        compress_start,
+                        compress_end,
+                        _FEASIBILITY_SKIP_MIDDLE_FRACTION * 100,
+                        self.threshold_tokens,
+                        self._prellm_skip_count,
+                    )
+
+        if feasibility_skip:
+            summary = None
+        else:
+            summary_focus_topic = focus_topic or self._derive_auto_focus_topic(messages)
+            try:
+                summary = self._generate_summary(
+                    turns_to_summarize,
+                    focus_topic=summary_focus_topic,
+                    memory_context=memory_context,
+                )
+            except AuxiliaryExplicitCancellation:
+                self._previous_summary = _previous_summary_before_scan
+                self._summary_has_user_turn = _summary_has_user_turn_before_scan
+                raise
         diag = self._last_context_reducer_diagnostics
         if summary:
             self._last_shadow_summary_preview = summary

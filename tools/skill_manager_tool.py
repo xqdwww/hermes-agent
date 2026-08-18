@@ -34,6 +34,7 @@ Directory layout for user skills:
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -1155,7 +1156,7 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     backup_commit = _git_backup_skills(_containing_skills_root(existing["path"]), f"edit {name}")
-    _atomic_write_text(skill_md, content)
+    atomic_write_text(skill_md, content)
 
     # Security scan — roll back on block
     scan_error = _security_scan_skill(existing["path"])
@@ -1182,6 +1183,11 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     }
     if backup_commit:
         result["backup_commit"] = backup_commit
+    org_note = _maybe_auto_propose_org_edit(name, existing["path"])
+    if org_note:
+        result["org_sharing"] = org_note
+        result["message"] = f"{result['message']} {org_note}"
+    _add_description_prompt_preview(result, content)
     return result
 
 
@@ -1282,7 +1288,7 @@ def _patch_skill(
 
     original_content = content  # for rollback
     backup_commit = _git_backup_skills(_containing_skills_root(skill_dir), f"patch {name}")
-    _atomic_write_text(target, new_content)
+    atomic_write_text(target, new_content)
 
     # Security scan — roll back on block
     scan_error = _security_scan_skill(skill_dir)

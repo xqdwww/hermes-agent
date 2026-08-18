@@ -2943,77 +2943,150 @@ def compress_context(
             except Exception:
                 pass
 
-    # Notify external memory provider before compression discards context
-    if agent._memory_manager:
-        try:
-            agent._memory_manager.on_pre_compress(messages)
-        except Exception:
-            pass
-
-    try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        try:
-            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
-        except BaseException:
-            _release_lock()
-            raise
-    except BaseException:
-        # ANY exception during compress() must release the lock so the
-        # session isn't permanently blocked from future compression.
-        _release_lock()
-        raise
-
-    # Capture boundary quality before session-rotation callbacks run. Built-in
-    # and plugin lifecycle hooks may reset per-session compressor fields while
-    # rebinding to the child id; the completed attempt's verdict must survive
-    # that rebind and be recorded only after the full boundary commits.
-    _compression_made_progress = bool(
-        getattr(agent.context_compressor, "_last_compression_made_progress", False)
-    )
-    _compression_used_fallback = bool(
-        getattr(agent.context_compressor, "_last_summary_fallback_used", False)
-    )
-
-    # If compression aborted (aux LLM failed to produce a usable summary)
-    # the compressor returns the input messages unchanged.  Surface the
-    # error to the user, skip the session-rotation work entirely (no
-    # session has logically ended), and let auto-compress callers detect
-    # the no-op via len(returned) == len(input).
-    if getattr(agent.context_compressor, "_last_compress_aborted", False):
-
-        try:
-            _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
-            if getattr(agent, "_last_compression_summary_warning", None) != _err:
-                agent._last_compression_summary_warning = _err
-                agent._emit_warning(
-                    f"⚠ Compression aborted: {_err}. "
-                    "No messages were dropped — conversation continues unchanged. "
-                    "Run /compress to retry, or /new to start a fresh session."
+        compress_fn = agent.context_compressor.compress
+        compress_kwargs = _supported_compression_kwargs(
+            compress_fn,
+            current_tokens=approx_tokens,
+            focus_topic=focus_topic,
+            force=force,
+            memory_context=memory_context,
+        )
+        if memory_context.strip() and "memory_context" not in compress_kwargs:
+            engine_name = getattr(
+                agent.context_compressor,
+                "name",
+                type(agent.context_compressor).__name__,
+            )
+            if (
+                getattr(agent, "_last_memory_context_unsupported_engine", None)
+                != engine_name
+            ):
+                agent._last_memory_context_unsupported_engine = engine_name
+                logger.warning(
+                    "context engine %s does not accept memory_context; continuing "
+                    "without provider-supplied summary context",
+                    engine_name,
                 )
 
-    if getattr(agent.context_compressor, "_last_context_replacement_applied", True) is False:
-        _diag = getattr(agent.context_compressor, "_last_context_reducer_diagnostics", {}) or {}
-        _effective_messages = compressed if _diag.get("raw_ref_reducer_applied") else messages
-        _existing_sp = getattr(agent, "_cached_system_prompt", None)
-        if not _existing_sp:
-            _existing_sp = agent._build_system_prompt(system_message)
+        messages_before_compression = copy.deepcopy(messages)
+        _activity_heartbeat = _CompressionActivityHeartbeat(
+            agent, commit_fence=commit_fence
+        ).start()
+        # Publish forward progress to the commit fence while the summary LLM
+        # call streams. Async hosts (gateway session hygiene) poll
+        # ``commit_fence.seconds_since_progress()`` to extend their deadline
+        # while tokens are moving — so a SLOW summary model is only killed
+        # when it is actually silent, not merely thorough. The hook is
+        # thread-local and the compress call is synchronous on this thread,
+        # so it cannot leak into unrelated auxiliary calls.
+        #
+        # Callers that pass no commit_fence install a no-op progress hook
+        # here.  AIAgent._compress_context injects an owned fence for
+        # fenceless callers so the host-level progress-aware wait can
+        # extend on streamed tokens; gateway hygiene already passes its
+        # own fence.  An ACTIVE hook (even a no-op) is what switches the
+        # summary call onto the streamed path — giving every compression
+        # path the same two guarantees: the configured timeout acts on
+        # inactivity (slow models finish), and a byte-trickling provider
+        # that keeps the connection alive forever is cut off at the
+        # streamed total ceiling (see _aux_stream_total_ceiling) instead of
+        # outliving the SDK's inactivity timeout indefinitely.
+        from agent.auxiliary_client import (
+            aux_interrupt_protection,
+            aux_progress_hook,
+        )
+        _progress_hook = (
+            commit_fence.touch_progress if commit_fence is not None
+            else (lambda: None)
+        )
+        # F4 state-ordering (#76354): a LATE successful summary must not undo
+        # the timeout cooldown the host recorded. Install a cancellation
+        # check the compressor consults BEFORE clearing the failure cooldown;
+        # removed in the finally below so it cannot leak into later attempts
+        # (e.g. a manual /compress force-clear).
+        if commit_fence is not None:
+            try:
+                agent.context_compressor._compression_cancelled_check = (
+                    lambda: commit_fence.is_cancelled
+                )
+            except Exception:
+                pass
+        # Incoming-message interrupts and active-turn redirects must not tear an
+        # atomic summary in half (#23975). Explicit stop surfaces set a separate
+        # Event atomically; never infer cause from the racy message fields.
+        _hard_cancel_event = getattr(agent, "_hard_interrupt_requested", None)
         try:
-            agent._emit_warning("ℹ Context compression is shadow-only; no messages were replaced.")
-        except Exception:
-            pass
+            # F6: never start expensive summary work for an already-cancelled
+            # fence (a stale queued job admitted after host departure).
+            if commit_fence is not None and commit_fence.is_cancelled:
+                logger.info(
+                    "Compression cancelled before summary dispatch "
+                    "(session=%s) — skipping summary work.",
+                    agent.session_id or "none",
+                )
+                compressed = messages
+            else:
+                with aux_progress_hook(_progress_hook), aux_interrupt_protection(
+                    cancel_event=_hard_cancel_event
+                ):
+                    compressed = compress_fn(messages, **compress_kwargs)
+                    # Freeze a hard stop that arrived after the final provider
+                    # attempt unwound but before this transaction can rotate
+                    # session state.
+                    if (
+                        _hard_cancel_event is not None
+                        and _hard_cancel_event.is_set()
+                    ):
+                        raise AuxiliaryExplicitCancellation()
+        finally:
+            if commit_fence is not None:
+                try:
+                    agent.context_compressor._compression_cancelled_check = None
+                except Exception:
+                    pass
+    except AuxiliaryExplicitCancellation:
+        try:
+            _restore_compressor_attempt_state(
+                agent.context_compressor,
+                _compressor_attempt_snapshot,
+                durable_cooldown_authoritative=_durable_cooldown_authoritative,
+                durable_cooldown_state=_durable_cooldown_state,
+            )
+        except BaseException as _rollback_exc:
+            # Compensation failure must surface, but it must not strand the
+            # session lease or retain an in-memory transcript mutation.
+            if (
+                messages_before_compression is not None
+                and messages != messages_before_compression
+            ):
+                messages[:] = copy.deepcopy(messages_before_compression)
+            if _activity_heartbeat is not None:
+                _activity_heartbeat.stop("context compression rollback failed")
+                _activity_heartbeat = None
+            _release_lock()
+            _emit_compression_attempt_telemetry(
+                agent,
+                started_at=_attempt_started_at,
+                commit_status="aborted",
+                split_status="aborted",
+                failure_class=f"rollback:{type(_rollback_exc).__name__}",
+            )
+            raise
+        if (
+            messages_before_compression is not None
+            and messages != messages_before_compression
+        ):
+            messages[:] = copy.deepcopy(messages_before_compression)
+        if _activity_heartbeat is not None:
+            _activity_heartbeat.stop("context compression cancelled")
+            _activity_heartbeat = None
         _release_lock()
-        return _effective_messages, _existing_sp
-
-    # A compressor that returns the exact input object made no structural
-    # progress. Do not rotate/rewrite the session or arm post-compression
-    # deferral in that case; its own anti-thrash counter records the no-op.
-    if compressed is messages:
-        logger.info(
-            "Compression made no progress (session=%s) — skipping boundary rewrite.",
-            agent.session_id or "none",
+        _emit_compression_attempt_telemetry(
+            agent,
+            started_at=_attempt_started_at,
+            commit_status="aborted",
+            split_status="aborted",
+            failure_class="explicit_interrupt",
         )
         _existing_sp = getattr(agent, "_cached_system_prompt", None)
         if not _existing_sp:
@@ -3086,6 +3159,19 @@ def compress_context(
                 return messages, _existing_sp
             finally:
                 _release_lock()
+
+        if getattr(agent.context_compressor, "_last_context_replacement_applied", True) is False:
+            _diag = getattr(agent.context_compressor, "_last_context_reducer_diagnostics", {}) or {}
+            _effective_messages = compressed if _diag.get("raw_ref_reducer_applied") else messages
+            _existing_sp = getattr(agent, "_cached_system_prompt", None)
+            if not _existing_sp:
+                _existing_sp = agent._build_system_prompt(system_message)
+            try:
+                agent._emit_warning("ℹ Context compression is shadow-only; no messages were replaced.")
+            except Exception:
+                pass
+            _release_lock()
+            return _effective_messages, _existing_sp
 
         # Compare against the pre-dispatch semantic state, not object identity:
         # legacy/plugin engines may return an equal copy for a no-op, or mutate

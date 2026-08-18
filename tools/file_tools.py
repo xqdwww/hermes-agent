@@ -1589,6 +1589,27 @@ def clear_file_ops_cache(task_id: str = None):
             _file_ops_cache.clear()
 
 
+def _special_file_kind(path) -> str | None:
+    """Return a human name for non-regular host file types that block reads."""
+    import stat as _stat
+
+    try:
+        mode = os.stat(os.fspath(path)).st_mode
+    except OSError:
+        return None
+    if _stat.S_ISREG(mode) or _stat.S_ISDIR(mode):
+        return None
+    if _stat.S_ISFIFO(mode):
+        return "a FIFO (named pipe)"
+    if _stat.S_ISSOCK(mode):
+        return "a socket"
+    if _stat.S_ISCHR(mode):
+        return "a character device"
+    if _stat.S_ISBLK(mode):
+        return "a block device"
+    return "a special (non-regular) file"
+
+
 def read_file_tool(path: str, offset: int = 1, limit: int = 200, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:

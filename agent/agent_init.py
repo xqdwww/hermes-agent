@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
@@ -53,6 +53,9 @@ from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import get_hermes_home
 from utils import base_url_host_matches, is_truthy_value
+
+if TYPE_CHECKING:
+    from agent.rate_limit_tracker import RateLimitState
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
 # capture our warnings.  (run_agent.py also does
@@ -566,6 +569,7 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    requested_provider: str = None,
     runtime_capabilities: List[str] = None,
 ):
     """
@@ -2125,6 +2129,23 @@ def init_agent(
     compression_abort_on_summary_failure = str(
         _compression_cfg.get("abort_on_summary_failure", False)
     ).lower() in {"true", "1", "yes"}
+    _raw_model_thresholds = _compression_cfg.get("model_thresholds", {})
+    if isinstance(_raw_model_thresholds, dict):
+        compression_model_thresholds = {
+            str(key): float(value)
+            for key, value in _raw_model_thresholds.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+    else:
+        compression_model_thresholds = {}
+    compression_threshold_tokens = _compression_cfg.get("threshold_tokens")
+    if compression_threshold_tokens is not None:
+        try:
+            compression_threshold_tokens = int(compression_threshold_tokens)
+            if compression_threshold_tokens <= 0:
+                compression_threshold_tokens = None
+        except (TypeError, ValueError):
+            compression_threshold_tokens = None
     compression_shadow_only = str(
         _compression_cfg.get("shadow_only", True)
     ).lower() in {"true", "1", "yes"}

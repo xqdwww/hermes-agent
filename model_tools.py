@@ -1574,7 +1574,10 @@ def handle_function_call(
         try:
             from hermes_cli.plugins import has_hook, invoke_hook
             if not is_sensitive and has_hook("transform_tool_result"):
-                status, error_type, error_message = _tool_result_observer_fields(result)
+                status, error_type, error_message = _tool_result_observer_fields(
+                    function_name,
+                    result,
+                )
                 hook_results = invoke_hook(
                     "transform_tool_result",
                     tool_name=function_name,

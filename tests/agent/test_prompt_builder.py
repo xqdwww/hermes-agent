@@ -320,8 +320,7 @@ class TestBuildSkillsSystemPrompt:
         )
         result = build_skills_system_prompt()
         assert "python-debug" in result
-        # Descriptions are no longer included in the index — only skill names
-        assert "Debug Python scripts" not in result
+        assert "Debug Python scripts" in result
         assert "available_skills" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
@@ -334,6 +333,24 @@ class TestBuildSkillsSystemPrompt:
         result = build_skills_system_prompt()
         # "search" should appear only once per category
         assert result.count("- search") == 1
+
+    def test_compact_categories_demoted_to_names_only(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for cat, name in (("social-media", "tweet-stuff"), ("github", "pr-review")):
+            d = tmp_path / "skills" / cat / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Does {name} things\n---\n"
+            )
+
+        result = build_skills_system_prompt(
+            compact_categories=frozenset({"social-media"})
+        )
+        assert "pr-review" in result and "Does pr-review things" in result
+        assert "tweet-stuff" in result
+        assert "Does tweet-stuff things" not in result
+        assert "social-media [names only]" in result
+        assert "skill_view" in result
 
 
     def test_compact_categories_demote_nested_and_miss_cache_separately(
@@ -356,6 +373,11 @@ class TestBuildSkillsSystemPrompt:
         full = build_skills_system_prompt()
         assert "Write threads" in full
 
+    def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
+        """Skills with platforms: [macos] should not appear on Linux."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "apple"
+        skills_dir.mkdir(parents=True)
 
         # macOS-only skill
         mac_skill = skills_dir / "imessage"
@@ -397,8 +419,7 @@ class TestBuildSkillsSystemPrompt:
             result = build_skills_system_prompt()
 
         assert "imessage" in result
-        # Descriptions are no longer included in the index — only skill names
-        assert "Send iMessages" not in result
+        assert "Send iMessages" in result
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
         """Skills in the user's disabled list should not appear in the system prompt."""
@@ -1094,5 +1115,3 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-

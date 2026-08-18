@@ -91,6 +91,8 @@ from agent.retry_utils import (
 )
 from agent.repetition_guard import is_repetition_dominated
 from agent.trajectory import has_incomplete_scratchpad
+from agent.memory_manager import build_memory_context_block
+from agent import empty_response_guard as _empty_guard
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
 from agent.turn_finalizer import finalize_turn
@@ -187,6 +189,90 @@ _HANDOFF_SKIP_FINAL_RESPONSE = (
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
+
+
+def _should_rearm_compression_budget(
+    compression_attempts: int,
+    *,
+    completed_compaction_pending: bool,
+    prompt_tokens: int,
+    threshold_tokens: int,
+) -> bool:
+    return bool(
+        compression_attempts
+        and completed_compaction_pending
+        and threshold_tokens > 0
+        and 0 < prompt_tokens < threshold_tokens
+    )
+
+
+_LOCAL_PROCESSING_MODULES = frozenset({
+    "agent_runtime_helpers",
+    "message_content",
+    "message_sanitization",
+    "chat_completion_helpers",
+})
+_API_CALL_MODULES = frozenset({"chat_completion_helpers"})
+
+
+def _moa_client_consumes_prepared_request(client: Any) -> bool:
+    completions = getattr(getattr(client, "chat", None), "completions", None)
+    return callable(getattr(completions, "prepare", None))
+
+
+def _join_truncated_parts(parts: List[str]) -> str:
+    """Join continuation fragments without gluing adjacent words."""
+    joined = ""
+    for part in parts:
+        if joined and not joined[-1].isspace() and part and not part[0].isspace():
+            joined += "\n"
+        joined += part
+    return joined
+
+
+def _moa_reference_metrics_for_hook(agent: Any) -> Any:
+    getter = getattr(getattr(agent, "client", None), "last_reference_metrics", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
+def _apply_active_turn_redirect(
+    agent: Any,
+    messages: List[Dict[str, Any]],
+    text: str,
+) -> None:
+    """Append a provider-safe visible checkpoint plus the user's correction."""
+    visible = agent._strip_think_blocks(
+        getattr(agent, "_current_streamed_assistant_text", "") or ""
+    ).strip()
+    checkpoint_parts = [_INTERRUPT_SCAFFOLD_MARKER]
+    if visible:
+        checkpoint_parts.extend(["Visible response before the interruption:", visible])
+    correction = (
+        "[Context from the interrupted assistant response]\n"
+        + "\n\n".join(checkpoint_parts)
+        + f"\n\n{text}"
+    )
+    if messages and messages[-1].get("role") == "assistant":
+        append_message(
+            messages,
+            {"role": "user", "content": text, "api_content": correction},
+        )
+    else:
+        placeholder: Dict[str, Any] = {"role": "assistant", "content": visible or ""}
+        if not visible:
+            placeholder["display_kind"] = "hidden"
+        append_message(messages, placeholder)
+        append_message(
+            messages,
+            {"role": "user", "content": text, "api_content": correction},
+        )
+    agent._current_streamed_assistant_text = ""
+    agent._stream_needs_break = True
 
 
 def _execute_guided_predispatch_tool(
@@ -286,6 +372,34 @@ def _run_guided_book_predispatch(
     delivery = read_agy_delivery(messages, {agy_call_id})
     record_agy_delivery(agent, delivery)
     return "attempted", delivery
+
+
+def _is_copilot_provider(agent: Any) -> bool:
+    """Recognize every supported GitHub Copilot provider alias."""
+    try:
+        return bool(agent._is_copilot_provider())
+    except Exception:
+        return (getattr(agent, "provider", "") or "").strip().lower() in {
+            "copilot",
+            "github-copilot",
+            "github",
+        }
+
+
+def _is_stale_copilot_credential_error(
+    status_code: Optional[int],
+    error_message: str,
+) -> bool:
+    """Detect a Copilot 400 that is really a stale exchanged credential."""
+    lowered = (error_message or "").lower()
+    if status_code != 400 and "error code: 400" not in lowered:
+        return False
+    return (
+        "model_not_available_for_integrator" in lowered
+        or "not available for integrator" in lowered
+        or "model_not_supported" in lowered
+        or "the requested model is not supported" in lowered
+    )
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -1847,7 +1961,6 @@ def run_conversation(
             messages.append({"role": "assistant", "content": final_response})
             agent._safe_print(f"\n{final_response}\n")
             agent._fire_stream_delta(final_response)
-            from agent.turn_finalizer import finalize_turn
             return finalize_turn(
                 agent,
                 final_response=final_response,
@@ -2388,6 +2501,12 @@ def run_conversation(
             pass
         except Exception as _diag_exc:
             logger.warning("Payload diagnostics failed (non-fatal): %s", _diag_exc)
+
+        # The retry loop redecorates prompt caching for the active provider
+        # and optionally carries a prepared MoA request. Initialize both for
+        # ordinary providers; MoA-specific preparation may replace them.
+        _moa_prepared_request = None
+        tools_for_api = agent.tools
 
         # Calculate approximate request size for logging and pressure checks.
         # estimate_messages_tokens_rough(api_messages) includes the system
