@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.5.0
+version: 2.5.1
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,11 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.5.0 adds resumable candidate preparation from one
+for this Skill. Version 2.5.1 lets the authenticated source-only helper run
+beside a normal Clash Verge 2.5.2 process on a separate loopback port, discovers
+the helper from `$HERMES_HOME/bin/clash-verge-source-refresh`, rejects port
+collisions, and fails closed when the live source changes during download.
+It never replaces, restarts, or reconfigures the installed app. Version 2.5.0 adds resumable candidate preparation from one
 verified frozen snapshot and one complete RegionRestrictionCheck artifact. It
 rejects snapshot manifests mistakenly passed as `--source`, audits source
 coverage by exact stable IDs, adapts RRC output without a hand-written wrapper,
@@ -306,10 +310,10 @@ python3 scripts/clashverge_to_openclash.py transform \
 
 1. Run `REFRESH_SOURCE → VERIFY_SOURCE_REFRESH → FREEZE_SOURCE_SNAPSHOT` before discovery, probing, generation, or router access. A failure must report zero router contacts and zero OpenClash changes.
 2. Bind only the active remote profile that produces the effective `clash-verge.yaml`. Never update all profiles, accept a URL from the caller, or manually edit subscription metadata, caches, URLs, or credentials; only Clash Verge's safe-save path may update the bound source and its metadata.
-3. Clash Verge Rev 2.5.1 officially exposes refresh only as the internal Tauri command `update_profile(index, option)`; upstream has no external refresh CLI or localhost refresh route. This project adds a custom authenticated loopback bridge and an explicit source-only internal path that reuse the upstream download, parse, fallback, and safe-save semantics. Do not describe the bridge as an official JSON adapter, and do not substitute a fixed sleep or blind GUI clicks.
+3. Clash Verge Rev 2.5.2 officially exposes refresh only as the internal Tauri command `update_profile(index, option)`; upstream has no external refresh CLI or localhost refresh route. This project adds a custom authenticated loopback bridge and an explicit source-only internal path that reuse the upstream download, parse, fallback, and safe-save semantics. Do not describe the bridge as an official JSON adapter, and do not substitute a fixed sleep or blind GUI clicks.
 4. Accept `SUCCESS_CHANGED` and `SUCCESS_NOT_MODIFIED`. Fail closed on auth, transport, parse, timeout, identity, empty-result, identity-collision, or configurable node-retention gates. Verify the raw profile UID inside the authenticated request path, but report only a masked identity.
-5. The custom Clash Verge build binds only `127.0.0.1`, writes a random mode-0600 bearer token, rejects replayed nonces, accepts no URL input, and exposes only ready, source update, and shutdown routes in source-only mode. Pin the app-data directory with `CLASH_VERGE_SOURCE_REFRESH_HOME` and the independently built binary with `CLASH_VERGE_SOURCE_REFRESH_BINARY`; never replace the installed app for a refresh.
-6. Capture active profile, proxy mode, selected-node state, effective system proxy, TUN setting, Mihomo process state, and network exit before refresh. Require the same values afterward. When the app was stopped, wait for authenticated READY, refresh, freeze, request authenticated shutdown, and verify stopped again. Restore non-source config bytes even after success.
+5. The custom Clash Verge build binds only `127.0.0.1:33332` by default, separately from the normal app's singleton port `33331`; writes a random mode-0600 bearer token; rejects replayed nonces; accepts no URL input; and exposes only ready, source update, and shutdown routes in source-only mode. Install the independently built helper at `$HERMES_HOME/bin/clash-verge-source-refresh` or override it with `CLASH_VERGE_SOURCE_REFRESH_BINARY`. Never replace the installed app for a refresh and never point the helper at port 33331.
+6. Capture active profile, proxy mode, selected-node state, effective system proxy, TUN setting, Mihomo process state, and network exit before refresh. Require the same values afterward. Whether the normal app is running or stopped, wait for the temporary helper's authenticated READY, refresh, freeze, request authenticated shutdown, and verify its dedicated port closes. Detect a concurrent source/index change immediately before commit and stop without overwriting it. When the normal app is running, never restore unrelated config bytes from an earlier snapshot because that could erase a legitimate concurrent app change.
 7. Store a mode-0600 private YAML payload plus a mode-0600 audit-safe JSON manifest. Include schema, timestamps, HMAC profile identity, source hash, normalized names, HMAC stable node IDs, protocols, node counts, diff summary, and refresh outcome. Never include subscription URLs, tokens, UUIDs, passwords, keys, or raw connection identities in the manifest.
 8. Derive stable node IDs from an HMAC of normalized connection identity excluding the display name. The HMAC key is private and mode 0600. A same-name node with changed connection identity cannot inherit manual or LKG evidence.
 9. After freezing, read only the private payload. Bind probe, candidate, and activation records to the same `source_snapshot_id` and `source_hash`. If live source changes, replay the frozen payload or stop; never mix sources.

@@ -117,6 +117,9 @@ def test_private_snapshot_requires_0600_and_hash(tmp_path) -> None:
     path.chmod(0o644)
     with pytest.raises(ValueError, match="FAIL_SAVE"):
         ADAPTER.verify_private_file(path, hashlib.sha256(b"safe").hexdigest())
+    path.chmod(0o600)
+    with pytest.raises(ValueError, match="FAIL_SAVE"):
+        ADAPTER.verify_private_file(path, hashlib.sha256(b"different").hexdigest())
 
 
 def test_stopped_app_is_temporarily_started_refreshed_and_stopped(tmp_path, monkeypatch, capsys) -> None:
@@ -128,8 +131,8 @@ def test_stopped_app_is_temporarily_started_refreshed_and_stopped(tmp_path, monk
     binary.write_text("binary")
     binary.chmod(0o700)
     monkeypatch.setenv("CLASH_VERGE_SOURCE_REFRESH_BINARY", str(binary))
-    monkeypatch.setattr(ADAPTER, "port_open", lambda: False)
-    monkeypatch.setattr(ADAPTER, "ready", lambda _token: True)
+    monkeypatch.setattr(ADAPTER, "port_open", lambda _port: False)
+    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=ADAPTER.PORT: True)
     process = FakeProcess()
     launch: dict[str, object] = {}
 
@@ -145,7 +148,7 @@ def test_stopped_app_is_temporarily_started_refreshed_and_stopped(tmp_path, monk
     snapshot.chmod(0o600)
     snapshot_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
 
-    def post(path, _token, body, timeout=10):
+    def post(path, _token, body, timeout=10, port=ADAPTER.PORT):
         if path.endswith("shutdown"):
             return 200, {"outcome": "SHUTTING_DOWN", "request_nonce": body["request_nonce"]}
         return 200, {
@@ -173,16 +176,83 @@ def test_stopped_app_is_temporarily_started_refreshed_and_stopped(tmp_path, monk
     assert process.waited is True and process.terminated is False
 
 
-def test_running_normal_app_fails_closed_without_launch(tmp_path, monkeypatch, capsys) -> None:
+def test_running_normal_app_reports_missing_bridge_binary(tmp_path, monkeypatch, capsys) -> None:
     request, _app_home, _ = fixture(tmp_path)
-    monkeypatch.setattr(ADAPTER, "port_open", lambda: True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "empty-hermes"))
+    monkeypatch.setattr(ADAPTER, "port_open", lambda port: port == ADAPTER.APP_PORT)
     monkeypatch.setattr(
         ADAPTER.subprocess,
         "Popen",
         lambda *_a, **_k: pytest.fail("must not launch a second app"),
     )
     result = run_main(monkeypatch, request, capsys)
-    assert result == {"app_state_before": "RUNNING", "outcome": "FAIL_APP_RUNNING_WITHOUT_ADAPTER"}
+    assert result == {"app_state_before": "RUNNING", "outcome": "FAIL_ADAPTER_BINARY_MISSING"}
+
+
+def test_bridge_binary_is_discovered_from_hermes_home(tmp_path, monkeypatch) -> None:
+    hermes_home = tmp_path / "hermes"
+    binary = hermes_home / "bin" / "clash-verge-source-refresh"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary")
+    binary.chmod(0o700)
+    monkeypatch.delenv("CLASH_VERGE_SOURCE_REFRESH_BINARY", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    assert ADAPTER.source_refresh_binary() == binary.resolve()
+
+
+def test_running_normal_app_starts_isolated_source_bridge(tmp_path, monkeypatch, capsys) -> None:
+    request, app_home, _ = fixture(tmp_path)
+    binary = tmp_path / "clash-verge-source-refresh"
+    binary.write_text("binary")
+    binary.chmod(0o700)
+    monkeypatch.setenv("CLASH_VERGE_SOURCE_REFRESH_BINARY", str(binary))
+    monkeypatch.setenv("CLASH_VERGE_SOURCE_REFRESH_PORT", "33332")
+    monkeypatch.setattr(ADAPTER, "port_open", lambda port: port == ADAPTER.APP_PORT)
+    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=33332: True)
+    process = FakeProcess()
+    launch: dict[str, object] = {}
+    token = app_home / ".source-refresh-adapter-token"
+
+    def popen(*args, **kwargs):
+        launch.update(kwargs)
+        token.write_text("token")
+        token.chmod(0o600)
+        return process
+
+    monkeypatch.setattr(ADAPTER.subprocess, "Popen", popen)
+    snapshot = app_home / ".source-refresh-snapshot-running.yaml"
+    snapshot.write_text("proxies:\n- {name: current, type: ss}\n")
+    snapshot.chmod(0o600)
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+
+    def post(path, _token, body, timeout=10, port=33332):
+        if path.endswith("shutdown"):
+            return 200, {"outcome": "SHUTTING_DOWN", "request_nonce": body["request_nonce"]}
+        return 200, {
+            "outcome": "SUCCESS_NOT_MODIFIED",
+            "request_nonce": body["request_nonce"],
+            "profile_identity": "masked",
+            "source_identity_verified": True,
+            "content_hash_before": "a" * 64,
+            "content_hash_after": "a" * 64,
+            "parsed_node_count_before": 1,
+            "parsed_node_count_after": 1,
+            "download_path_used": "DIRECT",
+            "enhanced_snapshot_path": str(snapshot),
+            "enhanced_snapshot_hash": digest,
+            "enhanced_snapshot_node_count": 1,
+            "started_at": "start",
+            "completed_at": "end",
+        }
+
+    monkeypatch.setattr(ADAPTER, "post", post)
+    result = run_main(monkeypatch, request, capsys)
+    assert result["outcome"] == "SUCCESS_NOT_MODIFIED"
+    assert result["app_state_before"] == "RUNNING"
+    assert result["temporary_app_started"] is True
+    assert launch["env"]["CLASH_VERGE_SOURCE_REFRESH_PORT"] == "33332"
+    assert process.waited is True and process.terminated is False
 
 
 @pytest.mark.parametrize("download_path", ["CLASH_PROXY", "SYSTEM_PROXY"])
@@ -197,15 +267,15 @@ def test_running_source_adapter_refreshes_without_restarting_app(
     snapshot.write_text("proxies:\n- {name: current, type: ss}\n")
     snapshot.chmod(0o600)
     digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
-    monkeypatch.setattr(ADAPTER, "port_open", lambda: True)
-    monkeypatch.setattr(ADAPTER, "ready", lambda _token: True)
+    monkeypatch.setattr(ADAPTER, "port_open", lambda _port: True)
+    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=ADAPTER.PORT: True)
     monkeypatch.setattr(
         ADAPTER.subprocess,
         "Popen",
         lambda *_a, **_k: pytest.fail("running source adapter must not be restarted"),
     )
 
-    def post(_path, _token, body, timeout=10):
+    def post(_path, _token, body, timeout=10, port=ADAPTER.PORT):
         return 200, {
             "outcome": "SUCCESS_NOT_MODIFIED",
             "request_nonce": body["request_nonce"],
@@ -230,32 +300,33 @@ def test_running_source_adapter_refreshes_without_restarting_app(
     assert result["download_path_used"] == download_path
 
 
-def test_nonce_mismatch_restores_exact_source_files(tmp_path, monkeypatch, capsys) -> None:
+def test_running_app_nonce_mismatch_does_not_overwrite_concurrent_source(tmp_path, monkeypatch, capsys) -> None:
     request, app_home, remote = fixture(tmp_path)
     before = remote.read_bytes()
     token = app_home / ".source-refresh-adapter-token"
     token.write_text("token")
     token.chmod(0o600)
-    monkeypatch.setattr(ADAPTER, "port_open", lambda: True)
-    monkeypatch.setattr(ADAPTER, "ready", lambda _token: True)
+    monkeypatch.setattr(ADAPTER, "port_open", lambda _port: True)
+    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=ADAPTER.PORT: True)
 
-    def post(_path, _token, _body, timeout=10):
+    def post(_path, _token, _body, timeout=10, port=ADAPTER.PORT):
         remote.write_bytes(b"corrupt")
         return 200, {"outcome": "SUCCESS_CHANGED", "request_nonce": "wrong"}
 
     monkeypatch.setattr(ADAPTER, "post", post)
     result = run_main(monkeypatch, request, capsys)
     assert result["outcome"] == "FAIL_NONCE_MISMATCH"
-    assert remote.read_bytes() == before
+    assert remote.read_bytes() != before
+    assert remote.read_bytes() == b"corrupt"
 
 
 def test_receipt_never_contains_subscription_url_or_token(tmp_path, monkeypatch, capsys) -> None:
     request, app_home, _ = fixture(tmp_path)
-    monkeypatch.setattr(ADAPTER, "port_open", lambda: True)
+    monkeypatch.setattr(ADAPTER, "port_open", lambda _port: True)
     token = app_home / ".source-refresh-adapter-token"
     token.write_text("local-secret-token")
     token.chmod(0o600)
-    monkeypatch.setattr(ADAPTER, "ready", lambda _token: True)
+    monkeypatch.setattr(ADAPTER, "ready", lambda _token, _port=ADAPTER.PORT: True)
     monkeypatch.setattr(
         ADAPTER,
         "post",

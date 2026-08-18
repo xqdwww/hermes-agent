@@ -20,7 +20,8 @@ from typing import Any
 import yaml
 
 
-PORT = 33331
+APP_PORT = 33331
+PORT = 33332
 BASE_URL = f"http://127.0.0.1:{PORT}/commands"
 SUCCESS = {"SUCCESS_CHANGED", "SUCCESS_NOT_MODIFIED"}
 
@@ -29,9 +30,19 @@ def emit(outcome: str, **fields: Any) -> None:
     print(json.dumps({"outcome": outcome, **fields}, ensure_ascii=False, sort_keys=True))
 
 
-def post(path: str, token: str, body: dict[str, Any], timeout: float = 10) -> tuple[int, dict[str, Any]]:
+def endpoint(path: str, port: int) -> str:
+    return f"http://127.0.0.1:{port}/commands{path}"
+
+
+def post(
+    path: str,
+    token: str,
+    body: dict[str, Any],
+    timeout: float = 10,
+    port: int = PORT,
+) -> tuple[int, dict[str, Any]]:
     request = urllib.request.Request(
-        BASE_URL + path,
+        endpoint(path, port),
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
@@ -44,9 +55,9 @@ def post(path: str, token: str, body: dict[str, Any], timeout: float = 10) -> tu
     return response.status, payload
 
 
-def ready(token: str) -> bool:
+def ready(token: str, port: int = PORT) -> bool:
     request = urllib.request.Request(
-        BASE_URL + "/source-refresh-ready",
+        endpoint("/source-refresh-ready", port),
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
@@ -56,11 +67,11 @@ def ready(token: str) -> bool:
         return False
 
 
-def port_open() -> bool:
+def port_open(port: int = APP_PORT) -> bool:
     import socket
 
     try:
-        with socket.create_connection(("127.0.0.1", PORT), timeout=0.2):
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
             return True
     except OSError:
         return False
@@ -111,6 +122,28 @@ def verify_private_file(path: Path, expected_hash: str) -> None:
         raise ValueError("FAIL_SAVE")
 
 
+def source_refresh_port() -> int:
+    try:
+        port = int(os.environ.get("CLASH_VERGE_SOURCE_REFRESH_PORT", str(PORT)))
+    except ValueError as error:
+        raise ValueError("FAIL_ADAPTER_PORT_INVALID") from error
+    if not 1024 <= port <= 65535 or port == APP_PORT:
+        raise ValueError("FAIL_ADAPTER_PORT_INVALID")
+    return port
+
+
+def source_refresh_binary() -> Path | None:
+    configured = os.environ.get("CLASH_VERGE_SOURCE_REFRESH_BINARY")
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
+    candidates = [Path(configured).expanduser()] if configured else []
+    candidates.append(hermes_home / "bin" / "clash-verge-source-refresh")
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+    return None
+
+
 def main() -> int:
     try:
         request = json.load(sys.stdin)
@@ -128,29 +161,35 @@ def main() -> int:
         token_path = app_home / ".source-refresh-adapter-token"
         protected = [profiles_path, profile_path, app_home / "verge.yaml", app_home / "config.yaml", effective_path]
         backups = {path: safe_read(path) for path in protected}
-        was_running = port_open()
+        bridge_port = source_refresh_port()
+        was_running = port_open(APP_PORT)
+        bridge_running = port_open(bridge_port)
         process: subprocess.Popen[bytes] | None = None
         launched = False
         refresh_attempted = False
         source_committed = False
         snapshot_artifacts: list[Path] = []
 
-        if was_running:
-            if not token_path.is_file():
-                emit("FAIL_APP_RUNNING_WITHOUT_ADAPTER", app_state_before="RUNNING")
+        if bridge_running:
+            if not token_path.is_file() or stat.S_IMODE(token_path.stat().st_mode) != 0o600:
+                emit("FAIL_ADAPTER_PORT_IN_USE", app_state_before="RUNNING" if was_running else "STOPPED")
+                return 0
+            existing_token = token_path.read_text(encoding="ascii")
+            if not ready(existing_token, bridge_port):
+                emit("FAIL_ADAPTER_PORT_IN_USE", app_state_before="RUNNING" if was_running else "STOPPED")
                 return 0
         else:
-            binary_value = os.environ.get("CLASH_VERGE_SOURCE_REFRESH_BINARY")
-            if not binary_value:
-                emit("FAIL_ADAPTER_BINARY_MISSING", app_state_before="STOPPED")
-                return 0
-            binary = Path(binary_value).expanduser().resolve()
-            if not binary.is_file() or not os.access(binary, os.X_OK):
-                emit("FAIL_ADAPTER_BINARY_MISSING", app_state_before="STOPPED")
+            binary = source_refresh_binary()
+            if binary is None:
+                emit(
+                    "FAIL_ADAPTER_BINARY_MISSING",
+                    app_state_before="RUNNING" if was_running else "STOPPED",
+                )
                 return 0
             env = os.environ.copy()
             env["CLASH_VERGE_SOURCE_REFRESH_MODE"] = "1"
             env["CLASH_VERGE_SOURCE_REFRESH_HOME"] = str(app_home)
+            env["CLASH_VERGE_SOURCE_REFRESH_PORT"] = str(bridge_port)
             token_path.unlink(missing_ok=True)
             process = subprocess.Popen(
                 [str(binary)],
@@ -169,13 +208,13 @@ def main() -> int:
                 break
             if token_path.is_file() and stat.S_IMODE(token_path.stat().st_mode) == 0o600:
                 token = token_path.read_text(encoding="ascii")
-                if ready(token):
+                if ready(token, bridge_port):
                     break
             time.sleep(0.1)
         else:
             emit("FAIL_TIMEOUT", app_state_before="RUNNING" if was_running else "STOPPED")
             return 0
-        if not token or not ready(token):
+        if not token or not ready(token, bridge_port):
             emit("FAIL_TRANSPORT", app_state_before="RUNNING" if was_running else "STOPPED")
             return 0
 
@@ -190,21 +229,25 @@ def main() -> int:
                 "request_nonce": nonce,
             },
             timeout=120,
+            port=bridge_port,
         )
         if response.get("request_nonce") != nonce:
-            restore(backups)
+            if not was_running:
+                restore(backups)
             emit("FAIL_NONCE_MISMATCH")
             return 0
         outcome = str(response.get("outcome", "FAIL_TRANSPORT"))
         if status != 200 or outcome not in SUCCESS:
-            restore(backups)
+            if not was_running:
+                restore(backups)
             emit(outcome)
             return 0
         snapshot_path = Path(str(response.get("enhanced_snapshot_path", ""))).resolve()
         snapshot_artifacts.append(snapshot_path)
         expected_snapshot_hash = str(response.get("enhanced_snapshot_hash", ""))
         if snapshot_path.parent != app_home or not snapshot_path.name.startswith(".source-refresh-snapshot-"):
-            restore(backups)
+            if not was_running:
+                restore(backups)
             emit("FAIL_SAVE")
             return 0
         verify_private_file(snapshot_path, expected_snapshot_hash)
@@ -244,7 +287,13 @@ def main() -> int:
         if "launched" in locals() and launched and "token" in locals() and token:
             shutdown_nonce = secrets.token_urlsafe(24)
             try:
-                post("/source-refresh-shutdown", token, {"request_nonce": shutdown_nonce}, timeout=3)
+                post(
+                    "/source-refresh-shutdown",
+                    token,
+                    {"request_nonce": shutdown_nonce},
+                    timeout=3,
+                    port=bridge_port,
+                )
             except Exception:
                 pass
             if process is not None:
@@ -257,7 +306,11 @@ def main() -> int:
                     except subprocess.TimeoutExpired:
                         process.kill()
         if "refresh_attempted" in locals() and refresh_attempted:
-            if source_committed:
+            if was_running:
+                if not source_committed:
+                    for artifact in snapshot_artifacts:
+                        artifact.unlink(missing_ok=True)
+            elif source_committed:
                 restore(
                     {
                         path: data
