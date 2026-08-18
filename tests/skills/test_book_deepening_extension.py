@@ -150,7 +150,7 @@ def test_same_session_title_fallback_does_not_require_an_identifier_checkpoint()
 
 def test_dependency_extra_is_pinned_for_reproducible_runtime():
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'book-notes = ["sentence-transformers==5.6.0", "torch==2.12.0", "lancedb[pylance]==0.34.0"]' in pyproject
+    assert 'book-notes = ["sentence-transformers==5.6.0", "torch==2.13.0", "lancedb[pylance]==0.34.0"]' in pyproject
 
 
 def test_not_found_switches_to_general_mode_and_keeps_discussion_open():
