@@ -55,6 +55,8 @@ DEFAULT_VERGE_CANDIDATES = (
 )
 
 PLACEHOLDER_NODES = {"使用前先更新订阅"}
+STREAMING_LABEL = "流媒体"
+STREAMING_LABEL_POLICY_REASON = "NODE_NAME_CONTAINS_STREAMING_LABEL"
 
 # Accepted working GPT candidates. Only names present in the current subscription are used.
 GPT_CANDIDATES = (
@@ -185,7 +187,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.6.1"
+SKILL_VERSION = "2.6.2"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -204,7 +206,7 @@ REMOTE_CANDIDATE_DIR = "/etc/openclash/config/.clashverge-candidates"
 LKG_SCHEMA_VERSION = 1
 PROBE_SCHEMA_VERSION = 1
 PROBE_VERSION = "3"
-SERVICE_REGION_POLICY_VERSION = "2026-07-28.1"
+SERVICE_REGION_POLICY_VERSION = "2026-09-07.1"
 REJECTED_CANDIDATE_SHA256 = {
     "799c2bba5eb2cb35673fd322a621a3bec4b6ca23b03954fc91c3b7761906cf74":
         "REJECTED_REGION_POLICY_REGRESSION",
@@ -235,6 +237,7 @@ PROBE_CORE_CANDIDATES = (
     Path("/usr/local/bin/mihomo"),
 )
 SERVICE_KEYS = ("gpt", "gemini", "disney")
+AI_SERVICE_KEYS = frozenset(("gpt", "gemini"))
 PASS_RESULTS = {
     "DEFINITIVE_AUTOMATED_PASS",
     "MANUAL_OVERRIDE_PASS",
@@ -491,6 +494,13 @@ def ordered_unique(values: Iterable[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def filter_service_nodes(service: str, names: Iterable[str]) -> list[str]:
+    values = list(names)
+    if service not in AI_SERVICE_KEYS:
+        return values
+    return [name for name in values if STREAMING_LABEL not in name]
 
 
 def normalize_node_name(name: str) -> str:
@@ -2153,6 +2163,16 @@ def service_region_policy(
         "decision_reason": "EXISTING_EVIDENCE_RULE",
         "candidate_basis": "EXISTING_EVIDENCE_RULE",
     }
+    if service in AI_SERVICE_KEYS and STREAMING_LABEL in str(node.get("name", "")):
+        policy.update(
+            {
+                "final_candidate_decision": "EXCLUDE",
+                "policy_action": "EXCLUDE",
+                "decision_reason": STREAMING_LABEL_POLICY_REASON,
+                "candidate_basis": STREAMING_LABEL_POLICY_REASON,
+            }
+        )
+        return policy
     if service not in {"gpt", "gemini"} or exit_country != "HK":
         return policy
 
@@ -2277,7 +2297,13 @@ def merge_lkg_results(
             ]
             policy_action = region_policy["policy_action"]
 
-            if probable_recapture:
+            streaming_label_excluded = (
+                service in AI_SERVICE_KEYS and STREAMING_LABEL in name
+            )
+            if streaming_label_excluded:
+                lkg = False
+                action = "LKG_REMOVED_STREAMING_LABEL_POLICY"
+            elif probable_recapture:
                 lkg = prior_lkg
                 action = "LKG_UNCHANGED_PROBABLE_RECAPTURE"
             elif (
@@ -2348,6 +2374,7 @@ def merge_lkg_results(
             for item in enriched
             if item["enters_auto"][service]
         ]
+        automatic = filter_service_nodes(service, automatic)
         historical = [
             name for name in current_names
             if name not in automatic
@@ -2359,12 +2386,14 @@ def merge_lkg_results(
                 == effective_state["nodes"][name][service]["exact_node_id"]
             )
         ]
+        historical = filter_service_nodes(service, historical)
         pending = [
             str(item["name"])
             for item in enriched
             if item["enters_manual_candidate"][service]
             and str(item["name"]) not in automatic
         ]
+        pending = filter_service_nodes(service, pending)
         automatic = stable_region_sort(
             automatic, source_order, gemini=service == "gemini"
         )
@@ -3606,6 +3635,8 @@ def build_groups(
     disney_nodes: list[str],
     historical_lkg: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
+    gpt_nodes = filter_service_nodes("gpt", gpt_nodes)
+    gemini_nodes = filter_service_nodes("gemini", gemini_nodes)
     groups = [
         {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
         {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
@@ -3625,7 +3656,9 @@ def build_groups(
         ("gemini", "Gemini历史LKG", "Gemini手动"),
         ("disney", "迪士尼历史LKG", "迪士尼手动"),
     ):
-        members = list((historical_lkg or {}).get(service, []))
+        members = filter_service_nodes(
+            service, (historical_lkg or {}).get(service, [])
+        )
         if not members:
             continue
         groups.append(fallback_group(group_name, members))
@@ -3762,10 +3795,15 @@ def transform(
     all_nodes = stable_region_sort(names, source_order)
     if service_selections is None:
         gpt_nodes = stable_region_sort(
-            resolve_candidates(names, GPT_CANDIDATES, label="GPT"), source_order
+            filter_service_nodes(
+                "gpt", resolve_candidates(names, GPT_CANDIDATES, label="GPT")
+            ),
+            source_order,
         )
         gemini_nodes = stable_region_sort(
-            resolve_candidates(names, GEMINI_CANDIDATES, label="Gemini"),
+            filter_service_nodes(
+                "gemini", resolve_candidates(names, GEMINI_CANDIDATES, label="Gemini")
+            ),
             source_order,
             gemini=True,
         )
@@ -3773,8 +3811,12 @@ def transform(
             resolve_candidates(names, DISNEY_CANDIDATES, label="Disney"), source_order
         )
     else:
-        gpt_nodes = list(service_selections["gpt"]["automatic"])
-        gemini_nodes = list(service_selections["gemini"]["automatic"])
+        gpt_nodes = filter_service_nodes(
+            "gpt", service_selections["gpt"]["automatic"]
+        )
+        gemini_nodes = filter_service_nodes(
+            "gemini", service_selections["gemini"]["automatic"]
+        )
         disney_nodes = list(service_selections["disney"]["automatic"])
         missing = [
             service.upper()
@@ -3789,7 +3831,9 @@ def transform(
     history = None
     if service_selections is not None:
         history = {
-            service: list(service_selections[service].get("historical_lkg", []))
+            service: filter_service_nodes(
+                service, service_selections[service].get("historical_lkg", [])
+            )
             for service in SERVICE_KEYS
         }
     output["proxy-groups"] = build_groups(
@@ -3799,7 +3843,9 @@ def transform(
         groups_by_name = {group["name"]: group for group in output["proxy-groups"]}
         for service, (_, manual_name) in SERVICE_GROUP_NAMES.items():
             groups_by_name[manual_name]["proxies"].extend(
-                service_selections[service]["manual_candidates"]
+                filter_service_nodes(
+                    service, service_selections[service]["manual_candidates"]
+                )
             )
     output["rules"] = build_rules(output)
 

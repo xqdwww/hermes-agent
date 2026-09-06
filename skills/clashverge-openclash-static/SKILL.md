@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.6.1
+version: 2.6.2
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,11 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.6.1 gives Disney's redacted `token` stage a strict
+for this Skill. Version 2.6.2 excludes node names containing the exact
+contiguous substring `流媒体` from GPT/Gemini automatic, manual-candidate, and
+historical LKG groups while preserving Disney/general eligibility; enriched
+policy data records the exclusion and final transforms filter caller-supplied
+AI selections defensively. Version 2.6.1 gives Disney's redacted `token` stage a strict
 status-only schema while continuing to reject assertion, token, refresh-token,
 authorization, body, or raw-response payload fields outside that fixed stage
 namespace. Version 2.6.0

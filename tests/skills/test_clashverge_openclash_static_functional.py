@@ -463,6 +463,198 @@ def test_screen_and_false_negative_results_enter_current_candidate_groups() -> N
     assert selections["disney"]["automatic"] == ["node-a"]
 
 
+def test_streaming_labeled_ai_nodes_are_excluded_but_disney_eligible() -> None:
+    streaming = "🇯🇵日本-流媒体01"
+    ordinary = "🇯🇵日本-原生01"
+    nodes = []
+    for name in (streaming, ordinary):
+        nodes.append(
+            {
+                "name": name,
+                "exact_node_id": f"id-{name}",
+                "selector_confirmed": True,
+                "base_result": "BASE_PASS",
+                "egress_country": "United States",
+                "services": {
+                    service: {
+                        "raw_result": "SCREEN_PASS",
+                        "final_result": "SCREEN_PASS",
+                        "functional_result": {
+                            "result": "SCREEN_PASS",
+                            "raw_result": "SCREEN_PASS",
+                            "attribution_status": "ATTRIBUTION_MATCH",
+                            "exit_country": "United States",
+                        },
+                    }
+                    for service in SKILL.SERVICE_KEYS
+                },
+            }
+        )
+
+    selections, _, enriched = SKILL.merge_lkg_results(
+        [streaming, ordinary],
+        {streaming: 0, ordinary: 1},
+        {"nodes": {}},
+        nodes,
+        probable_recapture=False,
+        observed_at="2026-07-29T12:00:00+08:00",
+    )
+
+    for service in ("gpt", "gemini"):
+        for selection_class in ("automatic", "manual_candidates", "historical_lkg"):
+            assert streaming not in selections[service][selection_class]
+        policy = next(item for item in enriched if item["name"] == streaming)[
+            "services"
+        ][service]["region_policy"]
+        assert policy["final_candidate_decision"] == "EXCLUDE"
+        assert policy["decision_reason"] == "NODE_NAME_CONTAINS_STREAMING_LABEL"
+        assert (
+            next(item for item in enriched if item["name"] == streaming)[
+                "services"
+            ][service]["raw_result"]
+            == "SCREEN_PASS"
+        )
+
+    assert streaming in selections["disney"]["automatic"]
+    assert ordinary in selections["gpt"]["automatic"]
+    assert ordinary in selections["gemini"]["automatic"]
+
+
+def test_streaming_labeled_pending_nodes_cannot_use_lkg_or_manual_candidates() -> None:
+    streaming_lkg = "🇯🇵日本-流媒体-pending-lkg"
+    ordinary_lkg = "🇯🇵日本-普通-pending-lkg"
+    streaming_pending = "🇯🇵日本-流媒体-pending"
+    ordinary_pending = "🇯🇵日本-普通-pending"
+    names = [streaming_lkg, ordinary_lkg, streaming_pending, ordinary_pending]
+
+    nodes = []
+    for name in names:
+        nodes.append(
+            {
+                "name": name,
+                "exact_node_id": f"id-{name}",
+                "selector_confirmed": True,
+                "base_result": "BASE_PASS",
+                "egress_country": "United States",
+                "services": {
+                    service: {
+                        "raw_result": (
+                            "PASS_SUPPORTED_REGION"
+                            if service == "disney"
+                            else "UNKNOWN"
+                        ),
+                        "final_result": (
+                            "PASS_SUPPORTED_REGION"
+                            if service == "disney"
+                            else "UNKNOWN"
+                        ),
+                        "functional_result": {
+                            "result": (
+                                "PASS_SUPPORTED_REGION"
+                                if service == "disney"
+                                else "UNKNOWN"
+                            ),
+                            "raw_result": (
+                                "PASS_SUPPORTED_REGION"
+                                if service == "disney"
+                                else "UNKNOWN"
+                            ),
+                            "attribution_status": "ATTRIBUTION_MATCH",
+                            "exit_country": "United States",
+                        },
+                    }
+                    for service in SKILL.SERVICE_KEYS
+                },
+            }
+        )
+
+    state = {
+        "nodes": {
+            name: {
+                service: {
+                    "lkg": True,
+                    "exact_node_id": f"id-{name}",
+                }
+                for service in ("gpt", "gemini")
+            }
+            for name in (streaming_lkg, ordinary_lkg)
+        }
+    }
+    selections, _, enriched = SKILL.merge_lkg_results(
+        names,
+        {name: index for index, name in enumerate(names)},
+        state,
+        nodes,
+        probable_recapture=False,
+        observed_at="2026-09-07T12:00:00+08:00",
+    )
+
+    for service in ("gpt", "gemini"):
+        assert selections[service]["historical_lkg"] == [ordinary_lkg]
+        assert selections[service]["manual_candidates"] == [ordinary_pending]
+        for streaming_name in (streaming_lkg, streaming_pending):
+            for selection_class in (
+                "automatic",
+                "manual_candidates",
+                "historical_lkg",
+            ):
+                assert streaming_name not in selections[service][selection_class]
+            policy = next(
+                item for item in enriched if item["name"] == streaming_name
+            )["services"][service]["region_policy"]
+            assert policy["region_policy_version"] == "2026-09-07.1"
+            assert policy["decision_reason"] == (
+                "NODE_NAME_CONTAINS_STREAMING_LABEL"
+            )
+            assert (
+                next(item for item in enriched if item["name"] == streaming_name)[
+                    "services"
+                ][service]["raw_result"]
+                == "UNKNOWN"
+            )
+
+    assert streaming_lkg in selections["disney"]["automatic"]
+    assert streaming_pending in selections["disney"]["automatic"]
+
+
+def test_transform_filters_streaming_nodes_from_caller_supplied_ai_selections() -> None:
+    streaming = "🇯🇵日本-流媒体01"
+    ordinary = "🇯🇵日本-原生01"
+    data = {
+        "proxies": [
+            {"name": streaming, "type": "ss", "server": "stream.example"},
+            {"name": ordinary, "type": "ss", "server": "ordinary.example"},
+        ],
+        "rules": [],
+    }
+    selections = {
+        service: {
+            "automatic": [streaming, ordinary],
+            "manual_candidates": [streaming],
+            "historical_lkg": [streaming],
+        }
+        for service in SKILL.SERVICE_KEYS
+    }
+
+    output = SKILL.transform(data, selections)
+    groups = {group["name"]: group for group in output["proxy-groups"]}
+
+    for group_name in (
+        "GPT候选",
+        "GPT手动",
+        "Gemini候选",
+        "Gemini手动",
+        "GPT历史LKG",
+        "Gemini历史LKG",
+    ):
+        assert streaming not in groups.get(group_name, {}).get("proxies", [])
+    assert ordinary in groups["GPT候选"]["proxies"]
+    assert ordinary in groups["Gemini候选"]["proxies"]
+    assert streaming in groups["迪士尼候选"]["proxies"]
+    assert streaming in groups["迪士尼手动"]["proxies"]
+    assert streaming in groups["自动选择"]["proxies"]
+
+
 def test_official_hk_policy_overrides_service_screens_without_name_inference() -> None:
     nodes = []
     for name, country, attribution_status in (
