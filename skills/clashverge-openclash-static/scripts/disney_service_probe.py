@@ -9,6 +9,7 @@ one request scope and are never written to the report.
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 import os
@@ -36,6 +37,13 @@ TERMINAL_RESULTS = {
     "FAIL_TRANSPORT",
     "UNKNOWN_RESPONSE_SCHEMA",
 }
+REUSABLE_RESULTS = {
+    "PASS_SUPPORTED_REGION",
+    "FAIL_FORBIDDEN_LOCATION",
+    "FAIL_IP_BANNED",
+    "FAIL_UNAVAILABLE",
+}
+DEFAULT_EVIDENCE_TTL_SECONDS = 12 * 60 * 60
 
 
 def iso_now() -> str:
@@ -244,6 +252,86 @@ def validate_safe_report(report: dict[str, Any]) -> None:
     walk(report)
 
 
+def _fresh_timestamp(value: Any, *, now: datetime, ttl_seconds: int) -> bool:
+    if ttl_seconds <= 0 or not isinstance(value, str) or not value:
+        return False
+    try:
+        tested_at = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    if tested_at.tzinfo is None:
+        return False
+    age = (now.astimezone(tested_at.tzinfo) - tested_at).total_seconds()
+    return 0 <= age <= ttl_seconds
+
+
+def import_reusable_nodes(
+    previous: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    evidence_ttl_seconds: int,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Rebind recent definitive Disney results by stable identity."""
+
+    if (
+        previous.get("schema_version") != SCHEMA_VERSION
+        or previous.get("service") != "disney"
+        or previous.get("probe_method_version") != METHOD_VERSION
+        or previous.get("production_fingerprint_preserved") is not True
+    ):
+        return [], set()
+    validate_safe_report(previous)
+    current_names = {
+        str(item.get("exact_node_id") or ""): str(item.get("exact_node_name") or "")
+        for item in manifest.get("nodes", [])
+    }
+    current_names.pop("", None)
+    now = now or datetime.now().astimezone()
+    origin_snapshot = str(previous.get("source_snapshot_id") or "")
+    origin_hash = str(previous.get("source_hash") or "")
+    if not origin_snapshot or not origin_hash:
+        return [], set()
+    nodes: list[dict[str, Any]] = []
+    reusable: set[str] = set()
+    for item in previous.get("nodes", []):
+        if not isinstance(item, dict):
+            continue
+        node_id = str(item.get("exact_node_id") or "")
+        current_name = current_names.get(node_id)
+        if (
+            not current_name
+            or node_id in reusable
+            or item.get("source_snapshot_id") != origin_snapshot
+            or item.get("source_hash") != origin_hash
+            or item.get("result") not in REUSABLE_RESULTS
+            or not _fresh_timestamp(
+                item.get("tested_at"),
+                now=now,
+                ttl_seconds=evidence_ttl_seconds,
+            )
+        ):
+            continue
+        if item.get("result") == "PASS_SUPPORTED_REGION" and (
+            item.get("in_supported_location") is not True
+            or item.get("final_redirect_class") != "SUPPORTED_ROUTE"
+        ):
+            continue
+        rebound = copy.deepcopy(item)
+        rebound.update(
+            {
+                "exact_node_name": current_name,
+                "source_snapshot_id": manifest["source_snapshot_id"],
+                "source_hash": manifest["source_hash"],
+                "evidence_reused": True,
+                "evidence_origin_snapshot_id": origin_snapshot,
+            }
+        )
+        nodes.append(rebound)
+        reusable.add(node_id)
+    return nodes, reusable
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skill-script", type=Path, required=True)
@@ -252,7 +340,11 @@ def main() -> int:
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--only-node-id", action="append", default=[])
+    parser.add_argument("--import-report", type=Path)
+    parser.add_argument("--evidence-ttl", type=int, default=DEFAULT_EVIDENCE_TTL_SECONDS)
     args = parser.parse_args()
+    if args.evidence_ttl <= 0:
+        raise RuntimeError("DISNEY_EVIDENCE_TTL_INVALID")
 
     skill = load_skill(args.skill_script.resolve())
     manifest, payload_path = skill.verify_source_snapshot(args.source_snapshot.resolve())
@@ -262,9 +354,34 @@ def main() -> int:
         for item in manifest["nodes"]
     }
     selected = set(args.only_node_id)
-    run_proxies = [proxy for proxy in proxies if not selected or identities[str(proxy["name"])] in selected]
+    run_proxies = [
+        proxy
+        for proxy in proxies
+        if not selected or identities[str(proxy["name"])] in selected
+    ]
     if selected and len(run_proxies) != len(selected):
         raise RuntimeError("DISNEY_NODE_NOT_IN_SNAPSHOT")
+    reused_nodes: list[dict[str, Any]] = []
+    reusable_ids: set[str] = set()
+    if args.import_report is not None and args.import_report.is_file():
+        previous = json.loads(args.import_report.read_text(encoding="utf-8"))
+        reused_nodes, reusable_ids = import_reusable_nodes(
+            previous,
+            manifest=manifest,
+            evidence_ttl_seconds=args.evidence_ttl,
+        )
+        selected_ids = {identities[str(proxy["name"])] for proxy in run_proxies}
+        reusable_ids &= selected_ids
+        reused_nodes = [
+            item
+            for item in reused_nodes
+            if item.get("exact_node_id") in reusable_ids
+        ]
+        run_proxies = [
+            proxy
+            for proxy in run_proxies
+            if identities[str(proxy["name"])] not in reusable_ids
+        ]
     config = skill.build_probe_config(
         proxies, mixed_port=skill.REMOTE_SIDECAR_MIXED_PORT,
         controller_port=skill.REMOTE_SIDECAR_CONTROLLER_PORT, interface_name=None,
@@ -274,27 +391,46 @@ def main() -> int:
         "probe_method_version": METHOD_VERSION,
         "source_snapshot_id": manifest["source_snapshot_id"],
         "source_hash": manifest["source_hash"], "started_at": iso_now(),
-        "transport": "ssh_loopback_to_router_sidecar", "nodes": [],
+        "transport": "ssh_loopback_to_router_sidecar", "nodes": reused_nodes,
+        "nodes_reused": len(reusable_ids), "newly_tested_records": len(run_proxies),
+        "evidence_ttl_seconds": args.evidence_ttl,
     }
-    with tempfile.TemporaryDirectory(prefix="disney-sidecar-") as temporary:
-        config_path = Path(temporary) / "probe.yaml"
-        skill.dump_yaml(config, config_path)
-        os.chmod(config_path, 0o600)
-        with skill.remote_candidate_sidecar(config_path, host=args.host, core_path=args.core_path) as sidecar:
-            skill.validate_probe_runtime(sidecar.controller_port)
-            for proxy in run_proxies:
-                name = str(proxy["name"])
-                if not skill.select_probe_node(sidecar.controller_port, name):
-                    outcome = {"result": "UNKNOWN_RESPONSE_SCHEMA", "failure_stage": "selector"}
-                else:
-                    time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
-                    outcome = run_chain(sidecar.mixed_port)
-                report["nodes"].append({
-                    "exact_node_name": name, "exact_node_id": identities[name],
-                    "source_snapshot_id": manifest["source_snapshot_id"],
-                    "source_hash": manifest["source_hash"], "tested_at": iso_now(),
-                    **outcome,
-                })
+    if run_proxies:
+        with tempfile.TemporaryDirectory(prefix="disney-sidecar-") as temporary:
+            config_path = Path(temporary) / "probe.yaml"
+            skill.dump_yaml(config, config_path)
+            os.chmod(config_path, 0o600)
+            with skill.remote_candidate_sidecar(
+                config_path,
+                host=args.host,
+                core_path=args.core_path,
+            ) as sidecar:
+                skill.validate_probe_runtime(sidecar.controller_port)
+                for proxy in run_proxies:
+                    name = str(proxy["name"])
+                    if not skill.select_probe_node(sidecar.controller_port, name):
+                        outcome = {
+                            "result": "UNKNOWN_RESPONSE_SCHEMA",
+                            "failure_stage": "selector",
+                        }
+                    else:
+                        time.sleep(skill.PROBE_SWITCH_WAIT_SECONDS)
+                        outcome = run_chain(sidecar.mixed_port)
+                    report["nodes"].append(
+                        {
+                            "exact_node_name": name,
+                            "exact_node_id": identities[name],
+                            "source_snapshot_id": manifest["source_snapshot_id"],
+                            "source_hash": manifest["source_hash"],
+                            "tested_at": iso_now(),
+                            **outcome,
+                        }
+                    )
+    order = {
+        str(item["exact_node_id"]): index
+        for index, item in enumerate(manifest["nodes"])
+    }
+    report["nodes"].sort(key=lambda item: order[str(item["exact_node_id"])])
     report["production_fingerprint_preserved"] = True
     report["completed_at"] = iso_now()
     report["summary"] = {

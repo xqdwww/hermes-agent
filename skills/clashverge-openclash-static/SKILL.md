@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.6.2
+version: 2.6.3
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -37,7 +37,15 @@ python3 -m pip install PyYAML
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.6.2 excludes node names containing the exact
+for this Skill. Version 2.6.3 bounds repeat-update latency without weakening
+attribution: it performs two short independent transport preflights before the
+expensive control/RRC path, debounces systemic sentinel confirmation to every
+five new unavailable nodes plus a mandatory final check, and reuses complete
+identity-bound evidence for at most 12 hours. Every RRC run still retests two
+distinct attributed sentinels. Disney reuses only definitive supported-region
+or hard region results; transport failures and unknown results are always
+retested. The private cache is automatic and never changes production state.
+Version 2.6.2 excludes node names containing the exact
 contiguous substring `流媒体` from GPT/Gemini automatic, manual-candidate, and
 historical LKG groups while preserving Disney/general eligibility; enriched
 policy data records the exclusion and final transforms filter caller-supplied
@@ -390,11 +398,13 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 - For every deploying `all` run, run the temporary core on the router instead: fixed loopback-only ports, no TUN/listeners/tunnels/routing mark, UID/GID 65534, and an SSH loopback tunnel for controller and mixed-port access. If production OpenClash is running, require the nft GID-65534 bypass before starting the sidecar. Hash production UCI/service/rule/table-354/nft/TUN state before and after and fail if it changes.
 - Validate the temporary YAML with the selected Mihomo core before startup. After startup, confirm runtime mode and final rule through the controller and read `GLOBAL`; `GLOBAL.now=DIRECT` is harmless in rule mode because requests explicitly use the temporary mixed proxy and `MATCH` targets `PROBE`.
 - Requests are serial per node, use a fresh curl process, connect timeout 3 seconds, total timeout 8 seconds, at most two attempts, and a 15-minute round deadline. The selector wait is 0.75 seconds.
+- Before control attribution or RegionRestrictionCheck, try the Google and Cloudflare 204 endpoints with the same runner-scoped proxy. Only when both bounded checks fail, record node-local `ATTRIBUTION_UNAVAILABLE` at `TRANSPORT_PREFLIGHT` and skip the expensive path; this is UNKNOWN evidence, not a service failure.
+- Cache only complete, production-preserving, zero-mismatch RRC reports and safe Disney reports under `~/.hermes/state/clashverge-openclash-static/probe-cache/`. Reuse requires an exact stable node identity, matching probe method/tool hash, and evidence age no greater than 12 hours. Never reuse an RRC result unless two distinct cached exits can be selected and retested as current-run sentinels. Never reuse Disney transport failures or unknown results.
 - GPT 403 challenge evidence is `CHALLENGE_UNKNOWN`, never `FAIL_REGION` without explicit region text.
 - Manual calibration requires exact raw name, exact HMAC node ID, exact service, exact source snapshot, test time, and method. Store these separately; newer definitive actual-use evidence takes precedence over older screening evidence.
 - RegionRestrictionCheck is screening evidence. ChatGPT/Gemini `Yes` is `SCREEN_PASS`; Gemini `No` is `SCREEN_NEGATIVE`. Bind any manual override to the exact snapshot and stable node ID. Never require browser automation for candidate generation or activation.
 - Resolve the RegionRestrictionCheck runner proxy once and use that same explicit loopback URL for every router-side control request and `regioncheck -M 4 -P`. Make the first post-selector request a best-effort connection discard with no evidence semantics. Then query the bounded ipify, ifconfig.co, ipinfo, Cloudflare trace, and AWS check-IP IPv4 backends in order with fresh curl processes; accept only a public IPv4 and persist only a run-keyed HMAC.
-- Record `ATTRIBUTION_MATCH` only when the control and RegionRestrictionCheck exits are comparable and agree. A single node with no usable control backend or no comparable RegionRestrictionCheck provider is `ATTRIBUTION_UNAVAILABLE`: emit no service evidence and continue. Retry an explicit mismatch once, then stop with `STOP_RRC_PROXY_ATTRIBUTION_MISMATCH`. Stop systematic control failure only after three consecutive unavailable nodes, or after at least eight attempts when unavailable exceeds 25%.
+- Record `ATTRIBUTION_MATCH` only when the control and RegionRestrictionCheck exits are comparable and agree. A single node with no usable control backend or no comparable RegionRestrictionCheck provider is `ATTRIBUTION_UNAVAILABLE`: emit no service evidence and continue. Retry an explicit mismatch once, then stop with `STOP_RRC_PROXY_ATTRIBUTION_MISMATCH`. When the existing consecutive or ratio thresholds indicate systematic failure, run the expensive two-sentinel confirmation only on the first signal, every five additional unavailable nodes, and once at the end if unconfirmed evidence remains. A failed sentinel confirmation still stops the run.
 - Disney probing must POST `/devices`, obtain an assertion, POST `/token`, distinguish `forbidden-location` and HTTP 403, POST `/graph/v1/device/graphql`, parse `countryCode` and `inSupportedLocation`, and reject final `disneyplus.com` redirects containing `preview` or `unavailable`. Persist no assertion, token, refresh token, or response body. Until that full chain runs, emit `UNKNOWN_INCOMPLETE_PROBE`, not PASS.
 - Egress persistence is limited to country, ASN, and a run-keyed HMAC prefix. Mark `PROBABLE_TUN_OR_UPSTREAM_RECAPTURE` only when at least three `BASE_PASS` nodes span at least two declared regions and every eligible node has the same complete signature. Transport failures do not participate; a guarded run cannot change LKG or service groups.
 - Temporary YAML, response bodies, headers, logs, Mihomo, PID, SSH tunnel, and lock are cleaned in `finally`. Candidate-probe failure must occur before the activation transaction and must never invoke production rollback.

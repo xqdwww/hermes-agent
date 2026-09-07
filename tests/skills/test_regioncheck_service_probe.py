@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -283,6 +284,207 @@ def test_discard_proxy_request_is_best_effort(monkeypatch) -> None:
         )
         is False
     )
+
+
+def test_failed_transport_preflight_short_circuits_expensive_attribution(
+    monkeypatch,
+) -> None:
+    requests: list[str] = []
+
+    def failed_request(*, url, **_kwargs):
+        requests.append(url)
+        return False
+
+    monkeypatch.setattr(RRC, "discard_proxy_request", failed_request)
+    monkeypatch.setattr(
+        RRC,
+        "control_geo",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("control attribution must be skipped")
+        ),
+    )
+    monkeypatch.setattr(
+        RRC,
+        "run_regioncheck_with_transport_retry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("RegionRestrictionCheck must be skipped")
+        ),
+    )
+
+    outcome = RRC.probe_node_with_attribution(
+        skill=FakeSkill(),
+        host="router",
+        controller_port=57013,
+        proxy_context=proxy_context(),
+        node_name="node-a",
+        timeout_seconds=45,
+        run_key=b"k" * 32,
+        stabilization_seconds=0,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert outcome["status"] == "ATTRIBUTION_UNAVAILABLE"
+    assert outcome["failure_stage"] == "TRANSPORT_PREFLIGHT"
+    assert len(requests) == 2
+
+
+def test_systemic_confirmation_is_debounced_and_finally_rechecked() -> None:
+    confirmed = 0
+    scheduled = []
+    for unavailable in range(1, 36):
+        if RRC.should_confirm_systemic_gate(
+            unavailable_count=unavailable,
+            last_confirmed_unavailable_count=confirmed,
+        ):
+            scheduled.append(unavailable)
+            confirmed = unavailable
+
+    assert scheduled == [1, 6, 11, 16, 21, 26, 31]
+    assert RRC.should_confirm_systemic_gate(
+        unavailable_count=35,
+        last_confirmed_unavailable_count=confirmed,
+        final=True,
+    )
+    assert RRC.should_confirm_systemic_gate(
+        unavailable_count=confirmed,
+        last_confirmed_unavailable_count=confirmed,
+        final=True,
+    )
+    assert len(scheduled) + 1 <= 8
+
+
+def test_auto_calibration_ignores_reused_evidence() -> None:
+    attempts = [
+        {
+            "exact_node_name": "cached-a",
+            "status": "ATTRIBUTION_MATCH",
+            "output_complete": True,
+            "result_count": len(RRC.SERVICE_LABELS),
+            "control_exit_ip_hmac": "old-exit-a",
+            "evidence_reused": True,
+        },
+        {
+            "exact_node_name": "current-a",
+            "status": "ATTRIBUTION_MATCH",
+            "output_complete": True,
+            "result_count": len(RRC.SERVICE_LABELS),
+            "control_exit_ip_hmac": "new-exit-a",
+        },
+        {
+            "exact_node_name": "current-b",
+            "status": "ATTRIBUTION_MATCH",
+            "output_complete": True,
+            "result_count": len(RRC.SERVICE_LABELS),
+            "control_exit_ip_hmac": "new-exit-b",
+        },
+    ]
+
+    assert RRC.auto_calibration_sentinels(attempts) == ["current-a", "current-b"]
+
+
+def test_cross_snapshot_import_rebinds_only_fresh_complete_identity_matches() -> None:
+    now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=1)).isoformat()
+    stale = (now - timedelta(hours=13)).isoformat()
+    tool = {"tool_version": "1.0.1", "script_sha256": "a" * 64}
+    manifest = {
+        "source_snapshot_id": "snapshot-new",
+        "source_hash": "b" * 64,
+        "nodes": [
+            {"exact_node_id": "node-keep", "exact_node_name": "renamed-node"},
+            {"exact_node_id": "node-stale", "exact_node_name": "stale-node"},
+            {"exact_node_id": "node-new", "exact_node_name": "new-node"},
+        ],
+    }
+
+    def attempt(node_id: str, name: str, tested_at: str) -> dict:
+        return {
+            "exact_node_id": node_id,
+            "exact_node_name": name,
+            "source_snapshot_id": "snapshot-old",
+            "selector_readback": name,
+            "status": "ATTRIBUTION_MATCH",
+            "attribution_valid": True,
+            "output_complete": True,
+            "transport_unknown": False,
+            "control_exit_ip_hmac": node_id + "-exit",
+            "regioncheck_exit_ip_hmac": node_id + "-exit",
+            "completed_at": tested_at,
+            "result_count": len(RRC.SERVICE_LABELS),
+        }
+
+    def results(node_id: str, name: str, tested_at: str) -> list[dict]:
+        return [
+            {
+                "service": service,
+                "exact_node_id": node_id,
+                "exact_node_name": name,
+                "source_snapshot_id": "snapshot-old",
+                "source_hash": "c" * 64,
+                "tool_version": tool["tool_version"],
+                "tool_sha256": tool["script_sha256"],
+                "attribution_status": "ATTRIBUTION_MATCH",
+                "control_exit_ip_hmac": node_id + "-exit",
+                "regioncheck_exit_ip_hmac": node_id + "-exit",
+                "tested_at": tested_at,
+            }
+            for service in RRC.SERVICE_LABELS
+        ]
+
+    previous = {
+        "schema_version": RRC.SCHEMA_VERSION,
+        "probe_method_version": RRC.METHOD_VERSION,
+        "source_snapshot_id": "snapshot-old",
+        "source_hash": "c" * 64,
+        "run_id": "old-run",
+        "status": "COMPLETE",
+        "production_fingerprint_preserved": True,
+        "attribution_mismatch": 0,
+        "tool": tool,
+        "node_attempts": [
+            attempt("node-keep", "old-name", recent),
+            attempt("node-stale", "stale-node", stale),
+        ],
+        "results": [
+            *results("node-keep", "old-name", recent),
+            *results("node-stale", "stale-node", stale),
+        ],
+    }
+
+    attempts, imported_results, reusable = RRC.import_reusable_records(
+        previous,
+        manifest=manifest,
+        tool=tool,
+        evidence_ttl_seconds=12 * 60 * 60,
+        now=now,
+    )
+
+    assert reusable == {"node-keep"}
+    assert attempts[0]["exact_node_name"] == "renamed-node"
+    assert attempts[0]["source_snapshot_id"] == "snapshot-new"
+    assert attempts[0]["evidence_reused"] is True
+    assert {item["exact_node_name"] for item in imported_results} == {"renamed-node"}
+    assert {item["source_snapshot_id"] for item in imported_results} == {
+        "snapshot-new"
+    }
+
+    previous["tool"] = {**tool, "script_sha256": "d" * 64}
+    assert RRC.import_reusable_records(
+        previous,
+        manifest=manifest,
+        tool=tool,
+        evidence_ttl_seconds=12 * 60 * 60,
+        now=now,
+    ) == ([], [], set())
+
+
+def test_imported_calibration_requires_two_distinct_exit_hmacs() -> None:
+    attempts = [
+        {"exact_node_id": "node-a", "control_exit_ip_hmac": "same-exit"},
+        {"exact_node_id": "node-b", "control_exit_ip_hmac": "same-exit"},
+    ]
+
+    assert RRC.imported_calibration_node_ids(attempts) == ["node-a"]
 
 
 def test_node_transport_failure_records_all_services_without_ip() -> None:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import hmac
 import importlib.util
@@ -29,6 +30,12 @@ DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
 DEFAULT_TIMEOUT_SECONDS = 240
 DEFAULT_STABILIZATION_SECONDS = 1.0
+DEFAULT_EVIDENCE_TTL_SECONDS = 12 * 60 * 60
+SYSTEMIC_CONFIRM_UNAVAILABLE_STEP = 5
+TRANSPORT_PREFLIGHT_URLS = (
+    "https://www.gstatic.com/generate_204",
+    "https://cp.cloudflare.com/generate_204",
+)
 CONTROL_ATTRIBUTION_BACKENDS = (
     ("regioncheck-ipify", "https://api64.ipify.org", "plain"),
     ("ipify", "https://api.ipify.org?format=json", "json"),
@@ -453,6 +460,7 @@ def discard_proxy_request(
     proxy_url: str,
     runner_scope: Literal["local", "remote"],
     host: str,
+    url: str = TRANSPORT_PREFLIGHT_URLS[0],
 ) -> bool:
     validate_proxy_url(proxy_url)
     try:
@@ -473,7 +481,7 @@ def discard_proxy_request(
                 "--show-error",
                 "--output",
                 "/dev/null",
-                "https://www.gstatic.com/generate_204",
+                url,
             ],
             runner_scope=runner_scope,
             host=host,
@@ -482,6 +490,25 @@ def discard_proxy_request(
     except (OSError, subprocess.TimeoutExpired):
         return False
     return completed.returncode == 0
+
+
+def quick_transport_available(
+    *,
+    proxy_url: str,
+    runner_scope: Literal["local", "remote"],
+    host: str,
+) -> bool:
+    """Use two independent bounded endpoints before expensive attribution."""
+
+    return any(
+        discard_proxy_request(
+            proxy_url=proxy_url,
+            runner_scope=runner_scope,
+            host=host,
+            url=url,
+        )
+        for url in TRANSPORT_PREFLIGHT_URLS
+    )
 
 
 def run_regioncheck(
@@ -625,26 +652,42 @@ def probe_node_with_attribution(
             sleep_seconds=stabilization_seconds,
             sleep_fn=sleep_fn,
         )
+        failure_stage = "TRANSPORT_PREFLIGHT"
         try:
-            # This connection is intentionally best-effort and carries no
-            # attribution evidence.
-            discard_proxy_request(
+            if not quick_transport_available(
                 proxy_url=proxy_context.resolved_proxy_url,
                 runner_scope=proxy_context.runner_scope,
                 host=host,
-            )
+            ):
+                return {
+                    "selector_readback": selected,
+                    "attribution_attempts": attribution_attempt,
+                    "attribution_valid": False,
+                    "status": "ATTRIBUTION_UNAVAILABLE",
+                    "failure_stage": failure_stage,
+                    "control_exit_ip_hmac": "",
+                    "regioncheck_exit_ip_hmac": "",
+                    "exit_country": "UNKNOWN",
+                    "returncode": None,
+                    "output_complete": False,
+                    "transport_unknown": True,
+                    "raw_values": {},
+                    "masked_ip_present": False,
+                }
             reset_sidecar_connections(
                 skill,
                 controller_port,
                 sleep_seconds=min(0.25, stabilization_seconds),
                 sleep_fn=sleep_fn,
             )
+            failure_stage = "CONTROL_BEFORE_RRC"
             control_ip, country = control_geo(
                 proxy_url=proxy_context.resolved_proxy_url,
                 runner_scope=proxy_context.runner_scope,
                 host=host,
                 sleep_fn=sleep_fn,
             )
+            failure_stage = "REGION_RESTRICTION_CHECK"
             returncode, output, raw_values = run_regioncheck_with_transport_retry(
                 host,
                 timeout_seconds,
@@ -652,6 +695,7 @@ def probe_node_with_attribution(
                 runner_scope=proxy_context.runner_scope,
                 sleep_fn=sleep_fn,
             )
+            failure_stage = "CONTROL_AFTER_RRC"
             regioncheck_ip, regioncheck_country = control_geo(
                 proxy_url=proxy_context.resolved_proxy_url,
                 runner_scope=proxy_context.runner_scope,
@@ -664,6 +708,7 @@ def probe_node_with_attribution(
                 "attribution_attempts": attribution_attempt,
                 "attribution_valid": False,
                 "status": "ATTRIBUTION_UNAVAILABLE",
+                "failure_stage": failure_stage,
                 "control_exit_ip_hmac": "",
                 "regioncheck_exit_ip_hmac": "",
                 "exit_country": "UNKNOWN",
@@ -683,6 +728,7 @@ def probe_node_with_attribution(
                     "attribution_attempts": attribution_attempt,
                     "attribution_valid": False,
                     "status": "ATTRIBUTION_UNAVAILABLE",
+                    "failure_stage": "REGION_RESTRICTION_CHECK_OUTPUT",
                     "control_exit_ip_hmac": control_exit_hmac,
                     "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
                     "regioncheck_exit_ip_hmac_source": (
@@ -721,6 +767,7 @@ def probe_node_with_attribution(
                     if attribution_valid
                     else "ATTRIBUTION_UNAVAILABLE"
                 ),
+                "failure_stage": None if attribution_valid else "EXIT_ATTRIBUTION",
                 "control_exit_ip_hmac": control_exit_hmac,
                 "regioncheck_exit_ip_hmac": regioncheck_exit_hmac,
                 "regioncheck_exit_ip_hmac_source": (
@@ -784,6 +831,128 @@ def reusable_node_ids(
         ):
             reusable.add(node_id)
     return reusable
+
+
+def _fresh_timestamp(value: Any, *, now: datetime, ttl_seconds: int) -> bool:
+    if ttl_seconds <= 0 or not isinstance(value, str) or not value:
+        return False
+    try:
+        tested_at = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    if tested_at.tzinfo is None:
+        return False
+    age = (now.astimezone(tested_at.tzinfo) - tested_at).total_seconds()
+    return 0 <= age <= ttl_seconds
+
+
+def import_reusable_records(
+    previous: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    tool: dict[str, Any],
+    evidence_ttl_seconds: int,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    """Rebind recent attributed records by stable identity, never by name."""
+
+    if (
+        previous.get("schema_version") != SCHEMA_VERSION
+        or previous.get("probe_method_version") != METHOD_VERSION
+        or previous.get("status") != "COMPLETE"
+        or previous.get("production_fingerprint_preserved") is not True
+        or int(previous.get("attribution_mismatch") or 0) != 0
+        or previous.get("tool", {}).get("tool_version") != tool["tool_version"]
+        or previous.get("tool", {}).get("script_sha256") != tool["script_sha256"]
+    ):
+        return [], [], set()
+    current_names = {
+        str(item.get("exact_node_id") or ""): str(item.get("exact_node_name") or "")
+        for item in manifest.get("nodes", [])
+    }
+    current_names.pop("", None)
+    now = now or datetime.now().astimezone()
+    results_by_id: dict[str, list[dict[str, Any]]] = {}
+    for result in previous.get("results", []):
+        if isinstance(result, dict):
+            results_by_id.setdefault(str(result.get("exact_node_id") or ""), []).append(result)
+    attempts: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    reusable: set[str] = set()
+    origin_snapshot = str(previous.get("source_snapshot_id") or "")
+    origin_hash = str(previous.get("source_hash") or "")
+    origin_run = str(previous.get("run_id") or "")
+    if not origin_snapshot or not origin_hash or not origin_run:
+        return [], [], set()
+    seen_attempt_ids: set[str] = set()
+    for attempt in previous.get("node_attempts", []):
+        if not isinstance(attempt, dict):
+            continue
+        node_id = str(attempt.get("exact_node_id") or "")
+        current_name = current_names.get(node_id)
+        old_name = str(attempt.get("exact_node_name") or "")
+        control_hmac = str(attempt.get("control_exit_ip_hmac") or "")
+        regioncheck_hmac = str(attempt.get("regioncheck_exit_ip_hmac") or "")
+        node_results = results_by_id.get(node_id, [])
+        services = {str(item.get("service") or "") for item in node_results}
+        invalid_result = any(
+            item.get("tool_version") != tool["tool_version"]
+            or item.get("tool_sha256") != tool["script_sha256"]
+            or item.get("source_snapshot_id") != origin_snapshot
+            or item.get("source_hash") != origin_hash
+            or item.get("exact_node_name") != old_name
+            or item.get("attribution_status") != "ATTRIBUTION_MATCH"
+            or item.get("control_exit_ip_hmac") != control_hmac
+            or item.get("regioncheck_exit_ip_hmac") != regioncheck_hmac
+            or not _fresh_timestamp(
+                item.get("tested_at"), now=now, ttl_seconds=evidence_ttl_seconds
+            )
+            for item in node_results
+        )
+        if (
+            not current_name
+            or node_id in seen_attempt_ids
+            or attempt.get("source_snapshot_id") != origin_snapshot
+            or attempt.get("selector_readback") != old_name
+            or attempt.get("status") != "ATTRIBUTION_MATCH"
+            or attempt.get("attribution_valid") is not True
+            or attempt.get("output_complete") is not True
+            or attempt.get("transport_unknown") is True
+            or not control_hmac
+            or control_hmac != regioncheck_hmac
+            or len(node_results) != len(SERVICE_LABELS)
+            or services != set(SERVICE_LABELS)
+            or not _fresh_timestamp(
+                attempt.get("completed_at"), now=now, ttl_seconds=evidence_ttl_seconds
+            )
+            or invalid_result
+        ):
+            continue
+        seen_attempt_ids.add(node_id)
+        rebound_attempt = copy.deepcopy(attempt)
+        rebound_attempt.update({
+            "exact_node_name": current_name,
+            "selector_readback": current_name,
+            "source_snapshot_id": manifest["source_snapshot_id"],
+            "source_hash": manifest["source_hash"],
+            "evidence_reused": True,
+            "evidence_origin_snapshot_id": origin_snapshot,
+            "evidence_origin_run_id": origin_run,
+        })
+        attempts.append(rebound_attempt)
+        for result in node_results:
+            rebound_result = copy.deepcopy(result)
+            rebound_result.update({
+                "exact_node_name": current_name,
+                "source_snapshot_id": manifest["source_snapshot_id"],
+                "source_hash": manifest["source_hash"],
+                "evidence_reused": True,
+                "evidence_origin_snapshot_id": origin_snapshot,
+                "evidence_origin_run_id": origin_run,
+            })
+            results.append(rebound_result)
+        reusable.add(node_id)
+    return attempts, results, reusable
 
 
 def validate_calibration_report(
@@ -852,6 +1021,24 @@ def systemic_attribution_stop_reason(
     if len(node_attempts) >= 8 and len(unavailable) / len(node_attempts) > 0.25:
         return "STOP_RRC_CONTROL_ATTRIBUTION_SYSTEMIC_UNAVAILABLE"
     return None
+
+
+def should_confirm_systemic_gate(
+    *, unavailable_count: int,
+    last_confirmed_unavailable_count: int,
+    final: bool = False,
+) -> bool:
+    """Debounce expensive sentinels while retaining a mandatory final check."""
+
+    if unavailable_count <= 0:
+        return False
+    if final:
+        return True
+    return (
+        last_confirmed_unavailable_count == 0
+        or unavailable_count - last_confirmed_unavailable_count
+        >= SYSTEMIC_CONFIRM_UNAVAILABLE_STEP
+    )
 
 
 def confirm_systemic_attribution_health(
@@ -923,7 +1110,8 @@ def auto_calibration_sentinels(
         exit_hmac = str(item.get("control_exit_ip_hmac") or "")
         name = str(item.get("exact_node_name") or "")
         if (
-            item.get("status") != "ATTRIBUTION_MATCH"
+            item.get("evidence_reused") is True
+            or item.get("status") != "ATTRIBUTION_MATCH"
             or item.get("output_complete") is not True
             or item.get("result_count") != len(SERVICE_LABELS)
             or not exit_hmac
@@ -936,6 +1124,23 @@ def auto_calibration_sentinels(
         if len(sentinels) == 2:
             break
     return sentinels
+
+
+def imported_calibration_node_ids(attempts: list[dict[str, Any]]) -> list[str]:
+    """Pick two previously distinct exits that must be retested in this run."""
+
+    selected: list[str] = []
+    exit_hmacs: set[str] = set()
+    for item in attempts:
+        node_id = str(item.get("exact_node_id") or "")
+        exit_hmac = str(item.get("control_exit_ip_hmac") or "")
+        if not node_id or not exit_hmac or exit_hmac in exit_hmacs:
+            continue
+        selected.append(node_id)
+        exit_hmacs.add(exit_hmac)
+        if len(selected) == 2:
+            break
+    return selected
 
 
 def require_preserved_production_fingerprint(before: str, after: str) -> None:
@@ -952,6 +1157,7 @@ def main() -> int:
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--node-interval", type=float, default=3.0)
+    parser.add_argument("--evidence-ttl", type=int, default=DEFAULT_EVIDENCE_TTL_SECONDS)
     parser.add_argument("--max-nodes", type=int)
     parser.add_argument("--node", action="append", default=[])
     parser.add_argument("--calibration-only", action="store_true")
@@ -967,6 +1173,8 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--import-report", type=Path)
     args = parser.parse_args()
+    if args.evidence_ttl <= 0:
+        raise ProbeError("RRC_EVIDENCE_TTL_INVALID")
     if args.resume and args.import_report is not None:
         raise ProbeError("RRC_RESUME_AND_IMPORT_CONFLICT")
 
@@ -1037,30 +1245,69 @@ def main() -> int:
         "systemic_gate_confirmations": [],
         "auto_calibration_requested": bool(args.auto_calibrate),
         "auto_calibration_status": "PENDING" if args.auto_calibrate else "NOT_REQUESTED",
+        "evidence_ttl_seconds": args.evidence_ttl,
+        "cross_snapshot_evidence_reused": False,
     }
     previous_path: Path | None = None
     if args.resume and args.output.exists():
         previous_path = args.output
     elif args.import_report is not None:
         previous_path = args.import_report.resolve()
+    forced_current_ids: list[str] = []
     if previous_path is not None:
         previous = json.loads(previous_path.read_text(encoding="utf-8"))
-        reusable = reusable_node_ids(previous, manifest=manifest, tool=tool)
-        selected_ids = {
-            identities[str(proxy["name"])]
-            for proxy in proxies
-        }
-        reusable &= selected_ids
-        report["node_attempts"] = [
-            item
-            for item in previous.get("node_attempts", [])
-            if item.get("exact_node_id") in reusable
-        ]
-        report["results"] = [
-            item
-            for item in previous.get("results", [])
-            if item.get("exact_node_id") in reusable
-        ]
+        selected_ids = {identities[str(proxy["name"])] for proxy in proxies}
+        if args.resume:
+            reusable = reusable_node_ids(previous, manifest=manifest, tool=tool)
+            reusable &= selected_ids
+            report["node_attempts"] = [
+                item
+                for item in previous.get("node_attempts", [])
+                if item.get("exact_node_id") in reusable
+            ]
+            report["results"] = [
+                item
+                for item in previous.get("results", [])
+                if item.get("exact_node_id") in reusable
+            ]
+        else:
+            imported_attempts, imported_results, reusable = import_reusable_records(
+                previous,
+                manifest=manifest,
+                tool=tool,
+                evidence_ttl_seconds=args.evidence_ttl,
+            )
+            reusable &= selected_ids
+            imported_attempts = [
+                item
+                for item in imported_attempts
+                if item.get("exact_node_id") in reusable
+            ]
+            imported_results = [
+                item
+                for item in imported_results
+                if item.get("exact_node_id") in reusable
+            ]
+            forced_current_ids = imported_calibration_node_ids(imported_attempts)
+            if len(forced_current_ids) != 2:
+                imported_attempts, imported_results, reusable = [], [], set()
+                forced_current_ids = []
+            else:
+                forced_set = set(forced_current_ids)
+                reusable -= forced_set
+                imported_attempts = [
+                    item
+                    for item in imported_attempts
+                    if item.get("exact_node_id") not in forced_set
+                ]
+                imported_results = [
+                    item
+                    for item in imported_results
+                    if item.get("exact_node_id") not in forced_set
+                ]
+                report["cross_snapshot_evidence_reused"] = bool(reusable)
+            report["node_attempts"] = imported_attempts
+            report["results"] = imported_results
         report["nodes_reused"] = len(reusable)
         if args.resume:
             report["resumed_verified_records"] = len(reusable)
@@ -1069,6 +1316,15 @@ def main() -> int:
             report["imported_verified_records"] = len(reusable)
     else:
         reusable = set()
+    if forced_current_ids:
+        priority = {node_id: index for index, node_id in enumerate(forced_current_ids)}
+        proxies.sort(
+            key=lambda proxy: (
+                (0, priority[identities[str(proxy["name"])]])
+                if identities[str(proxy["name"])] in priority
+                else (1, 0)
+            )
+        )
     before_fingerprint = skill.remote_production_fingerprint(args.host)
     with tempfile.TemporaryDirectory(prefix="rrc-sidecar-") as temporary:
         config_path = Path(temporary) / "probe.yaml"
@@ -1187,7 +1443,10 @@ def main() -> int:
                         )
                         continue
                     unavailable_count = int(report["attribution_unavailable"])
-                    if unavailable_count > last_confirmed_unavailable_count:
+                    if should_confirm_systemic_gate(
+                        unavailable_count=unavailable_count,
+                        last_confirmed_unavailable_count=last_confirmed_unavailable_count,
+                    ):
                         healthy, confirmations = (
                             confirm_systemic_attribution_health(
                                 skill=skill,
@@ -1223,6 +1482,45 @@ def main() -> int:
                     sidecar.controller_port,
                     sleep_seconds=max(0.0, args.node_interval),
                 )
+            final_stop = systemic_attribution_stop_reason(report["node_attempts"])
+            unavailable_count = int(report["attribution_unavailable"])
+            if (
+                final_stop is not None
+                and len(sentinel_names) == 2
+                and should_confirm_systemic_gate(
+                    unavailable_count=unavailable_count,
+                    last_confirmed_unavailable_count=last_confirmed_unavailable_count,
+                    final=True,
+                )
+            ):
+                healthy, confirmations = confirm_systemic_attribution_health(
+                    skill=skill,
+                    host=args.host,
+                    controller_port=sidecar.controller_port,
+                    proxy_context=proxy_context,
+                    sentinel_names=sentinel_names,
+                    timeout_seconds=args.timeout,
+                    run_key=run_key,
+                    stabilization_seconds=max(
+                        DEFAULT_STABILIZATION_SECONDS,
+                        skill.PROBE_SWITCH_WAIT_SECONDS,
+                    ),
+                )
+                report["systemic_gate_confirmations"].append(
+                    {
+                        "trigger": final_stop,
+                        "unavailable_count": unavailable_count,
+                        "nodes_attempted": report["nodes_attempted"],
+                        "healthy": healthy,
+                        "final": True,
+                        "sentinels": confirmations,
+                    }
+                )
+                safe_atomic_json(args.output.resolve(), report)
+                if not healthy:
+                    report["status"] = final_stop
+                    safe_atomic_json(args.output.resolve(), report)
+                    raise ProbeError(final_stop)
     after_fingerprint = skill.remote_production_fingerprint(args.host)
     require_preserved_production_fingerprint(
         before_fingerprint,

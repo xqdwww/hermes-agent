@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -145,6 +146,64 @@ def test_disney_safe_report_rejects_payload_hidden_in_token_stage() -> None:
         )
 
 
+def test_disney_import_reuses_only_recent_definitive_identity_matches() -> None:
+    now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=1)).isoformat()
+    manifest = {
+        "source_snapshot_id": "snapshot-new",
+        "source_hash": "b" * 64,
+        "nodes": [
+            {"exact_node_id": "node-pass", "exact_node_name": "renamed-pass"},
+            {"exact_node_id": "node-transport", "exact_node_name": "retry-me"},
+        ],
+    }
+    previous = {
+        "schema_version": DISNEY.SCHEMA_VERSION,
+        "service": "disney",
+        "probe_method_version": DISNEY.METHOD_VERSION,
+        "source_snapshot_id": "snapshot-old",
+        "source_hash": "a" * 64,
+        "production_fingerprint_preserved": True,
+        "nodes": [
+            {
+                "exact_node_id": "node-pass",
+                "exact_node_name": "old-pass",
+                "source_snapshot_id": "snapshot-old",
+                "source_hash": "a" * 64,
+                "tested_at": recent,
+                "result": "PASS_SUPPORTED_REGION",
+                "failure_stage": None,
+                "country_code": "US",
+                "in_supported_location": True,
+                "final_redirect_class": "SUPPORTED_ROUTE",
+                "stages": {},
+            },
+            {
+                "exact_node_id": "node-transport",
+                "exact_node_name": "retry-me",
+                "source_snapshot_id": "snapshot-old",
+                "source_hash": "a" * 64,
+                "tested_at": recent,
+                "result": "FAIL_TRANSPORT",
+                "failure_stage": "devices",
+                "stages": {},
+            },
+        ],
+    }
+
+    nodes, reusable = DISNEY.import_reusable_nodes(
+        previous,
+        manifest=manifest,
+        evidence_ttl_seconds=12 * 60 * 60,
+        now=now,
+    )
+
+    assert reusable == {"node-pass"}
+    assert nodes[0]["exact_node_name"] == "renamed-pass"
+    assert nodes[0]["source_snapshot_id"] == "snapshot-new"
+    assert nodes[0]["evidence_reused"] is True
+
+
 def test_auto_calibration_requires_two_distinct_attributed_exits() -> None:
     attempts = [
         {
@@ -270,7 +329,12 @@ def test_formal_update_runs_rrc_disney_then_candidate_preparation(tmp_path: Path
         core_path="/core",
         rrc_timeout=20,
         rrc_node_interval=0.0,
+        probe_evidence_ttl=12 * 60 * 60,
+        probe_cache_dir=tmp_path / "probe-cache",
     )
+    args.probe_cache_dir.mkdir()
+    (args.probe_cache_dir / "latest-regioncheck.json").write_text("{}\n")
+    (args.probe_cache_dir / "latest-disney.json").write_text("{}\n")
 
     with (
         patch.object(
@@ -295,7 +359,11 @@ def test_formal_update_runs_rrc_disney_then_candidate_preparation(tmp_path: Path
     assert len(commands) == 2
     assert commands[0][1].endswith("regioncheck_service_probe.py")
     assert "--auto-calibrate" in commands[0]
+    assert "--import-report" in commands[0]
+    assert commands[0][commands[0].index("--evidence-ttl") + 1] == str(12 * 60 * 60)
     assert commands[1][1].endswith("disney_service_probe.py")
+    assert "--import-report" in commands[1]
+    assert commands[1][commands[1].index("--evidence-ttl") + 1] == str(12 * 60 * 60)
     assert len(prepared) == 1
     assert prepared[0].rrc_results.name == "regioncheck-full.json"
     assert [path.name for path in prepared[0].functional_results] == [

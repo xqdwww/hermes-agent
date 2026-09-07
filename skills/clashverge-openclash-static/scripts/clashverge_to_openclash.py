@@ -187,7 +187,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.6.2"
+SKILL_VERSION = "2.6.3"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -216,6 +216,7 @@ SOURCE_SNAPSHOT_SCHEMA_VERSION = 1
 SOURCE_REFRESH_PROTOCOL_VERSION = 1
 PREPARATION_JOURNAL_SCHEMA_VERSION = 1
 DEFAULT_SOURCE_FRESHNESS_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_PROBE_EVIDENCE_TTL_SECONDS = 12 * 60 * 60
 DEFAULT_MIN_NODE_RETENTION_RATIO = 0.50
 REMOTE_SIDECAR_LOCK_STALE_SECONDS = 30
 DEFAULT_SOURCE_IDENTITY_KEY = (
@@ -228,6 +229,9 @@ PROBE_SWITCH_WAIT_SECONDS = 0.75
 PROBE_RUN_TIMEOUT_SECONDS = 15 * 60
 DEFAULT_LKG_STATE_PATH = (
     Path.home() / ".hermes/state/clashverge-openclash-static/service-probe-lkg.json"
+)
+DEFAULT_PROBE_ARTIFACT_CACHE_DIR = (
+    Path.home() / ".hermes/state/clashverge-openclash-static/probe-cache"
 )
 DEFAULT_PROBE_REPORT_PATH = Path("/tmp/openclash-service-probe-results.json")
 PROBE_CORE_CANDIDATES = (
@@ -4818,54 +4822,86 @@ def orchestrate_formal_candidate_update(args: argparse.Namespace) -> dict[str, A
     script_dir = Path(__file__).resolve().parent
     rrc_path = run_dir / "regioncheck-full.json"
     disney_path = run_dir / "disney-full-chain.json"
+    cache_dir = Path(
+        getattr(args, "probe_cache_dir", DEFAULT_PROBE_ARTIFACT_CACHE_DIR)
+    ).expanduser().resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(cache_dir, 0o700)
+    rrc_cache_path = cache_dir / "latest-regioncheck.json"
+    disney_cache_path = cache_dir / "latest-disney.json"
+    evidence_ttl = int(
+        getattr(args, "probe_evidence_ttl", DEFAULT_PROBE_EVIDENCE_TTL_SECONDS)
+    )
+    if evidence_ttl <= 0:
+        raise ConfigError("--probe-evidence-ttl must be positive.")
     try:
         if not _rrc_artifact_complete(rrc_path, manifest):
-            run_probe_command(
-                [
-                    sys.executable,
-                    str(script_dir / "regioncheck_service_probe.py"),
-                    "--skill-script",
-                    str(Path(__file__).resolve()),
-                    "--source-snapshot",
-                    str(manifest_path),
-                    "--output",
-                    str(rrc_path),
-                    "--host",
-                    args.host,
-                    "--core-path",
-                    args.core_path,
-                    "--timeout",
-                    str(args.rrc_timeout),
-                    "--node-interval",
-                    str(args.rrc_node_interval),
-                    "--auto-calibrate",
-                ]
-            )
+            command = [
+                sys.executable,
+                str(script_dir / "regioncheck_service_probe.py"),
+                "--skill-script",
+                str(Path(__file__).resolve()),
+                "--source-snapshot",
+                str(manifest_path),
+                "--output",
+                str(rrc_path),
+                "--host",
+                args.host,
+                "--core-path",
+                args.core_path,
+                "--timeout",
+                str(args.rrc_timeout),
+                "--node-interval",
+                str(args.rrc_node_interval),
+                "--evidence-ttl",
+                str(evidence_ttl),
+                "--auto-calibrate",
+            ]
+            try:
+                load_json_object(rrc_cache_path)
+            except ConfigError:
+                pass
+            else:
+                command.extend(["--import-report", str(rrc_cache_path)])
+            run_probe_command(command)
         if not _rrc_artifact_complete(rrc_path, manifest):
             raise ConfigError("STOP_FORMAL_UPDATE_RRC_ARTIFACT_INCOMPLETE")
+        atomic_write_json(load_json_object(rrc_path), rrc_cache_path, private_parent=True)
         journal.setdefault("stages", {})["REGION_RESTRICTION_CHECK"] = "COMPLETE"
         journal["updated_at"] = iso_now()
         atomic_write_json(journal, journal_path, private_parent=True)
 
         if not _disney_artifact_complete(disney_path, manifest):
-            run_probe_command(
-                [
-                    sys.executable,
-                    str(script_dir / "disney_service_probe.py"),
-                    "--skill-script",
-                    str(Path(__file__).resolve()),
-                    "--source-snapshot",
-                    str(manifest_path),
-                    "--output",
-                    str(disney_path),
-                    "--host",
-                    args.host,
-                    "--core-path",
-                    args.core_path,
-                ]
-            )
+            command = [
+                sys.executable,
+                str(script_dir / "disney_service_probe.py"),
+                "--skill-script",
+                str(Path(__file__).resolve()),
+                "--source-snapshot",
+                str(manifest_path),
+                "--output",
+                str(disney_path),
+                "--host",
+                args.host,
+                "--core-path",
+                args.core_path,
+                "--evidence-ttl",
+                str(evidence_ttl),
+            ]
+            try:
+                load_json_object(disney_cache_path)
+            except ConfigError:
+                pass
+            else:
+                command.extend(["--import-report", str(disney_cache_path)])
+            run_probe_command(command)
         if not _disney_artifact_complete(disney_path, manifest):
             raise ConfigError("STOP_FORMAL_UPDATE_DISNEY_ARTIFACT_INCOMPLETE")
+        atomic_write_json(
+            load_json_object(disney_path),
+            disney_cache_path,
+            private_parent=True,
+        )
         journal.setdefault("stages", {})["DISNEY_FULL_CHAIN"] = "COMPLETE"
         journal["updated_at"] = iso_now()
         atomic_write_json(journal, journal_path, private_parent=True)
@@ -5331,6 +5367,8 @@ def build_parser() -> argparse.ArgumentParser:
     all_p.add_argument("--previous-manual-results", type=Path)
     all_p.add_argument("--rrc-timeout", type=int, default=45)
     all_p.add_argument("--rrc-node-interval", type=float, default=3.0)
+    all_p.add_argument("--probe-evidence-ttl", type=int, default=DEFAULT_PROBE_EVIDENCE_TTL_SECONDS)
+    all_p.add_argument("--probe-cache-dir", type=Path, default=DEFAULT_PROBE_ARTIFACT_CACHE_DIR)
     add_probe_args(all_p)
     add_deploy_args(all_p)
 
@@ -5356,6 +5394,8 @@ def build_parser() -> argparse.ArgumentParser:
     update_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     update_p.add_argument("--rrc-timeout", type=int, default=45)
     update_p.add_argument("--rrc-node-interval", type=float, default=3.0)
+    update_p.add_argument("--probe-evidence-ttl", type=int, default=DEFAULT_PROBE_EVIDENCE_TTL_SECONDS)
+    update_p.add_argument("--probe-cache-dir", type=Path, default=DEFAULT_PROBE_ARTIFACT_CACHE_DIR)
 
     refresh_p = sub.add_parser(
         "refresh-source",
@@ -5531,6 +5571,11 @@ def runtime_self_check() -> dict[str, Any]:
         "browser_probe_gate": False,
         "deployment_mode": "upload_candidate_then_independent_activate",
         "candidate_preparation_mode": "resumable_frozen_artifacts",
+        "incremental_probe_reuse": True,
+        "probe_evidence_ttl": DEFAULT_PROBE_EVIDENCE_TTL_SECONDS,
+        "probe_cache_dir": str(DEFAULT_PROBE_ARTIFACT_CACHE_DIR),
+        "transport_preflight_endpoints": 2,
+        "systemic_confirmation_unavailable_step": 5,
         "duplicate_skill_paths": duplicate_paths,
         "pass": sync_commit not in {"UNRECORDED", "INVALID"},
     }
