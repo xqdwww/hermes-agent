@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.6.3
+version: 2.7.3
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -17,6 +17,20 @@ prerequisites:
 # Clash Verge → OpenClash Static Configuration
 
 Use this Skill when the user asks to update OpenClash from the current Clash Verge effective configuration.
+
+## Isolated refresh network state (2.7.3)
+
+The temporary source-refresh home always disables its copied system-proxy and
+TUN flags. The production Clash Verge configuration is not edited. This keeps
+the helper process from changing macOS network state while it refreshes the
+subscription source.
+
+## Refresh-state diagnostics (2.7.2)
+
+When source refresh detects Clash Verge state drift, the stop reason includes
+only the names of changed protected fields. Values remain private. The refresh
+still fails closed for every protected field; this diagnostic does not weaken
+the state-preservation guard.
 
 ## Source of truth
 
@@ -34,10 +48,77 @@ Dependency:
 python3 -m pip install PyYAML
 ```
 
+## Emergency recovery and test isolation (2.7.1)
+
+GPT专用 and Gemini专用 retain their current manual default and curated candidate
+option, and expose a final **AI应急（未验证）** option. This shared manual select
+group contains every current subscription node. Selecting it is an explicit
+recovery action; none of its unverified nodes are automatically promoted into
+GPT/Gemini candidate pools or used as an automatic functional fallback. An
+empty curated pool still blocks ordinary automatic candidate generation.
+
+A singleton pool has no redundancy. Do not describe its availability as durable
+or let a full-node test change the connection keeping the operator/Codex online.
+When the user has disabled OpenClash and is using desktop Clash Verge, preserve
+that working desktop configuration and disabled router state. Prepare tests on
+an isolated proxy path first. A webpage generation success through the desktop
+proxy cannot be attributed to a disabled router's selected node.
+
+Name-based no-retest is an update policy, not a promise of future availability.
+Preserve evidence timestamps and entry points, allow deliberate incident retests,
+and keep ordinary connection-health failover distinct from actual service proof.
+
+## Default exact-name incremental updates (2.7.0)
+
+The user's explicit policy supersedes the historical full-scan and identity-retest
+requirements below for ordinary updates. `update-candidate` and `all --deploy
+--no-activate` now refresh/freeze the subscription, compare it with the active
+production profile by exact name, replace complete parameters for same-name
+nodes WITHOUT service probes, remove deleted names, and probe ONLY added names.
+A renamed node counts as added. Changed parameters under the same name are
+reported as PARAMETERS_CHANGED_NOT_RETESTED, never as new actual-use evidence.
+Neither saved registry identities nor original proof timestamps are rewritten.
+
+The read-only production baseline is captured after source refresh; candidate
+upload still never writes production, and activation remains a separate healthy,
+rollback-protected transaction. Candidate configuration/egress health checks are
+retained; they are not repeated service eligibility tests of all existing nodes.
+No additions means zero RRC/Disney service probes. `--full-retest` explicitly
+selects the old full diagnostic workflow and is never selected automatically.
+
+AI manual selectors expose only their curated candidate pool plus its selector.
+Unknown, failed, and historical-only nodes stay in the general manual selector;
+they are not appended to GPT/Gemini. Hong Kong-labelled nodes are conservatively
+excluded from AI pools; labels are NOT claims about actual exit geography.
+New RRC screen Yes is diagnostic only and cannot promote a new GPT/Gemini node.
+Actual-use proof must be service-specific: guest ChatGPT does not prove paid
+models/API/Codex, and Antigravity CloudCode does not prove Gemini Web eligibility.
+Single new-node updates do not retest old sentinels to satisfy RRC's two-node
+calibration: record NEEDS_ACTUAL_USE_VERIFICATION and test Disney only. Do not
+claim unperformed AI generation tests passed. Known same-name pool membership is
+carried policy rather than proof of current usability; users can request explicit
+functional retesting when a carried node fails. Empty required pools block
+activation instead of substituting unknown nodes or DIRECT.
+
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.6.3 bounds repeat-update latency without weakening
+for this Skill. Version 2.7.0 makes ordinary updates exact-name incremental and removes unknown AI manual tails. Version 2.6.7 removes the redundant default 3-second inter-node
+RRC cooldown for clean attributed complete probes: `--rrc-node-interval` and the
+RRC `--node-interval` default to zero, saving 3 seconds per clean fresh node.
+Unknown, incomplete, or transport-uncertain outcomes retain the 3-second safety
+floor; explicit interval overrides remain available. Each node still performs
+connection reset, selector confirmation, stabilization, preflight, attribution,
+and retry safety steps, and total runtime will not necessarily improve in direct
+proportion because probe work, retries, and systemic gates still apply.
+Version 2.6.5 makes the first functionally filtered concrete
+Gemini node the default `Gemini手动` selection and keeps `Gemini候选` as an
+explicit transport-only failover choice. This prevents a restart from silently
+preferring a node that passes HTTP health checks but fails Google location
+eligibility. Version 2.6.4 persistently routes the three production
+Antigravity CloudCode backends through `Gemini专用` with exact-domain rules;
+it deliberately does not capture unrelated `googleapis.com` traffic. Version
+2.6.3 bounds repeat-update latency without weakening
 attribution: it performs two short independent transport preflights before the
 expensive control/RRC path, debounces systemic sentinel confirmation to every
 five new unavailable nodes plus a mandatory final check, and reuses complete
@@ -62,7 +143,7 @@ upload plus sidecar-test it. The snapshot-scoped journal reuses only complete,
 identity-bound probe artifacts. `all --deploy --no-activate` is a compatibility
 alias for this mature path; it no longer runs the legacy HTTP screen probe.
 The combined `all --deploy --activate` form fails before refresh or router
-contact because activation remains a separately approved transaction. Version
+contact because activation remains a separate transaction. Version
 2.5.1 lets the authenticated source-only helper run
 beside a normal Clash Verge 2.5.2 process on a separate loopback port, discovers
 the helper from `$HERMES_HOME/bin/clash-verge-source-refresh`, rejects port
@@ -131,6 +212,36 @@ transaction. The browser probe remains historical experimental code and is not a
 candidate or activation gate. Do not add Playwright or operate the dedicated
 logged-in profile from this Skill.
 
+## Saved verified service pools (2.6.7)
+
+The default `~/.hermes/state/clashverge-openclash-static/verified-service-registry.json`
+is consumed automatically by transform and reconciliation. It stores only HMAC
+connection identities, service scope, original test time, enabled state, and
+preferred/manual tiers. `OPENCLASH_VERIFIED_REGISTRY_PATH` overrides its path.
+Missing registry retains legacy behavior; malformed data or missing identity key
+fails closed. Same-name changed connections cannot inherit evidence; renamed
+unchanged connections can. Saved positive evidence has no automatic age expiry.
+Newer explicit actual-use failures, transport failures and recapture safeguards
+remain authoritative. The report distinguishes reused proof from a fresh test.
+
+For the current 2026-09-08 registry, GPT has 15 ChatGPT anonymous-generation
+preferred nodes; Gemini has 12 Antigravity/CloudCode-generation preferred nodes
+and 19 manually selectable successful but less consistent candidates. These
+counts are baseline evidence, not promises of permanent availability. Do not
+label CloudCode proof as Gemini Web or AI Studio proof, or guest ChatGPT proof
+as proof of paid models, Codex or authenticated OpenAI API.
+
+Exact registry matches may bypass the old `流媒体` name exclusion. Unverified
+nodes retain that exclusion. Prefer registry order and a concrete first node
+for GPT/Gemini manual selectors. Keep transport-only fallback available as an
+explicit choice; an HTTP health response is not actual model eligibility.
+
+Antigravity Manager connects to OpenClash through its native HTTP proxy pool;
+its gateway entry is `OpenClash · Gemini 已验证节点池`. Airport VLESS/Hysteria2
+credentials stay in OpenClash. The gateway follows the existing narrow
+CloudCode rules, so updating this shared routing pool updates the reverse
+proxy's usable choices without duplicating airport subscriptions in Manager.
+
 ## Accepted policy
 
 The generated profile contains these 12 primary managed groups:
@@ -155,7 +266,7 @@ candidate group merely because they passed historically.
 Rules:
 
 - Never generate `全局优先│...`, `GPT优先│...`, `Gemini优先│...`, `迪士尼优先│...`, or their full-width-bar variants.
-- Manual groups list direct nodes. Their first item is the corresponding candidate group.
+- Manual groups list direct nodes. With saved verified AI pools, GPT/Gemini start with the first verified concrete node; the candidate group remains explicitly selectable.
 - Candidate groups are ordinary `fallback` groups; their size is never described as an automated probe-pass count.
 - All fallback groups use `https://www.gstatic.com/generate_204`, interval 60, lazy true, timeout 5000, and max-failed-times 1.
 - Global/GPT/Disney ordering is Japan → Taiwan → other nodes.
@@ -167,7 +278,7 @@ Rules:
 - GPT candidates accept current `SCREEN_PASS` or current identity-bound manual functional PASS, but not an explicit current transport failure. Gemini candidates accept current `SCREEN_PASS`, current identity-bound manual functional PASS, or `PASS_WITH_SCREEN_FALSE_NEGATIVE`; exclude manual FAIL and conflicts. Disney candidates prefer current full-chain `PASS_SUPPORTED_REGION`; a full-chain hard failure outranks RegionRestrictionCheck.
 - Never treat Google reachability, Gemini HTTP 200, a login redirect, an API response, old LKG, or an old override as definitive Gemini Web generation proof.
 - Never treat a Disney homepage, TLS, CDN, or HTTP 200 response as Disney support proof.
-- New UNKNOWN nodes may appear only at the tail of the corresponding manual group; they never enter the candidate group.
+- New UNKNOWN AI nodes stay only in the general 手动选择 group; they never enter GPT/Gemini manual or candidate groups. Disney retains its separate full-chain evidence policy.
 - If a primary service group is empty, stop candidate generation with `BLOCKED_NO_CURRENT_SERVICE_CANDIDATES`; never silently substitute LKG or default routing.
 - Preserve ordinary source rules, rename the old target `顺畅网络` to `默认代理`, regenerate narrow GPT/Gemini/Disney rules, and finish with exactly `MATCH,默认代理`.
 - Remove Clash Verge-only controller/listener/profile fields, temporary probe/controller fields, and `/tmp/verge` paths if present. Preserve a general top-level `tun` section because it may carry user network semantics.
@@ -177,13 +288,18 @@ Rules:
 
 ### “更新 OpenClash 节点”
 
-Export, transform, deploy, validate remotely, activate, and restart OpenClash:
+Prepare, upload, validate remotely, then activate the verified candidate and
+restart OpenClash:
 
 ```bash
-python3 scripts/clashverge_to_openclash.py all \
+python3 scripts/clashverge_to_openclash.py update-candidate \
   --refresh-adapter scripts/clash_verge_source_refresh_adapter.py \
-  --deploy \
-  --activate
+  --upload
+
+python3 scripts/clashverge_to_openclash.py activate \
+  --candidate-path <remote_candidate_path> \
+  --production-name <production_profile_name> \
+  --source-snapshot <source_snapshot_manifest>
 ```
 
 Before generation, a deploying `all` run probes static nodes through a temporary
@@ -208,8 +324,10 @@ router sidecars, uploads one immutable candidate, validates it, and leaves UCI,
 the selected production YAML, service state, firewall, policy routes, DNS, and
 TUN untouched. `all --deploy --no-activate` is a compatibility alias for this
 same mature workflow. Never use `all --deploy --activate`; it is rejected before
-refresh and router contact. Activate only the verified immutable candidate with
-the independent `activate` subcommand after explicit approval.
+refresh and router contact. Activate the verified immutable candidate with the
+independent `activate` subcommand using the paths and snapshot printed by the
+candidate update only when the user request includes activation. An existing
+request to update and activate is sufficient; no repeat approval is needed.
 
 When previous snapshot-bound manual evidence exists, pass both
 `--previous-source-snapshot` and `--previous-manual-results`. The formal workflow

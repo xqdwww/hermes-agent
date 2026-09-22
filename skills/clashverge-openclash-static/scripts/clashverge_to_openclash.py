@@ -15,6 +15,7 @@ Policy:
 from __future__ import annotations
 
 import argparse
+import runpy
 import datetime as dt
 import hashlib
 import hmac
@@ -126,6 +127,18 @@ SERVICE_RULES = (
     "DOMAIN,gemini.google.com,Gemini专用",
     "DOMAIN,bard.google.com,Gemini专用",
     "DOMAIN,aistudio.google.com,Gemini专用",
+    # Antigravity Manager inference backends observed in production.  Keep
+    # every hostname exact: unrelated googleapis.com traffic must continue to
+    # use its existing policy.
+    "DOMAIN,daily-cloudcode-pa.googleapis.com,Gemini专用",
+    "DOMAIN,daily-cloudcode-pa.sandbox.googleapis.com,Gemini专用",
+    "DOMAIN,cloudcode-pa.googleapis.com,Gemini专用",
+    # Gemini iOS app backends observed in live OpenClash connection metadata.
+    # Keep these exact: a googleapis.com suffix rule would capture unrelated apps.
+    "DOMAIN,robinfrontend-pa.googleapis.com,Gemini专用",
+    "DOMAIN,signaler-pa.googleapis.com,Gemini专用",
+    "DOMAIN,notifications-pa.googleapis.com,Gemini专用",
+    "DOMAIN,subscriptionsfirstparty-pa.googleapis.com,Gemini专用",
     "DOMAIN-SUFFIX,generativelanguage.googleapis.com,Gemini专用",
     "DOMAIN-SUFFIX,ai.google.dev,Gemini专用",
     "DOMAIN-SUFFIX,deepmind.google,Gemini专用",
@@ -152,6 +165,7 @@ MANAGED_GROUP_NAMES = (
     "迪士尼候选",
 )
 OPTIONAL_HISTORY_GROUP_NAMES = ("GPT历史LKG", "Gemini历史LKG", "迪士尼历史LKG")
+EMERGENCY_GROUP_NAME = "AI应急（未验证）"
 
 BUILTIN_TARGETS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"}
 SENSITIVE_KEYS = {
@@ -187,7 +201,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.6.3"
+SKILL_VERSION = "2.7.3"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -207,6 +221,11 @@ LKG_SCHEMA_VERSION = 1
 PROBE_SCHEMA_VERSION = 1
 PROBE_VERSION = "3"
 SERVICE_REGION_POLICY_VERSION = "2026-09-07.1"
+DEFAULT_FALLBACK_HEALTH_URL = "https://www.gstatic.com/generate_204"
+GEMINI_FALLBACK_HEALTH_URL = (
+    "https://daily-cloudcode-pa.googleapis.com/generate_204"
+)
+GEMINI_FALLBACK_MAX_FAILED_TIMES = 2
 REJECTED_CANDIDATE_SHA256 = {
     "799c2bba5eb2cb35673fd322a621a3bec4b6ca23b03954fc91c3b7761906cf74":
         "REJECTED_REGION_POLICY_REGRESSION",
@@ -221,6 +240,27 @@ DEFAULT_MIN_NODE_RETENTION_RATIO = 0.50
 REMOTE_SIDECAR_LOCK_STALE_SECONDS = 30
 DEFAULT_SOURCE_IDENTITY_KEY = (
     Path.home() / ".hermes/state/clashverge-openclash-static/source-identity.key"
+)
+DEFAULT_VERIFIED_SERVICE_REGISTRY_PATH = (
+    Path.home()
+    / ".hermes/state/clashverge-openclash-static/verified-service-registry.json"
+)
+VERIFIED_SERVICE_REGISTRY_ENV = "OPENCLASH_VERIFIED_REGISTRY_PATH"
+VERIFIED_SERVICE_REGISTRY_SCHEMA_VERSION = 1
+VERIFIED_SERVICE_REGISTRY_ENTRY_FIELDS = frozenset(
+    {"exact_node_id", "node", "service", "tier", "enabled", "tested_at", "method"}
+)
+VERIFIED_SERVICE_REGISTRY_SERVICES = frozenset(("gpt", "gemini"))
+VERIFIED_SERVICE_REGISTRY_TIERS = frozenset(("preferred", "manual"))
+VERIFIED_SERVICE_REGISTRY_METHODS = frozenset(
+    ("chatgpt_guest_generation", "chatgpt_web_generation", "antigravity_inference", "gemini_web_generation")
+)
+VERIFIED_REGISTRY_MANUAL_RETRY_BLOCKS = frozenset(
+    (
+        "NEWER_TRANSPORT_FAILURE",
+        "NEWER_FUNCTIONAL_TRANSPORT_FAILURE",
+        "PROBABLE_TUN_OR_UPSTREAM_RECAPTURE",
+    )
 )
 PROBE_CONNECT_TIMEOUT_SECONDS = 3
 PROBE_TOTAL_TIMEOUT_SECONDS = 8
@@ -500,11 +540,21 @@ def ordered_unique(values: Iterable[str]) -> list[str]:
     return result
 
 
-def filter_service_nodes(service: str, names: Iterable[str]) -> list[str]:
+def filter_service_nodes(
+    service: str,
+    names: Iterable[str],
+    *,
+    verified_names: Iterable[str] | None = None,
+) -> list[str]:
     values = list(names)
     if service not in AI_SERVICE_KEYS:
         return values
-    return [name for name in values if STREAMING_LABEL not in name]
+    verified = set(verified_names or ())
+    return [
+        name
+        for name in values
+        if STREAMING_LABEL not in name or name in verified
+    ]
 
 
 def normalize_node_name(name: str) -> str:
@@ -684,6 +734,204 @@ def stable_node_identity(proxy: dict[str, Any], key: bytes) -> str:
     # inside the HMAC input and never enter manifests or logs.
     identity = {k: v for k, v in proxy.items() if k not in {"name", "udp"}}
     return "node_" + identity_hmac(key, identity)[:24]
+
+
+def verified_service_registry_path(path: Path | None = None) -> Path:
+    """Resolve the saved actual-use registry location without touching its data."""
+
+    if path is not None:
+        return path.expanduser().resolve()
+    override = os.environ.get(VERIFIED_SERVICE_REGISTRY_ENV)
+    if override:
+        return Path(override).expanduser().resolve()
+    return DEFAULT_VERIFIED_SERVICE_REGISTRY_PATH.expanduser().resolve()
+
+
+def load_verified_service_registry(
+    path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Load and validate the identity-bound saved actual-use registry.
+
+    A missing registry deliberately returns ``None`` so callers retain the legacy
+    candidate behavior.  Once the path exists, every structural and evidence field
+    is validated; malformed present data is therefore a hard configuration error.
+    """
+
+    resolved = verified_service_registry_path(path)
+    if not resolved.exists():
+        return None
+    payload = load_json_object(resolved)
+    if payload.get("schema_version") != VERIFIED_SERVICE_REGISTRY_SCHEMA_VERSION:
+        raise ConfigError(f"Unsupported verified-service-registry schema: {resolved}")
+    raw_nodes = payload.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ConfigError(f"Verified service registry nodes must be a list: {resolved}")
+
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(raw_nodes):
+        if not isinstance(raw, dict):
+            raise ConfigError(f"Verified service registry node {index} must be an object.")
+        if set(raw) != set(VERIFIED_SERVICE_REGISTRY_ENTRY_FIELDS):
+            raise ConfigError(
+                f"Verified service registry node {index} has an invalid schema."
+            )
+        exact_node_id = raw.get("exact_node_id")
+        node = raw.get("node")
+        service = raw.get("service")
+        tier = raw.get("tier")
+        enabled = raw.get("enabled")
+        tested_at = raw.get("tested_at")
+        method = raw.get("method")
+        if not isinstance(exact_node_id, str) or not exact_node_id.strip():
+            raise ConfigError(f"Verified service registry node {index} has no identity.")
+        if not isinstance(node, str) or not node.strip():
+            raise ConfigError(f"Verified service registry node {index} has no name.")
+        if service not in VERIFIED_SERVICE_REGISTRY_SERVICES:
+            raise ConfigError(f"Verified service registry node {index} has an invalid service.")
+        if tier not in VERIFIED_SERVICE_REGISTRY_TIERS:
+            raise ConfigError(f"Verified service registry node {index} has an invalid tier.")
+        if not isinstance(enabled, bool):
+            raise ConfigError(f"Verified service registry node {index} has an invalid enabled flag.")
+        if not isinstance(tested_at, str) or not tested_at.strip():
+            raise ConfigError(f"Verified service registry node {index} has no tested_at timestamp.")
+        parse_aware_timestamp(tested_at, field=f"verified service registry node {index}")
+        if method not in VERIFIED_SERVICE_REGISTRY_METHODS or (
+            service == "gpt" and method not in {"chatgpt_guest_generation", "chatgpt_web_generation"}
+        ) or (
+            service == "gemini" and method not in {"antigravity_inference", "gemini_web_generation"}
+        ):
+            raise ConfigError(f"Verified service registry node {index} has an invalid method.")
+        identity_key = (exact_node_id, service)
+        if identity_key in seen:
+            raise ConfigError(
+                f"Verified service registry contains duplicate identity/service: {exact_node_id}/{service}"
+            )
+        seen.add(identity_key)
+        # Copy only the schema fields so later report construction cannot accidentally
+        # carry an unvalidated field (especially a credential) into a report.
+        entries.append(
+            {
+                "exact_node_id": exact_node_id,
+                "node": node,
+                "service": service,
+                "tier": tier,
+                "enabled": enabled,
+                "tested_at": tested_at,
+                "method": method,
+            }
+        )
+    return {"schema_version": VERIFIED_SERVICE_REGISTRY_SCHEMA_VERSION, "nodes": entries}
+
+
+def read_existing_identity_key(path: Path | None = None) -> bytes:
+    """Read an existing source identity key without creating one."""
+
+    resolved = (path or DEFAULT_SOURCE_IDENTITY_KEY).expanduser().resolve()
+    if not resolved.is_file():
+        raise ConfigError(
+            "STOP_VERIFIED_SERVICE_REGISTRY_FAILED: source identity key is missing"
+        )
+    try:
+        key = resolved.read_bytes()
+    except OSError as exc:
+        raise ConfigError(
+            "STOP_VERIFIED_SERVICE_REGISTRY_FAILED: cannot read source identity key"
+        ) from exc
+    if len(key) < 32:
+        raise ConfigError(
+            "STOP_VERIFIED_SERVICE_REGISTRY_FAILED: identity key is too short"
+        )
+    return key
+
+
+def build_verified_service_registry_context(
+    proxies: Sequence[dict[str, Any]],
+    *,
+    registry_path: Path | None = None,
+    identity_key_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Bind registry entries to current proxies by the existing stable node identity."""
+
+    registry = load_verified_service_registry(registry_path)
+    if registry is None:
+        return None
+    key = read_existing_identity_key(identity_key_path or DEFAULT_SOURCE_IDENTITY_KEY)
+    current_by_id: dict[str, str] = {}
+    for proxy in proxies:
+        name = str(proxy["name"])
+        node_id = stable_node_identity(proxy, key)
+        previous = current_by_id.get(node_id)
+        if previous is not None and previous != name:
+            raise ConfigError("STOP_VERIFIED_SERVICE_REGISTRY_FAILED: stable node ID collision")
+        current_by_id[node_id] = name
+
+    by_service_name: dict[str, dict[str, dict[str, Any]]] = {
+        service: {} for service in VERIFIED_SERVICE_REGISTRY_SERVICES
+    }
+    preferred_order: dict[str, list[str]] = {
+        service: [] for service in VERIFIED_SERVICE_REGISTRY_SERVICES
+    }
+    manual_order: dict[str, list[str]] = {
+        service: [] for service in VERIFIED_SERVICE_REGISTRY_SERVICES
+    }
+    matched_entries: dict[str, list[dict[str, Any]]] = {
+        service: [] for service in VERIFIED_SERVICE_REGISTRY_SERVICES
+    }
+    for entry in registry["nodes"]:
+        current_name = current_by_id.get(entry["exact_node_id"])
+        if current_name is None:
+            continue
+        service = str(entry["service"])
+        if current_name in by_service_name[service]:
+            raise ConfigError(
+                "STOP_VERIFIED_SERVICE_REGISTRY_FAILED: duplicate current service match"
+            )
+        bound = dict(entry)
+        bound["current_name"] = current_name
+        by_service_name[service][current_name] = bound
+        matched_entries[service].append(bound)
+        if not entry["enabled"]:
+            continue
+        if entry["tier"] == "preferred":
+            preferred_order[service].append(current_name)
+        else:
+            manual_order[service].append(current_name)
+
+    entries_by_service = {
+        service: [
+            entry for entry in registry["nodes"] if entry["service"] == service
+        ]
+        for service in VERIFIED_SERVICE_REGISTRY_SERVICES
+    }
+    matched_names = {
+        service: frozenset(by_service_name[service])
+        for service in VERIFIED_SERVICE_REGISTRY_SERVICES
+    }
+    controlled_services = frozenset(
+        service for service, entries in entries_by_service.items() if entries
+    )
+    return {
+        "path": verified_service_registry_path(registry_path),
+        "schema_version": registry["schema_version"],
+        "entries": tuple(registry["nodes"]),
+        "entries_by_service": entries_by_service,
+        "by_service_name": by_service_name,
+        "matched_entries": matched_entries,
+        "matched_names": matched_names,
+        "preferred_order": preferred_order,
+        "manual_order": manual_order,
+        "current_by_id": current_by_id,
+        "controlled_services": controlled_services,
+    }
+
+
+def registry_entry_for_name(
+    registry: dict[str, Any] | None, service: str, name: str
+) -> dict[str, Any] | None:
+    if registry is None:
+        return None
+    return registry.get("by_service_name", {}).get(service, {}).get(name)
 
 
 def migrate_manual_evidence_by_connection_identity(
@@ -952,6 +1200,20 @@ def capture_clash_verge_state(paths: dict[str, Path], key: bytes) -> dict[str, A
         ],
         "profile_count": len(items),
     }
+
+
+def changed_clash_verge_state_keys(
+    before_state: dict[str, Any],
+    after_state: dict[str, Any],
+    preserved_keys: set[str],
+) -> list[str]:
+    """Return only changed field names so drift diagnostics never expose values."""
+
+    return sorted(
+        key
+        for key in preserved_keys
+        if before_state.get(key) != after_state.get(key)
+    )
 
 
 def active_remote_profile(paths: dict[str, Path]) -> dict[str, Any]:
@@ -1403,10 +1665,13 @@ def prepare_source_snapshot(
         "bound_subscription_ids",
         "mac_network_exit_state_hash",
     }
-    if {k: before_state.get(k) for k in preserved_keys} != {
-        k: after_state.get(k) for k in preserved_keys
-    }:
-        raise ConfigError("STOP_CLASH_VERGE_STATE_DRIFT")
+    changed_state_keys = changed_clash_verge_state_keys(
+        before_state, after_state, preserved_keys
+    )
+    if changed_state_keys:
+        raise ConfigError(
+            "STOP_CLASH_VERGE_STATE_DRIFT:" + ",".join(changed_state_keys)
+        )
     source_identity = identity_hmac(key, profile.get("uid"))[:24]
     diff_summary = {
         "node_count_before": before["node_count"],
@@ -2119,6 +2384,7 @@ def service_region_policy(
     service_result: dict[str, Any],
     *,
     existing_candidate: bool,
+    verified_registry_match: bool = False,
 ) -> dict[str, Any]:
     functional = service_result.get("functional_result", {})
     attribution_status = str(functional.get("attribution_status") or "")
@@ -2167,7 +2433,11 @@ def service_region_policy(
         "decision_reason": "EXISTING_EVIDENCE_RULE",
         "candidate_basis": "EXISTING_EVIDENCE_RULE",
     }
-    if service in AI_SERVICE_KEYS and STREAMING_LABEL in str(node.get("name", "")):
+    if (
+        service in AI_SERVICE_KEYS
+        and STREAMING_LABEL in str(node.get("name", ""))
+        and not verified_registry_match
+    ):
         policy.update(
             {
                 "final_candidate_decision": "EXCLUDE",
@@ -2238,6 +2508,118 @@ def service_region_policy(
     return policy
 
 
+def _registry_evidence_block(
+    entry: dict[str, Any],
+    item: dict[str, Any],
+    service_result: dict[str, Any],
+    *,
+    probable_recapture: bool,
+    observed_at: str,
+) -> str | None:
+    """Return a reason when current evidence must block a saved positive record."""
+
+    if probable_recapture:
+        return "PROBABLE_TUN_OR_UPSTREAM_RECAPTURE"
+    try:
+        saved_at = parse_aware_timestamp(
+            str(entry["tested_at"]), field="verified service registry tested_at"
+        )
+    except (ConfigError, KeyError):
+        # Registry validation already rejects this.  Keep this guard defensive for
+        # callers that provide a pre-built context in tests.
+        return "VERIFIED_REGISTRY_TIMESTAMP_INVALID"
+
+    events: list[tuple[dt.datetime, str]] = []
+    functional = service_result.get("functional_result")
+    structured_functional_timestamp = False
+    if isinstance(functional, dict) and functional.get("tested_at"):
+        try:
+            functional_at = parse_aware_timestamp(
+                str(functional["tested_at"]), field="functional result"
+            )
+        except ConfigError:
+            functional_at = None
+        else:
+            structured_functional_timestamp = True
+        if functional_at is not None:
+            result = str(functional.get("result") or "")
+            raw_result = str(functional.get("raw_result") or "")
+            if result == "FAIL" or raw_result == "FAIL":
+                events.append((functional_at, "NEWER_FUNCTIONAL_FAIL"))
+            elif result == "FAIL_TRANSPORT" or raw_result == "FAIL_TRANSPORT":
+                events.append((functional_at, "NEWER_FUNCTIONAL_TRANSPORT_FAILURE"))
+            elif result.startswith("FAIL_") or raw_result.startswith("FAIL_"):
+                events.append((functional_at, "NEWER_FUNCTIONAL_FAIL"))
+
+    manual = service_result.get("manual_result")
+    structured_manual_timestamp = False
+    if isinstance(manual, dict) and manual.get("tested_at"):
+        try:
+            manual_at = parse_aware_timestamp(
+                str(manual["tested_at"]), field="manual result"
+            )
+        except ConfigError:
+            manual_at = None
+        else:
+            structured_manual_timestamp = True
+        if manual_at is not None and str(manual.get("result") or "") == "FAIL":
+            events.append((manual_at, "NEWER_MANUAL_FAIL"))
+
+    # A live probe's transport result may not have a functional_result timestamp.
+    # Its node observation is still explicit current evidence and must be compared
+    # with the saved record before allowing that record into automatic use.
+    final_result = str(service_result.get("final_result") or "")
+    if (
+        not structured_functional_timestamp
+        and not structured_manual_timestamp
+        and (
+            final_result == "FAIL_TRANSPORT"
+            or item.get("base_result") in {
+                "FAIL_TRANSPORT",
+                "NODE_SWITCH_UNCONFIRMED",
+                "ATTRIBUTION_UNAVAILABLE",
+            }
+        )
+    ):
+        event_at_value = item.get("observed_at") or observed_at
+        try:
+            event_at = parse_aware_timestamp(str(event_at_value), field="probe node")
+        except ConfigError:
+            event_at = None
+        if event_at is not None:
+            events.append((event_at, "NEWER_TRANSPORT_FAILURE"))
+    elif (
+        not structured_functional_timestamp
+        and not structured_manual_timestamp
+        and (
+            final_result in REMOVE_RESULTS
+            or final_result.startswith("DEFINITIVE_AUTOMATED_FAIL")
+        )
+    ):
+        event_at_value = item.get("observed_at") or observed_at
+        try:
+            event_at = parse_aware_timestamp(str(event_at_value), field="probe node")
+        except ConfigError:
+            event_at = None
+        if event_at is not None:
+            events.append((event_at, "NEWER_FUNCTIONAL_FAIL"))
+
+    newer = [event for event in events if event[0] > saved_at]
+    if not newer:
+        return None
+    return max(newer, key=lambda event: event[0])[1]
+
+
+def _registry_evidence_copy(entry: dict[str, Any]) -> dict[str, Any]:
+    """Expose only validated registry fields as report provenance."""
+
+    return {
+        key: entry[key]
+        for key in VERIFIED_SERVICE_REGISTRY_ENTRY_FIELDS
+        if key in entry
+    }
+
+
 def merge_lkg_results(
     current_names: Sequence[str],
     source_order: dict[str, int],
@@ -2246,11 +2628,33 @@ def merge_lkg_results(
     *,
     probable_recapture: bool,
     observed_at: str,
+    verified_registry: dict[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any], list[dict[str, Any]]]:
     current_set = set(current_names)
     new_state = deepcopy(state)
     state_nodes = new_state.setdefault("nodes", {})
     probe_by_name = {str(item["name"]): deepcopy(item) for item in probe_nodes}
+    registry_controlled = (
+        verified_registry.get("controlled_services", frozenset())
+        if verified_registry is not None
+        else frozenset()
+    )
+    registry_verified_names = (
+        verified_registry.get("matched_names", {})
+        if verified_registry is not None
+        else {}
+    )
+    registry_entries_by_name = (
+        verified_registry.get("by_service_name", {})
+        if verified_registry is not None
+        else {}
+    )
+    blocked_names_by_service: dict[str, list[str]] = {
+        service: [] for service in SERVICE_KEYS
+    }
+    blocked_reasons_by_service: dict[str, dict[str, str]] = {
+        service: {} for service in SERVICE_KEYS
+    }
 
     if not probable_recapture:
         for stale_name in list(state_nodes):
@@ -2268,6 +2672,15 @@ def merge_lkg_results(
         for service in SERVICE_KEYS:
             service_result = item["services"][service]
             final_result = str(service_result["final_result"])
+            registry_entry = registry_entries_by_name.get(service, {}).get(name)
+            registry_match = registry_entry is not None
+            if registry_match:
+                service_result["registry_evidence"] = _registry_evidence_copy(
+                    registry_entry
+                )
+                service_result["registry_evidence_provenance"] = (
+                    "saved_actual_use_evidence"
+                )
             prior = state.get("nodes", {}).get(name, {}).get(service, {})
             exact_node_id = str(item.get("exact_node_id", ""))
             prior_node_id = str(prior.get("exact_node_id", ""))
@@ -2294,6 +2707,7 @@ def merge_lkg_results(
                 item,
                 service_result,
                 existing_candidate=existing_candidate,
+                verified_registry_match=registry_match,
             )
             service_result["region_policy"] = region_policy
             service_result["policy_evidence_type"] = region_policy[
@@ -2302,7 +2716,9 @@ def merge_lkg_results(
             policy_action = region_policy["policy_action"]
 
             streaming_label_excluded = (
-                service in AI_SERVICE_KEYS and STREAMING_LABEL in name
+                service in AI_SERVICE_KEYS
+                and STREAMING_LABEL in name
+                and not registry_match
             )
             if streaming_label_excluded:
                 lkg = False
@@ -2361,13 +2777,67 @@ def merge_lkg_results(
                 is_current_candidate = True
             elif policy_action == "EXCLUDE":
                 is_current_candidate = False
-            item["enters_auto"][service] = is_current_candidate
-            item["enters_manual_candidate"][service] = (
+            enters_manual_candidate = (
                 not probable_recapture
                 and not lkg
                 and final_result in PENDING_RESULTS
                 and policy_action == "USE_EXISTING_RULES"
             )
+
+            registry_block = None
+            if registry_entry is not None and registry_entry.get("enabled"):
+                registry_block = _registry_evidence_block(
+                    registry_entry,
+                    item,
+                    service_result,
+                    probable_recapture=probable_recapture,
+                    observed_at=observed_at,
+                )
+                if registry_block:
+                    blocked_names_by_service[service].append(name)
+                    blocked_reasons_by_service[service][name] = registry_block
+                    service_result["registry_block"] = {
+                        "reason": registry_block,
+                        "saved_tested_at": registry_entry["tested_at"],
+                    }
+                    # A current transport failure or a guarded recapture may leave
+                    # the saved node available for deliberate manual use.  Explicit
+                    # functional/manual failure remains excluded altogether.
+                    if registry_block in {
+                        "NEWER_TRANSPORT_FAILURE",
+                        "NEWER_FUNCTIONAL_TRANSPORT_FAILURE",
+                        "PROBABLE_TUN_OR_UPSTREAM_RECAPTURE",
+                    }:
+                        enters_manual_candidate = True
+                    is_current_candidate = False
+                elif registry_entry["tier"] == "preferred":
+                    # Saved actual-use evidence is a selection source.  It does not
+                    # rewrite the probe result into a screening pass.
+                    is_current_candidate = True
+                    enters_manual_candidate = False
+                elif registry_entry["tier"] == "manual":
+                    is_current_candidate = False
+                    enters_manual_candidate = True
+            elif service in registry_controlled:
+                # A registry-controlled service never promotes an unregistered
+                # subscription node from a fresh screening result automatically.
+                # Such nodes remain available for explicit manual selection.
+                is_current_candidate = False
+                enters_manual_candidate = not streaming_label_excluded
+                service_result["registry_selection"] = "unmatched_manual_only"
+
+            if registry_entry is not None and not registry_entry.get("enabled"):
+                is_current_candidate = False
+                enters_manual_candidate = False
+                service_result["registry_selection"] = "disabled"
+            elif registry_entry is not None and registry_block is None:
+                service_result["registry_selection"] = (
+                    "automatic"
+                    if registry_entry["tier"] == "preferred"
+                    else "manual"
+                )
+            item["enters_auto"][service] = is_current_candidate
+            item["enters_manual_candidate"][service] = enters_manual_candidate
         enriched.append(item)
 
     selections: dict[str, dict[str, list[str]]] = {}
@@ -2378,7 +2848,11 @@ def merge_lkg_results(
             for item in enriched
             if item["enters_auto"][service]
         ]
-        automatic = filter_service_nodes(service, automatic)
+        automatic = filter_service_nodes(
+            service,
+            automatic,
+            verified_names=registry_verified_names.get(service, ()),
+        )
         historical = [
             name for name in current_names
             if name not in automatic
@@ -2390,23 +2864,71 @@ def merge_lkg_results(
                 == effective_state["nodes"][name][service]["exact_node_id"]
             )
         ]
-        historical = filter_service_nodes(service, historical)
+        historical = filter_service_nodes(
+            service,
+            historical,
+            verified_names=registry_verified_names.get(service, ()),
+        )
         pending = [
             str(item["name"])
             for item in enriched
             if item["enters_manual_candidate"][service]
             and str(item["name"]) not in automatic
         ]
-        pending = filter_service_nodes(service, pending)
-        automatic = stable_region_sort(
-            automatic, source_order, gemini=service == "gemini"
+        pending = filter_service_nodes(
+            service,
+            pending,
+            verified_names=registry_verified_names.get(service, ()),
         )
-        pending = stable_region_sort(pending, source_order, gemini=service == "gemini")
-        historical = stable_region_sort(historical, source_order, gemini=service == "gemini")
+        if service in registry_controlled:
+            automatic_set = set(automatic)
+            pending_set = set(pending)
+            preferred_order = (
+                verified_registry.get("preferred_order", {}).get(service, [])
+                if verified_registry is not None
+                else []
+            )
+            manual_order = (
+                verified_registry.get("manual_order", {}).get(service, [])
+                if verified_registry is not None
+                else []
+            )
+            ordered_automatic = [
+                name for name in preferred_order if name in automatic_set
+            ]
+            ordered_pending = [name for name in manual_order if name in pending_set]
+            ordered_pending.extend(
+                name
+                for name in current_names
+                if name in pending_set and name not in ordered_pending
+            )
+            automatic = ordered_automatic
+            pending = ordered_pending
+            historical = []
+        else:
+            automatic = stable_region_sort(
+                automatic, source_order, gemini=service == "gemini"
+            )
+            pending = stable_region_sort(
+                pending, source_order, gemini=service == "gemini"
+            )
+            historical = stable_region_sort(
+                historical, source_order, gemini=service == "gemini"
+            )
         selections[service] = {
             "automatic": automatic,
             "manual_candidates": pending,
             "historical_lkg": historical,
+            "registry_controlled": service in registry_controlled,
+            "registry_present": verified_registry is not None,
+            "verified_names": sorted(registry_verified_names.get(service, ())),
+            "blocked_names": ordered_unique(blocked_names_by_service[service]),
+            "blocked_reasons": dict(blocked_reasons_by_service[service]),
+            "selection_provenance": (
+                "saved_actual_use_evidence"
+                if service in registry_controlled
+                else "probe_or_legacy_evidence"
+            ),
         }
 
     if not probable_recapture:
@@ -3484,6 +4006,45 @@ def annotate_probe_semantics(
     report["activation_blocked_reasons"] = blockers
 
 
+def verified_service_registry_report(
+    registry: dict[str, Any] | None,
+    selections: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return safe registry provenance and the effective per-service selections."""
+
+    if registry is None:
+        return {"present": False}
+    return {
+        "present": True,
+        "schema_version": registry["schema_version"],
+        "evidence_provenance": "saved_actual_use_evidence",
+        "effective_selections": {
+            service: {
+                "automatic": list(selection.get("automatic", [])),
+                "manual_candidates": list(selection.get("manual_candidates", [])),
+                "blocked_names": list(selection.get("blocked_names", [])),
+                "blocked_reasons": dict(selection.get("blocked_reasons", {})),
+            }
+            for service, selection in selections.items()
+            if selection.get("registry_controlled")
+        },
+        "records": [
+            _registry_evidence_copy(entry)
+            for entry in registry.get("entries", ())
+        ],
+    }
+
+
+def lkg_seed_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the seed from the current identity-bound candidate selection."""
+
+    # Registry-aware transform handles renamed GPT/Gemini nodes through the
+    # existing stable identity.  It also preserves the legacy resolution path
+    # when the registry is absent, while retaining fail-closed behavior when a
+    # service has no valid current candidate.
+    return transform(data)
+
+
 def dynamic_probe_and_select(
     data: dict[str, Any],
     *,
@@ -3496,7 +4057,7 @@ def dynamic_probe_and_select(
     snapshot_manifest: dict[str, Any] | None = None,
     probe_runner: Any = run_local_service_probe,
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
-    legacy_config = transform(data)
+    legacy_config = lkg_seed_config(data)
     state, seed_source = load_or_seed_lkg_state(
         state_path, legacy_config, persist_seed=update_lkg
     )
@@ -3511,6 +4072,7 @@ def dynamic_probe_and_select(
         snapshot_manifest,
     )
     proxies = static_proxy_objects(data)
+    verified_registry = build_verified_service_registry_context(proxies)
     current_names = [str(proxy["name"]) for proxy in proxies]
     source_order = {name: index for index, name in enumerate(current_names)}
     probable_recapture = bool(report.get("probable_tun_or_upstream_recapture"))
@@ -3521,11 +4083,15 @@ def dynamic_probe_and_select(
         report.get("nodes", []),
         probable_recapture=probable_recapture,
         observed_at=str(report["run_timestamp"]),
+        verified_registry=verified_registry,
     )
     report["nodes"] = enriched
     report["lkg_seed_source"] = seed_source
     report["lkg_state_updated"] = update_lkg and not probable_recapture
     report["service_groups"] = selections
+    report["verified_service_registry"] = verified_service_registry_report(
+        verified_registry, selections
+    )
     if snapshot_manifest:
         report["source_snapshot_id"] = snapshot_manifest["source_snapshot_id"]
         report["source_hash"] = snapshot_manifest["source_hash"]
@@ -3551,11 +4117,12 @@ def reconcile_existing_probe(
     functional_results_paths: Sequence[Path] | None = None,
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, Any]]:
     """Reconcile an existing report without starting Mihomo, curl, SSH, or deployment."""
-    legacy_config = transform(data)
+    legacy_config = lkg_seed_config(data)
     state, seed_source = load_or_seed_lkg_state(
         state_path, legacy_config, persist_seed=False
     )
     proxies = static_proxy_objects(data)
+    verified_registry = build_verified_service_registry_context(proxies)
     current_names = [str(proxy["name"]) for proxy in proxies]
     report = load_json_object(probe_report_path)
     reported_names = {
@@ -3598,6 +4165,7 @@ def reconcile_existing_probe(
         report.get("nodes", []),
         probable_recapture=bool(report.get("probable_tun_or_upstream_recapture")),
         observed_at=reconciled_at,
+        verified_registry=verified_registry,
     )
     report["nodes"] = enriched
     report["probe_version"] = PROBE_VERSION
@@ -3609,6 +4177,9 @@ def reconcile_existing_probe(
         name for name in current_names if name not in reported_names
     ]
     report["service_groups"] = selections
+    report["verified_service_registry"] = verified_service_registry_report(
+        verified_registry, selections
+    )
     if snapshot_manifest:
         report["source_snapshot_id"] = snapshot_manifest["source_snapshot_id"]
         report["source_hash"] = snapshot_manifest["source_hash"]
@@ -3619,16 +4190,22 @@ def reconcile_existing_probe(
     return selections, load_json_object(report_output_path)
 
 
-def fallback_group(name: str, proxies: list[str]) -> dict[str, Any]:
+def fallback_group(
+    name: str,
+    proxies: list[str],
+    *,
+    health_url: str = DEFAULT_FALLBACK_HEALTH_URL,
+    max_failed_times: int = 1,
+) -> dict[str, Any]:
     return {
         "name": name,
         "type": "fallback",
         "proxies": proxies,
-        "url": "https://www.gstatic.com/generate_204",
+        "url": health_url,
         "interval": 60,
         "lazy": True,
         "timeout": 5000,
-        "max-failed-times": 1,
+        "max-failed-times": max_failed_times,
     }
 
 
@@ -3638,19 +4215,43 @@ def build_groups(
     gemini_nodes: list[str],
     disney_nodes: list[str],
     historical_lkg: dict[str, list[str]] | None = None,
+    *,
+    manual_candidates: dict[str, list[str]] | None = None,
+    verified_names: dict[str, Iterable[str]] | None = None,
+    registry_controlled: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    gpt_nodes = filter_service_nodes("gpt", gpt_nodes)
-    gemini_nodes = filter_service_nodes("gemini", gemini_nodes)
+    verified_names = verified_names or {}
+    registry_controlled_set = set(registry_controlled or ())
+    gpt_nodes = filter_service_nodes(
+        "gpt", gpt_nodes, verified_names=verified_names.get("gpt", ())
+    )
+    gemini_nodes = filter_service_nodes(
+        "gemini", gemini_nodes, verified_names=verified_names.get("gemini", ())
+    )
+    gpt_manual_nodes = ["GPT候选", *gpt_nodes]
+    if "gpt" in registry_controlled_set and gpt_nodes:
+        # The first saved preferred node is the concrete startup choice; the
+        # fallback remains available immediately after it.
+        gpt_manual_nodes = [gpt_nodes[0], "GPT候选", *gpt_nodes[1:]]
     groups = [
         {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
         {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
         fallback_group("自动选择", all_nodes),
         {"name": "GPT专用", "type": "select", "proxies": ["GPT手动", "GPT候选"]},
-        {"name": "GPT手动", "type": "select", "proxies": ["GPT候选", *gpt_nodes]},
+        {"name": "GPT手动", "type": "select", "proxies": gpt_manual_nodes},
         fallback_group("GPT候选", gpt_nodes),
         {"name": "Gemini专用", "type": "select", "proxies": ["Gemini手动", "Gemini候选"]},
-        {"name": "Gemini手动", "type": "select", "proxies": ["Gemini候选", *gemini_nodes]},
-        fallback_group("Gemini候选", gemini_nodes),
+        # A transport health check cannot prove Google account/location
+        # eligibility.  Default the selector to the first functionally filtered
+        # concrete node; keep Gemini候选 available as an explicit transport-only
+        # failover choice instead of silently selecting a region-ineligible node.
+        {"name": "Gemini手动", "type": "select", "proxies": [*gemini_nodes, "Gemini候选"]},
+        fallback_group(
+            "Gemini候选",
+            gemini_nodes,
+            health_url=GEMINI_FALLBACK_HEALTH_URL,
+            max_failed_times=GEMINI_FALLBACK_MAX_FAILED_TIMES,
+        ),
         {"name": "迪士尼", "type": "select", "proxies": ["迪士尼手动", "迪士尼候选"]},
         {"name": "迪士尼手动", "type": "select", "proxies": ["迪士尼候选", *disney_nodes]},
         fallback_group("迪士尼候选", disney_nodes),
@@ -3661,13 +4262,38 @@ def build_groups(
         ("disney", "迪士尼历史LKG", "迪士尼手动"),
     ):
         members = filter_service_nodes(
-            service, (historical_lkg or {}).get(service, [])
+            service,
+            (historical_lkg or {}).get(service, []),
+            verified_names=verified_names.get(service, ()),
         )
         if not members:
             continue
-        groups.append(fallback_group(group_name, members))
+        groups.append(
+            fallback_group(
+                group_name,
+                members,
+                health_url=(
+                    GEMINI_FALLBACK_HEALTH_URL
+                    if service == "gemini"
+                    else DEFAULT_FALLBACK_HEALTH_URL
+                ),
+                max_failed_times=(
+                    GEMINI_FALLBACK_MAX_FAILED_TIMES if service == "gemini" else 1
+                ),
+            )
+        )
         selector = next(group for group in groups if group["name"] == selector_name)
         selector["proxies"].append(group_name)
+    if manual_candidates:
+        groups_by_name = {group["name"]: group for group in groups}
+        for service, (_, manual_name) in SERVICE_GROUP_NAMES.items():
+            candidates = filter_service_nodes(
+                service,
+                manual_candidates.get(service, []),
+                verified_names=verified_names.get(service, ()),
+            )
+            target = groups_by_name[manual_name]["proxies"]
+            target.extend(name for name in candidates if name not in target)
     return groups
 
 
@@ -3715,9 +4341,19 @@ def validate_config(data: dict[str, Any]) -> None:
     group_names = [group.get("name") for group in groups if isinstance(group, dict)]
     expected_prefix = list(MANAGED_GROUP_NAMES)
     optional_tail = group_names[len(expected_prefix):]
-    if group_names[:len(expected_prefix)] != expected_prefix or any(
-        name not in OPTIONAL_HISTORY_GROUP_NAMES for name in optional_tail
-    ) or optional_tail != [name for name in OPTIONAL_HISTORY_GROUP_NAMES if name in optional_tail]:
+    emergency_present = EMERGENCY_GROUP_NAME in optional_tail
+    history_tail = (
+        optional_tail[:-1] if emergency_present else optional_tail
+    )
+    valid_history_tail = [
+        name for name in OPTIONAL_HISTORY_GROUP_NAMES if name in history_tail
+    ]
+    if (
+        group_names[:len(expected_prefix)] != expected_prefix
+        or any(name not in OPTIONAL_HISTORY_GROUP_NAMES for name in history_tail)
+        or history_tail != valid_history_tail
+        or (emergency_present and optional_tail[-1] != EMERGENCY_GROUP_NAME)
+    ):
         raise ConfigError(
             "Managed groups do not match the accepted candidate/history structure: "
             + ", ".join(str(name) for name in group_names)
@@ -3739,6 +4375,8 @@ def validate_config(data: dict[str, Any]) -> None:
         if not isinstance(refs, list):
             errors.append(f"group '{name}' has a non-list proxies field")
             continue
+        if name == EMERGENCY_GROUP_NAME and group.get("type") != "select":
+            errors.append("emergency group must be a select group")
         for ref in refs:
             if not isinstance(ref, str):
                 errors.append(f"group '{name}' contains a non-string target")
@@ -3747,6 +4385,17 @@ def validate_config(data: dict[str, Any]) -> None:
                 errors.append(f"group '{name}' references missing target '{ref}'")
             if ref in group_name_set:
                 graph[name].append(ref)
+
+            if name == EMERGENCY_GROUP_NAME and (
+                ref in group_name_set or ref in BUILTIN_TARGETS
+            ):
+                errors.append(
+                    f"emergency group contains non-node target '{ref}'"
+                )
+
+        string_refs = [ref for ref in refs if isinstance(ref, str)]
+        if name == EMERGENCY_GROUP_NAME and len(string_refs) != len(set(string_refs)):
+            errors.append("emergency group contains duplicate node names")
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -3786,42 +4435,255 @@ def validate_config(data: dict[str, Any]) -> None:
         raise ConfigError("Validation failed:\n- " + "\n- ".join(errors))
 
 
+def registry_manual_candidate_allowed(
+    service: str, name: str, selection: dict[str, Any]
+) -> bool:
+    """Keep manual registry entries available only for retryable failures."""
+
+    if name not in set(selection.get("blocked_names", ())):
+        return True
+    return (
+        selection.get("blocked_reasons", {}).get(name)
+        in VERIFIED_REGISTRY_MANUAL_RETRY_BLOCKS
+    )
+
+
+def restrict_ai_group_members(output: dict[str, Any]) -> None:
+    """Keep unknown/history-only entries out of AI selectors.
+
+    Hong Kong labels are a conservative exclusion, not proof of exit country.
+    A same-name carry in incremental mode is not a fresh functional test.
+    """
+    raw_groups = output.get("proxy-groups")
+    if not isinstance(raw_groups, list):
+        raise ConfigError("'proxy-groups' must be a list.")
+    group_names_in_source = [group["name"] for group in raw_groups]
+    duplicate_names = {
+        name
+        for name in group_names_in_source
+        if group_names_in_source.count(name) > 1
+    }
+    if duplicate_names - {EMERGENCY_GROUP_NAME}:
+        raise ConfigError("Duplicate proxy-group names detected.")
+    groups = {group["name"]: group for group in raw_groups}
+
+    node_names = [proxy["name"] for proxy in static_proxy_objects(output)]
+
+    node_set = set(node_names)
+    group_names = set(groups)
+    invalid_emergency_names = node_set & (group_names | BUILTIN_TARGETS)
+    if invalid_emergency_names:
+        raise ConfigError(
+            "AI emergency nodes collide with groups/builtins: "
+            + ", ".join(sorted(invalid_emergency_names))
+        )
+
+    # A stale emergency group is deliberately replaced from the fresh source
+    # list.  Removing all copies first also makes repeated transforms and
+    # migration of old snapshots deterministic.
+    output["proxy-groups"] = [
+        group for group in raw_groups if group["name"] != EMERGENCY_GROUP_NAME
+    ]
+    groups = {group["name"]: group for group in output["proxy-groups"]}
+    history = {"GPT历史LKG", "Gemini历史LKG"}
+    for prefix in ("GPT", "Gemini"):
+        pool = groups[prefix + "候选"]
+        members = [name for name in pool["proxies"] if not re.search(
+            r"香港|🇭🇰|hong[\s_-]*kong|(?<![A-Za-z])hk(?![A-Za-z])", name, re.I
+        )]
+        if not members:
+            raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES: " + prefix)
+        pool["proxies"] = members
+        groups[prefix + "手动"]["proxies"] = [*members, prefix + "候选"]
+        groups[prefix + "专用"]["proxies"] = [
+            prefix + "手动",
+            prefix + "候选",
+            EMERGENCY_GROUP_NAME,
+        ]
+    output["proxy-groups"] = [
+        g for g in output["proxy-groups"] if g["name"] not in history
+    ]
+    for group in output["proxy-groups"]:
+        if "proxies" in group:
+            group["proxies"] = [n for n in group["proxies"] if n not in history]
+    output["proxy-groups"].append(
+        {
+            "name": EMERGENCY_GROUP_NAME,
+            "type": "select",
+            "proxies": node_names,
+        }
+    )
+
+
 def transform(
     data: dict[str, Any],
     service_selections: dict[str, dict[str, list[str]]] | None = None,
+    *,
+    use_verified_registry: bool = True,
+    verified_registry_path: Path | None = None,
+    source_identity_key_path: Path | None = None,
 ) -> dict[str, Any]:
     output = remove_clash_verge_runtime(deepcopy(data))
     proxies = static_proxy_objects(output)
     output["proxies"] = proxies
     names = [str(proxy["name"]) for proxy in proxies]
     source_order = {name: index for index, name in enumerate(names)}
+    registry = (
+        build_verified_service_registry_context(
+            proxies,
+            registry_path=verified_registry_path,
+            identity_key_path=source_identity_key_path,
+        )
+        if use_verified_registry
+        else None
+    )
+    controlled_services = (
+        set(registry.get("controlled_services", ())) if registry else set()
+    )
+    verified_names: dict[str, Iterable[str]] = {
+        service: (registry.get("matched_names", {}).get(service, ()) if registry else ())
+        for service in AI_SERVICE_KEYS
+    }
+    manual_candidates: dict[str, list[str]] | None = None
+    registry_group_services: set[str] = set(controlled_services)
 
     all_nodes = stable_region_sort(names, source_order)
     if service_selections is None:
-        gpt_nodes = stable_region_sort(
-            filter_service_nodes(
-                "gpt", resolve_candidates(names, GPT_CANDIDATES, label="GPT")
-            ),
-            source_order,
-        )
-        gemini_nodes = stable_region_sort(
-            filter_service_nodes(
-                "gemini", resolve_candidates(names, GEMINI_CANDIDATES, label="Gemini")
-            ),
-            source_order,
-            gemini=True,
-        )
+        if registry and "gpt" in controlled_services:
+            gpt_nodes = list(registry["preferred_order"]["gpt"])
+            if not gpt_nodes:
+                raise ConfigError(
+                    "BLOCKED_NO_CURRENT_VERIFIED_GPT_CANDIDATES"
+                )
+        else:
+            gpt_nodes = stable_region_sort(
+                filter_service_nodes(
+                    "gpt", resolve_candidates(names, GPT_CANDIDATES, label="GPT")
+                ),
+                source_order,
+            )
+        if registry and "gemini" in controlled_services:
+            gemini_nodes = list(registry["preferred_order"]["gemini"])
+            if not gemini_nodes:
+                raise ConfigError(
+                    "BLOCKED_NO_CURRENT_VERIFIED_GEMINI_CANDIDATES"
+                )
+        else:
+            gemini_nodes = stable_region_sort(
+                filter_service_nodes(
+                    "gemini", resolve_candidates(names, GEMINI_CANDIDATES, label="Gemini")
+                ),
+                source_order,
+                gemini=True,
+            )
         disney_nodes = stable_region_sort(
             resolve_candidates(names, DISNEY_CANDIDATES, label="Disney"), source_order
         )
+        if registry:
+            manual_candidates = {service: [] for service in SERVICE_KEYS}
+            for service in AI_SERVICE_KEYS:
+                if service not in controlled_services:
+                    continue
+                matched = set(registry["matched_names"][service])
+                manual_candidates[service].extend(
+                    registry["manual_order"][service]
+                )
+                manual_candidates[service].extend(
+                    name for name in names if name not in matched
+                )
+                manual_candidates[service] = filter_service_nodes(
+                    service,
+                    ordered_unique(manual_candidates[service]),
+                    verified_names=verified_names[service],
+                )
     else:
-        gpt_nodes = filter_service_nodes(
-            "gpt", service_selections["gpt"]["automatic"]
-        )
-        gemini_nodes = filter_service_nodes(
-            "gemini", service_selections["gemini"]["automatic"]
-        )
+        for service in AI_SERVICE_KEYS:
+            if registry and service in controlled_services:
+                registry_group_services.add(service)
+        selection_blocked = {
+            service: set(service_selections[service].get("blocked_names", ()))
+            for service in SERVICE_KEYS
+        }
+        if registry and "gpt" in controlled_services:
+            gpt_nodes = [
+                name
+                for name in registry["preferred_order"]["gpt"]
+                if name not in selection_blocked["gpt"]
+            ]
+            if not gpt_nodes:
+                raise ConfigError("BLOCKED_NO_CURRENT_VERIFIED_GPT_CANDIDATES")
+            manual_candidates = {service: [] for service in SERVICE_KEYS}
+            for service in AI_SERVICE_KEYS:
+                matched = set(registry["matched_names"][service])
+                manual_candidates[service].extend(
+                    name
+                    for name in registry["manual_order"][service]
+                    if registry_manual_candidate_allowed(
+                        service, name, service_selections[service]
+                    )
+                )
+                manual_candidates[service].extend(
+                    name for name in names if name not in matched
+                )
+                manual_candidates[service].extend(
+                    name
+                    for name in selection_blocked[service]
+                    if name in names
+                    and service_selections[service]
+                    .get("blocked_reasons", {})
+                    .get(name)
+                    in VERIFIED_REGISTRY_MANUAL_RETRY_BLOCKS
+                )
+                manual_candidates[service] = filter_service_nodes(
+                    service,
+                    ordered_unique(manual_candidates[service]),
+                    verified_names=verified_names[service],
+                )
+        else:
+            gpt_nodes = filter_service_nodes(
+                "gpt",
+                service_selections["gpt"]["automatic"],
+                verified_names=verified_names["gpt"],
+            )
+        if registry and "gemini" in controlled_services:
+            gemini_nodes = [
+                name
+                for name in registry["preferred_order"]["gemini"]
+                if name not in selection_blocked["gemini"]
+            ]
+            if not gemini_nodes:
+                raise ConfigError("BLOCKED_NO_CURRENT_VERIFIED_GEMINI_CANDIDATES")
+            if manual_candidates is None:
+                manual_candidates = {service: [] for service in SERVICE_KEYS}
+            matched = set(registry["matched_names"]["gemini"])
+            manual_candidates["gemini"].extend(
+                name
+                for name in registry["manual_order"]["gemini"]
+                if registry_manual_candidate_allowed(
+                    "gemini", name, service_selections["gemini"]
+                )
+            )
+            manual_candidates["gemini"].extend(
+                name for name in names if name not in matched
+            )
+            manual_candidates["gemini"] = filter_service_nodes(
+                "gemini",
+                ordered_unique(manual_candidates["gemini"]),
+                verified_names=verified_names["gemini"],
+            )
+        else:
+            gemini_nodes = filter_service_nodes(
+                "gemini",
+                service_selections["gemini"]["automatic"],
+                verified_names=verified_names["gemini"],
+            )
         disney_nodes = list(service_selections["disney"]["automatic"])
+        if not (registry and "gpt" in controlled_services):
+            gpt_nodes = [name for name in gpt_nodes if name not in selection_blocked["gpt"]]
+        if not (registry and "gemini" in controlled_services):
+            gemini_nodes = [
+                name for name in gemini_nodes if name not in selection_blocked["gemini"]
+            ]
         missing = [
             service.upper()
             for service, nodes in (
@@ -3836,21 +4698,46 @@ def transform(
     if service_selections is not None:
         history = {
             service: filter_service_nodes(
-                service, service_selections[service].get("historical_lkg", [])
+                service,
+                service_selections[service].get("historical_lkg", []),
+                verified_names=verified_names.get(service, ()),
             )
             for service in SERVICE_KEYS
         }
+        if registry is not None:
+            for service in controlled_services:
+                history[service] = []
     output["proxy-groups"] = build_groups(
-        all_nodes, gpt_nodes, gemini_nodes, disney_nodes, history
+        all_nodes,
+        gpt_nodes,
+        gemini_nodes,
+        disney_nodes,
+        history,
+        manual_candidates=manual_candidates,
+        verified_names=verified_names,
+        registry_controlled=registry_group_services,
     )
     if service_selections is not None:
         groups_by_name = {group["name"]: group for group in output["proxy-groups"]}
         for service, (_, manual_name) in SERVICE_GROUP_NAMES.items():
-            groups_by_name[manual_name]["proxies"].extend(
-                filter_service_nodes(
-                    service, service_selections[service]["manual_candidates"]
-                )
+            if registry and service in controlled_services:
+                # The registry-derived map above replaces stale service pools from
+                # an older reconciliation; only Disney and uncontrolled services
+                # consume caller-provided manual candidates here.
+                continue
+            candidates = filter_service_nodes(
+                service,
+                service_selections[service]["manual_candidates"],
+                verified_names=verified_names.get(service, ()),
             )
+            blocked = set(service_selections[service].get("blocked_names", ()))
+            candidates = [name for name in candidates if name not in blocked]
+            groups_by_name[manual_name]["proxies"].extend(
+                name
+                for name in candidates
+                if name not in groups_by_name[manual_name]["proxies"]
+            )
+    restrict_ai_group_members(output)
     output["rules"] = build_rules(output)
 
     validate_config(output)
@@ -4775,7 +5662,11 @@ def _disney_artifact_complete(path: Path, manifest: dict[str, Any]) -> bool:
 
 
 def orchestrate_formal_candidate_update(args: argparse.Namespace) -> dict[str, Any]:
-    """Refresh, run mature service probes, and prepare one candidate; never activate."""
+    """Prepare an incremental candidate by default; full testing is explicit."""
+
+    if not getattr(args, "full_retest", True):
+        updater = runpy.run_path(str(Path(__file__).with_name("incremental_runner.py")))
+        return updater["run_incremental_update"](args, sys.modules[__name__])
 
     workdir = args.workdir.expanduser().resolve()
     if not 0 < args.min_node_retention_ratio <= 1:
@@ -4958,11 +5849,17 @@ def prepare_candidate_from_frozen_artifacts(args: argparse.Namespace) -> dict[st
     snapshot_manifest, source = verify_source_snapshot(args.source_snapshot)
     rrc_path = args.rrc_results.expanduser().resolve()
     rrc = load_json_object(rrc_path)
+    resolved_registry_path = verified_service_registry_path()
     binding = {
         "source_snapshot_id": snapshot_manifest["source_snapshot_id"],
         "source_hash": snapshot_manifest["source_hash"],
         "source_manifest_sha256": sha256_file(args.source_snapshot.expanduser().resolve()),
         "rrc_sha256": sha256_file(rrc_path),
+        "verified_service_registry_sha256": (
+            sha256_file(resolved_registry_path)
+            if resolved_registry_path.is_file()
+            else None
+        ),
         "previous_source_manifest_sha256": _artifact_hash(
             args.previous_source_snapshot
         ),
@@ -5365,8 +6262,9 @@ def build_parser() -> argparse.ArgumentParser:
     all_p.add_argument("--deploy", action="store_true")
     all_p.add_argument("--previous-source-snapshot", type=Path)
     all_p.add_argument("--previous-manual-results", type=Path)
+    all_p.add_argument("--full-retest", action="store_true", help="Explicitly retest all nodes; default updates test added names only.")
     all_p.add_argument("--rrc-timeout", type=int, default=45)
-    all_p.add_argument("--rrc-node-interval", type=float, default=3.0)
+    all_p.add_argument("--rrc-node-interval", type=float, default=0.0)
     all_p.add_argument("--probe-evidence-ttl", type=int, default=DEFAULT_PROBE_EVIDENCE_TTL_SECONDS)
     all_p.add_argument("--probe-cache-dir", type=Path, default=DEFAULT_PROBE_ARTIFACT_CACHE_DIR)
     add_probe_args(all_p)
@@ -5392,8 +6290,9 @@ def build_parser() -> argparse.ArgumentParser:
     update_p.add_argument("--host", default="root@192.168.10.1")
     update_p.add_argument("--remote-name")
     update_p.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
+    update_p.add_argument("--full-retest", action="store_true", help="Explicitly retest all nodes; default updates test added names only.")
     update_p.add_argument("--rrc-timeout", type=int, default=45)
-    update_p.add_argument("--rrc-node-interval", type=float, default=3.0)
+    update_p.add_argument("--rrc-node-interval", type=float, default=0.0)
     update_p.add_argument("--probe-evidence-ttl", type=int, default=DEFAULT_PROBE_EVIDENCE_TTL_SECONDS)
     update_p.add_argument("--probe-cache-dir", type=Path, default=DEFAULT_PROBE_ARTIFACT_CACHE_DIR)
 

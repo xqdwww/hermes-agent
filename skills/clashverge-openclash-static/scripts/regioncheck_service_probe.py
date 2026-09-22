@@ -30,6 +30,7 @@ DEFAULT_COMMAND_PATH = "/usr/bin/regioncheck"
 DEFAULT_SCRIPT_PATH = "/usr/lib/regionrestrictioncheck/check.sh"
 DEFAULT_TIMEOUT_SECONDS = 240
 DEFAULT_STABILIZATION_SECONDS = 1.0
+DEFAULT_POST_PROBE_INTERVAL_SECONDS = 3.0
 DEFAULT_EVIDENCE_TTL_SECONDS = 12 * 60 * 60
 SYSTEMIC_CONFIRM_UNAVAILABLE_STEP = 5
 TRANSPORT_PREFLIGHT_URLS = (
@@ -617,6 +618,23 @@ def reset_sidecar_connections(
     sleep_fn(max(0.0, sleep_seconds))
 
 
+def post_probe_interval(
+    configured_interval: float,
+    outcome: dict[str, Any],
+) -> float:
+    """Choose the inter-node cooldown while preserving an uncertainty floor."""
+
+    configured = max(0.0, configured_interval)
+    clean_attribution = (
+        outcome.get("status") == "ATTRIBUTION_MATCH"
+        and outcome.get("output_complete") is True
+        and outcome.get("transport_unknown") is False
+    )
+    if clean_attribution:
+        return configured
+    return max(DEFAULT_POST_PROBE_INTERVAL_SECONDS, configured)
+
+
 def selector_readback(skill: Any, controller_port: int, selector_group: str) -> str:
     selector_path = "/proxies/" + urllib.parse.quote(selector_group, safe="")
     payload = skill.controller_json_request(controller_port, selector_path)
@@ -1156,7 +1174,7 @@ def main() -> int:
     parser.add_argument("--host", default="root@192.168.10.1")
     parser.add_argument("--core-path", default="/etc/openclash/core/clash_meta")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--node-interval", type=float, default=3.0)
+    parser.add_argument("--node-interval", type=float, default=0.0)
     parser.add_argument("--evidence-ttl", type=int, default=DEFAULT_EVIDENCE_TTL_SECONDS)
     parser.add_argument("--max-nodes", type=int)
     parser.add_argument("--node", action="append", default=[])
@@ -1439,7 +1457,10 @@ def main() -> int:
                         reset_sidecar_connections(
                             skill,
                             sidecar.controller_port,
-                            sleep_seconds=max(0.0, args.node_interval),
+                            sleep_seconds=post_probe_interval(
+                                args.node_interval,
+                                outcome,
+                            ),
                         )
                         continue
                     unavailable_count = int(report["attribution_unavailable"])
@@ -1480,7 +1501,10 @@ def main() -> int:
                 reset_sidecar_connections(
                     skill,
                     sidecar.controller_port,
-                    sleep_seconds=max(0.0, args.node_interval),
+                    sleep_seconds=post_probe_interval(
+                        args.node_interval,
+                        outcome,
+                    ),
                 )
             final_stop = systemic_attribution_stop_reason(report["node_attempts"])
             unavailable_count = int(report["attribution_unavailable"])

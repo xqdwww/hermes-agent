@@ -135,7 +135,31 @@ def prepare_helper_home(app_home: Path, staging_dir: Path) -> Path:
     if not profiles.is_dir():
         raise ValueError("FAIL_PROFILE_NOT_FOUND")
     shutil.copytree(profiles, helper_home / "profiles")
+    disable_helper_network_side_effects(helper_home)
     return helper_home
+
+
+def disable_helper_network_side_effects(helper_home: Path) -> None:
+    """Keep the isolated source refresher from changing macOS proxy or TUN state."""
+
+    verge_path = helper_home / "verge.yaml"
+    if not verge_path.is_file():
+        return
+    settings = yaml.safe_load(verge_path.read_text(encoding="utf-8"))
+    if not isinstance(settings, dict):
+        raise ValueError("FAIL_SAVE")
+    settings["enable_system_proxy"] = False
+    settings["enable_tun_mode"] = False
+    temporary = verge_path.with_name(f".{verge_path.name}.network-safe")
+    try:
+        temporary.write_text(
+            yaml.safe_dump(settings, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        os.replace(temporary, verge_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def commit_source_files(

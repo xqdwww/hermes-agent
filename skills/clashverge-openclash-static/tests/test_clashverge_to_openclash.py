@@ -81,6 +81,43 @@ def _groups_by_name(data):
     return {g["name"]: g for g in data["proxy-groups"]}
 
 
+class TestGeminiMobileRules:
+    """Gemini iOS backends observed from OpenClash must avoid the default MATCH."""
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "robinfrontend-pa.googleapis.com",
+            "signaler-pa.googleapis.com",
+            "notifications-pa.googleapis.com",
+            "subscriptionsfirstparty-pa.googleapis.com",
+        ],
+    )
+    def test_observed_ios_backend_has_exact_gemini_rule(self, host):
+        rules = converter.build_rules(copy.deepcopy(sample_basic()))
+        assert f"DOMAIN,{host},Gemini专用" in rules
+
+    def test_does_not_capture_all_googleapis_traffic(self):
+        rules = converter.build_rules(copy.deepcopy(sample_basic()))
+        assert "DOMAIN-SUFFIX,googleapis.com,Gemini专用" not in rules
+
+
+class TestAntigravityCloudCodeRules:
+    """Every Manager endpoint observed in production must use Gemini专用."""
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "daily-cloudcode-pa.googleapis.com",
+            "daily-cloudcode-pa.sandbox.googleapis.com",
+            "cloudcode-pa.googleapis.com",
+        ],
+    )
+    def test_cloudcode_backend_has_exact_gemini_rule(self, host):
+        rules = converter.build_rules(copy.deepcopy(sample_basic()))
+        assert f"DOMAIN,{host},Gemini专用" in rules
+
+
 # ---------------------------------------------------------------------------
 # Mock opener / HTTP response helpers
 # ---------------------------------------------------------------------------
@@ -1384,3 +1421,51 @@ class TestSyncPipeline:
                 assert "-O" in scp_call
 
         src.unlink(missing_ok=True)
+def test_changed_clash_verge_state_keys_reports_names_only():
+    before = {"selected_node_state_hash": "secret-before", "tun": True}
+    after = {"selected_node_state_hash": "secret-after", "tun": True}
+
+    changed = converter.changed_clash_verge_state_keys(
+        before, after, {"selected_node_state_hash", "tun"}
+    )
+
+    assert changed == ["selected_node_state_hash"]
+    assert "secret-before" not in repr(changed)
+    assert "secret-after" not in repr(changed)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "running",
+        "active_profile_id",
+        "active_profile_type",
+        "proxy_mode",
+        "selected_node_state_hash",
+        "system_proxy",
+        "system_proxy_effective",
+        "tun",
+        "mihomo_running",
+        "bound_subscription_ids",
+        "mac_network_exit_state_hash",
+    ],
+)
+def test_changed_clash_verge_state_keys_keeps_every_guard(field):
+    fields = {
+        "running",
+        "active_profile_id",
+        "active_profile_type",
+        "proxy_mode",
+        "selected_node_state_hash",
+        "system_proxy",
+        "system_proxy_effective",
+        "tun",
+        "mihomo_running",
+        "bound_subscription_ids",
+        "mac_network_exit_state_hash",
+    }
+    before = {key: "same" for key in fields}
+    after = dict(before)
+    after[field] = "changed"
+
+    assert converter.changed_clash_verge_state_keys(before, after, fields) == [field]

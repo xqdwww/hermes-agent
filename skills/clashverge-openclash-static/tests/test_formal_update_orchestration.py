@@ -37,6 +37,29 @@ CONVERTER = load_module(
 )
 
 
+def test_gemini_fallback_uses_antigravity_health_and_hysteresis() -> None:
+    groups = CONVERTER.build_groups(
+        ["tw-node", "us-node"],
+        ["us-node"],
+        ["tw-node", "us-node"],
+        ["us-node"],
+    )
+    gemini = {group["name"]: group for group in groups}["Gemini候选"]
+    assert gemini["url"] == "https://daily-cloudcode-pa.googleapis.com/generate_204"
+    assert gemini["max-failed-times"] == 2
+
+
+def test_gemini_manual_defaults_to_first_functionally_filtered_node() -> None:
+    groups = CONVERTER.build_groups(
+        ["tw02-node", "tw-node", "us-node"],
+        ["us-node"],
+        ["tw02-node", "tw-node"],
+        ["us-node"],
+    )
+    manual = {group["name"]: group for group in groups}["Gemini手动"]
+    assert manual["proxies"][:3] == ["tw02-node", "tw-node", "Gemini候选"]
+
+
 def test_disney_safe_report_allows_redacted_token_stage() -> None:
     DISNEY.validate_safe_report(
         {
