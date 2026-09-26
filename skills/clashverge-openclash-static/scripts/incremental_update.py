@@ -174,6 +174,18 @@ def _is_hong_kong_label(name: str) -> bool:
     return bool(_HK_LABEL_RE.search(name))
 
 
+def eligible_ai_rrc_names(added_names: Iterable[str]) -> list[str]:
+    """Return added names that could enter GPT/Gemini RRC screening."""
+
+    return [
+        name
+        for name in added_names
+        if isinstance(name, str)
+        and "流媒体" not in name
+        and not _is_hong_kong_label(name)
+    ]
+
+
 def _filtered_concrete(
     refs: Sequence[Any],
     *,
@@ -668,4 +680,10 @@ def build_candidate(
     return output, report
 
 
-__all__ = ["ConfigError", "IncrementalUpdateError", "build_candidate", "plan_nodes"]
+__all__ = [
+    "ConfigError",
+    "IncrementalUpdateError",
+    "build_candidate",
+    "eligible_ai_rrc_names",
+    "plan_nodes",
+]

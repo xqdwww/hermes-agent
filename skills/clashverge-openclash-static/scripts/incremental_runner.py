@@ -72,6 +72,7 @@ def run_incremental_update(args, skill):
     helpers = runpy.run_path(str(Path(__file__).with_name('incremental_update.py')))
     plan = helpers['plan_nodes'](old, new, skill)
     names = plan['added_names']
+    rrc_names = helpers['eligible_ai_rrc_names'](names)
     report_path = directory / 'incremental-report.json'
     report = {'schema_version': 1, 'skill_version': skill.SKILL_VERSION,
               'source_snapshot_id': manifest['source_snapshot_id'], 'source_hash': manifest['source_hash'],
@@ -83,17 +84,22 @@ def run_incremental_update(args, skill):
     disney_pass = []
     script_dir = Path(skill.__file__).parent
     try:
-        if len(names) >= 2:
+        if len(rrc_names) >= 2:
             rrc_path = directory / 'added-regioncheck.json'
             if not rrc_path.exists():
                 command = [sys.executable, str(script_dir / 'regioncheck_service_probe.py'), '--skill-script', str(Path(skill.__file__).resolve()), '--source-snapshot', str(manifest_path), '--output', str(rrc_path), '--host', args.host, '--core-path', args.core_path, '--timeout', str(args.rrc_timeout), '--node-interval', str(args.rrc_node_interval), '--auto-calibrate']
-                for name in names:
+                for name in rrc_names:
                     command.extend(['--node', name])
                 skill.run_probe_command(command)
-            validate_subset_report(skill, rrc_path, manifest, names, 'rrc')
+            validate_subset_report(skill, rrc_path, manifest, rrc_names, 'rrc')
             report['rrc_status'] = 'NEW_NAMES_SCREENED_NOT_ACTUAL_USE_VERIFIED'
         else:
-            report['rrc_status'] = 'NO_ADDITIONS' if not names else 'NEEDS_ACTUAL_USE_VERIFICATION_SINGLE_NEW_NODE'
+            if not names:
+                report['rrc_status'] = 'NO_ADDITIONS'
+            elif not rrc_names:
+                report['rrc_status'] = 'NO_AI_ELIGIBLE_ADDITIONS'
+            else:
+                report['rrc_status'] = 'NEEDS_ACTUAL_USE_VERIFICATION_SINGLE_NEW_NODE'
         if names:
             disney_path = directory / 'added-disney.json'
             if not disney_path.exists():
