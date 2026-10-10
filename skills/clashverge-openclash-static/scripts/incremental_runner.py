@@ -52,6 +52,46 @@ def measured_hk_baseline_names(skill, old, identity_key_path):
             and str(r.get('exit_country', '')).upper().replace(' ', '') in {'HK', 'HKG', 'HONGKONG'}}
 
 
+def actual_use_admissions(functional_results, manifest, added_names, eligible_names):
+    """Return only exact, current-snapshot browser proof for added AI names."""
+    current_ids = {
+        str(item.get('exact_node_name')): str(item.get('exact_node_id'))
+        for item in manifest.get('nodes', [])
+        if isinstance(item, dict)
+    }
+    snapshot_id = manifest.get('source_snapshot_id')
+    source_hash = manifest.get('source_hash')
+    added = set(added_names)
+    eligible = set(eligible_names)
+    admitted = {'gpt': set(), 'gemini': set()}
+    for item in functional_results:
+        if not isinstance(item, dict):
+            continue
+        service = item.get('service')
+        if service not in admitted:
+            continue
+        name = item.get('node', item.get('exact_node_name'))
+        node_id = item.get('exact_node_id')
+        if not isinstance(name, str) or not isinstance(node_id, str):
+            continue
+        if (
+            item.get('result') == 'PASS'
+            and item.get('source_snapshot_id') == snapshot_id
+            and item.get('source_hash') == source_hash
+            and name in added
+            and name in eligible
+            and current_ids.get(name) == node_id
+            and item.get('method') == 'desktop-web-route-marker-v1'
+            and item.get('marker_verified') is True
+            and item.get('route_confirmed') is True
+        ):
+            admitted[service].add(name)
+    return {
+        service: [name for name in added_names if name in names]
+        for service, names in admitted.items()
+    }
+
+
 def run_incremental_update(args, skill):
     if not 0 < args.min_node_retention_ratio <= 1:
         raise skill.ConfigError('--min-node-retention-ratio must be in (0, 1].')
@@ -73,13 +113,20 @@ def run_incremental_update(args, skill):
     plan = helpers['plan_nodes'](old, new, skill)
     names = plan['added_names']
     rrc_names = helpers['eligible_ai_rrc_names'](names)
+    functional_results = skill.load_functional_results(
+        getattr(args, 'functional_results', ())
+    )
+    verified_ai_names = actual_use_admissions(
+        functional_results, manifest, names, rrc_names
+    )
     report_path = directory / 'incremental-report.json'
     report = {'schema_version': 1, 'skill_version': skill.SKILL_VERSION,
               'source_snapshot_id': manifest['source_snapshot_id'], 'source_hash': manifest['source_hash'],
               'baseline_sha256': baseline_hash, **plan, 'old_node_service_tests': 0,
               'started_at': skill.iso_now(), 'status': 'PREPARING',
-              'service_probe_names': names, 'ai_new_names_admitted': [],
-              'ai_evidence_policy': 'carry existing curated membership by name; not fresh actual-use proof; screening cannot admit new AI nodes'}
+              'service_probe_names': names,
+              'ai_new_names_admitted': {'gpt': [], 'gemini': []},
+              'ai_evidence_policy': 'carry existing curated membership by name; admit added AI names only from current-snapshot desktop-web-route-marker-v1 proof; screening cannot admit new AI nodes'}
     skill.atomic_write_json(report, report_path, private_parent=True)
     disney_pass = []
     script_dir = Path(skill.__file__).parent
@@ -111,7 +158,15 @@ def run_incremental_update(args, skill):
             disney = validate_subset_report(skill, disney_path, manifest, names, 'disney')
             disney_pass = [r['exact_node_name'] for r in disney['nodes'] if r.get('result') == 'PASS_SUPPORTED_REGION']
         hk_names = measured_hk_baseline_names(skill, old, args.source_identity_key)
-        candidate, selection_report = helpers['build_candidate'](old, new, skill, disney_pass_names=disney_pass, measured_hk_names=hk_names)
+        candidate, selection_report = helpers['build_candidate'](
+            old,
+            new,
+            skill,
+            disney_pass_names=disney_pass,
+            measured_hk_names=hk_names,
+            verified_gpt_names=set(verified_ai_names['gpt']),
+            verified_gemini_names=set(verified_ai_names['gemini']),
+        )
         skill.restrict_ai_group_members(candidate)
         skill.validate_config(candidate)
         output = directory / 'openclash-incremental.yaml'
@@ -119,6 +174,17 @@ def run_incremental_update(args, skill):
         audit = directory / 'openclash-incremental-audit.yaml'
         skill.dump_yaml(skill.make_audit_copy(candidate), audit); audit.chmod(0o600)
         report['selection'] = selection_report
+        admitted_report = selection_report.get(
+            'ai_new_names_admitted',
+            {
+                'gpt': selection_report.get('admitted_gpt_names', verified_ai_names['gpt']),
+                'gemini': selection_report.get('admitted_gemini_names', verified_ai_names['gemini']),
+            },
+        )
+        report['ai_new_names_admitted'] = {
+            'gpt': list(admitted_report.get('gpt', ())),
+            'gemini': list(admitted_report.get('gemini', ())),
+        }
         report['measured_hk_exclusions'] = sorted(hk_names)
         report['candidate_sha256'] = skill.sha256_file(output)
         report['candidate_path'] = str(output)

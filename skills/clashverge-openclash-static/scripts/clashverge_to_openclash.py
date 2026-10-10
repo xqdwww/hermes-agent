@@ -201,7 +201,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.7.4"
+SKILL_VERSION = "2.7.5"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -1877,9 +1877,9 @@ def load_manual_results(path: Path | None) -> list[dict[str, str]]:
     return accepted
 
 
-def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]]:
+def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, Any]]:
     """Load safe snapshot-bound browser and Disney functional results."""
-    accepted: list[dict[str, str]] = []
+    accepted: list[dict[str, Any]] = []
     forbidden = {
         "authorization", "cookie", "cookies", "localstorage", "sessionstorage",
         "prompt", "response", "answer", "body", "token", "assertion", "refresh_token",
@@ -2005,6 +2005,8 @@ def load_functional_results(paths: Sequence[Path] | None) -> list[dict[str, str]
                         item.get("attribution_status") or ""
                     ),
                     "exit_country": str(item.get("exit_country") or "UNKNOWN"),
+                    "marker_verified": item.get("marker_verified"),
+                    "route_confirmed": item.get("route_confirmed"),
                 }
             )
     return accepted

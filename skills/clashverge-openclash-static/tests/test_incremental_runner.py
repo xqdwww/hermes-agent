@@ -19,6 +19,43 @@ def report(manifest,names,kind):
  if kind=='rrc':d.update(status='COMPLETE',attribution_mismatch=0,auto_calibration_status='PASS_RRC_PROXY_ATTRIBUTION_TWO_NODE_AUTO_CALIBRATION',results=[],systemic_gate_confirmations=[])
  return d
 
+def test_actual_use_admissions_require_current_exact_proof():
+ m={'source_snapshot_id':'snap','source_hash':'hash','nodes':[
+     {'exact_node_id':'gpt-id','exact_node_name':'GPT-NEW'},
+     {'exact_node_id':'gemini-id','exact_node_name':'GEMINI-NEW'},
+     {'exact_node_id':'stream-id','exact_node_name':'流媒体-NEW'},
+ ]}
+ proof=lambda service,name,node_id,**extra:{
+     'service':service,'node':name,'exact_node_id':node_id,
+     'source_snapshot_id':'snap','source_hash':'hash','result':'PASS',
+     'method':'desktop-web-route-marker-v1','marker_verified':True,
+     'route_confirmed':True,**extra}
+ rows=[
+     proof('gemini','GEMINI-NEW','gemini-id'),
+     proof('gpt','GPT-NEW','wrong-id'),
+     proof('gpt','流媒体-NEW','stream-id'),
+     proof('gpt','GPT-NEW','gpt-id',route_confirmed=False),
+     proof('gpt','GPT-NEW','gpt-id'),
+ ]
+ assert r.actual_use_admissions(rows,m,['GPT-NEW','GEMINI-NEW','流媒体-NEW'],['GPT-NEW','GEMINI-NEW']) == {
+     'gpt':['GPT-NEW'],'gemini':['GEMINI-NEW']}
+
+def test_safe_functional_loader_preserves_actual_use_proof_booleans(tmp_path):
+ payload={
+     'schema_version':1,'service':'gpt','source_hash':'hash',
+     'results':[{
+         'exact_node_id':'id','exact_node_name':'NEW',
+         'source_snapshot_id':'snap','source_hash':'hash',
+         'tested_at':'2026-10-10T00:00:00+00:00',
+         'probe_method_version':'desktop-web-route-marker-v1',
+         'result':'PASS','marker_verified':True,'route_confirmed':False,
+     }],
+ }
+ path=tmp_path/'functional.json';path.write_text(json.dumps(payload))
+ loaded=s.load_functional_results([path])
+ assert loaded[0]['marker_verified'] is True
+ assert loaded[0]['route_confirmed'] is False
+
 @pytest.mark.parametrize('kind',['rrc','disney'])
 def test_subset_rejects_old_node_or_wrong_source(tmp_path,kind):
  m={'source_snapshot_id':'snap','source_hash':'hash','nodes':[{'exact_node_id':'newid','exact_node_name':'NEW'},{'exact_node_id':'oldid','exact_node_name':'OLD'}]}
@@ -71,7 +108,7 @@ def test_orchestration_tests_only_new_names_and_never_calls_old_sentinels(tmp_pa
  )
  assert result['rrc_status']==expected_status
  assert all('OLD' not in c and 'id-OLD' not in c for c in commands)
- assert result['old_node_service_tests']==0 and result['ai_new_names_admitted']==[]
+ assert result['old_node_service_tests']==0 and result['ai_new_names_admitted']=={'gpt':[],'gemini':[]}
  assert result['activated'] is False
  assert result['parameter_changed_names']==['OLD']
 

@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.7.4
+version: 2.7.5
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -103,7 +103,10 @@ activation instead of substituting unknown nodes or DIRECT.
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.7.4 skips RegionRestrictionCheck for newly added nodes
+for this Skill. Version 2.7.5 lets the incremental updater admit a newly named
+GPT/Gemini node only from current-snapshot logged-in Web generation evidence
+that also records a verified fresh marker and matching desktop route. Screening
+alone still cannot admit an AI node. Version 2.7.4 skips RegionRestrictionCheck for newly added nodes
 that existing policy can never admit to GPT/Gemini because their names are
 Hong Kong labels or contain the exact `流媒体` marker; Disney still tests every
 new node. Version 2.7.0 makes ordinary updates exact-name incremental and removes unknown AI manual tails. Version 2.6.7 removes the redundant default 3-second inter-node

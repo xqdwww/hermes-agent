@@ -225,9 +225,11 @@ def _prepare_ai_groups(
     service: str,
     old_names: set[str],
     current_names: set[str],
+    added_names: Sequence[str],
+    verified_names: Iterable[str],
     measured_hk_names: set[str],
     skill: Any,
-) -> None:
+) -> list[str]:
     candidate, manual, dedicated = _require_service_groups(
         groups, service=service, skill=skill
     )
@@ -240,8 +242,22 @@ def _prepare_ai_groups(
     candidate_refs = [
         name for name in candidate_refs if not _is_hong_kong_label(name)
     ]
+    verified_set = {
+        name for name in (verified_names or ()) if isinstance(name, str)
+    }
+    admitted = _ordered_unique(
+        name
+        for name in added_names
+        if name in verified_set
+        and name in current_names
+        and name not in measured_hk_names
+        and not _is_hong_kong_label(name)
+        and "流媒体" not in name
+    )
+    candidate_refs = _ordered_unique([*candidate_refs, *admitted])
     # The candidate pool is the only automatic admission source.  Manual
-    # concrete entries remain historical policy, but never include a new name.
+    # concrete entries remain historical policy unless a current-snapshot,
+    # actual-use result explicitly admits a new name.
     if not candidate_refs:
         _raise(
             skill,
@@ -256,6 +272,7 @@ def _prepare_ai_groups(
         _SERVICE_GROUPS[service][0],
         _EMERGENCY_GROUP_NAME,
     ]
+    return admitted
 
 
 def _prepare_disney_group(
@@ -497,12 +514,14 @@ def build_candidate(
     *,
     disney_pass_names: Iterable[str] = (),
     measured_hk_names: Iterable[str] = (),
+    verified_gpt_names: Iterable[str] = (),
+    verified_gemini_names: Iterable[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a candidate while carrying policy by exact display name.
 
     Only added names admitted by ``disney_pass_names`` enter the Disney pool.
-    GPT/Gemini pools are carried from the baseline candidate groups and never
-    promote a new name from a screen result.
+    GPT/Gemini pools are carried from the baseline candidate groups and admit
+    only names explicitly supplied as current-snapshot actual-use results.
     """
 
     plan = plan_nodes(old_data, new_data, skill)
@@ -532,19 +551,23 @@ def build_candidate(
         if isinstance(name, str) and name in current_names
     )
     measured_hk = set(measured_hk_ordered)
-    _prepare_ai_groups(
+    admitted_gpt = _prepare_ai_groups(
         groups=group_by_name,
         service="gpt",
         old_names=old_names,
         current_names=current_names,
+        added_names=added_names,
+        verified_names=verified_gpt_names,
         measured_hk_names=measured_hk,
         skill=skill,
     )
-    _prepare_ai_groups(
+    admitted_gemini = _prepare_ai_groups(
         groups=group_by_name,
         service="gemini",
         old_names=old_names,
         current_names=current_names,
+        added_names=added_names,
+        verified_names=verified_gemini_names,
         measured_hk_names=measured_hk,
         skill=skill,
     )
@@ -589,7 +612,7 @@ def build_candidate(
 
     # The shared policy helper applies the conservative label rule and keeps
     # dedicated AI groups limited to manual/candidate selectors.  The pools
-    # above already contain no added names or measured HK names.
+    # above contain only explicitly admitted additions or carried candidates.
     _call_restrict_ai_groups(output, skill)
     _prepare_emergency_group(
         groups=output["proxy-groups"],
@@ -614,11 +637,19 @@ def build_candidate(
         candidate_names = list(candidate_refs)
         if candidate_names != _ordered_unique(candidate_names):
             _raise(skill, "INCREMENTAL_AI_CANDIDATE_GROUP_INVALID:" + service.upper())
-        if any(name in added_names or name in measured_hk for name in candidate_names):
+        admitted_names = {
+            "gpt": set(admitted_gpt),
+            "gemini": set(admitted_gemini),
+        }[service]
+        if any(
+            name in added_names
+            and (name not in admitted_names or name in measured_hk)
+            for name in candidate_names
+        ):
             _raise(skill, "INCREMENTAL_NEW_AI_ADMISSION_FORBIDDEN:" + service.upper())
         if any(
-            name not in old_names
-            or name not in current_names
+            name not in current_names
+            or (name not in old_names and name not in admitted_names)
             or _is_hong_kong_label(name)
             for name in candidate_names
         ):
@@ -664,6 +695,16 @@ def build_candidate(
     report = {
         **plan,
         "admitted_disney_names": list(accepted_disney),
+        "admitted_gpt_names": list(admitted_gpt),
+        "admitted_gemini_names": list(admitted_gemini),
+        "admitted_ai_names": {
+            "gpt": list(admitted_gpt),
+            "gemini": list(admitted_gemini),
+        },
+        "ai_new_names_admitted": {
+            "gpt": list(admitted_gpt),
+            "gemini": list(admitted_gemini),
+        },
         "measured_hk_names": [
             name for name in measured_hk_ordered if name in old_names
         ],
@@ -671,7 +712,7 @@ def build_candidate(
         "admission_explanations": {
             "same_name": "NAME_REUSED_NOT_RETESTED is carried historical policy, not fresh actual-use proof.",
             "parameter_changed": "PARAMETERS_CHANGED_NOT_RETESTED replaces the complete proxy object without service retest.",
-            "added": "ADDED_PENDING_VERIFICATION is never promoted to GPT/Gemini from screening.",
+            "added": "ADDED_PENDING_VERIFICATION is never promoted to GPT/Gemini from screening; only explicit actual-use proof can admit it.",
             "disney": "Only full PASS_SUPPORTED_REGION results supplied by the controller enter Disney.",
             "hong_kong": "Labels and exact-identity measured HK exclusions are policy filters, not exit-IP proof.",
         },

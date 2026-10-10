@@ -172,6 +172,45 @@ def test_build_candidate_replaces_objects_prunes_and_admits_only_disney_pass():
     assert skill.validation_calls == 1
 
 
+def test_build_candidate_admits_snapshot_bound_ai_names_by_service_and_source_order():
+    skill = FakeSkill()
+    old = _config()
+    new = _config(new=True)
+    new["proxies"].extend(
+        [
+            {"name": "gpt-new", "type": "ss", "server": "gpt.example", "port": 6},
+            {"name": "gemini-new", "type": "ss", "server": "gemini.example", "port": 7},
+            {"name": "🇭🇰香港新增", "type": "ss", "server": "hk-new.example", "port": 8},
+            {"name": "流媒体新增", "type": "ss", "server": "stream.example", "port": 9},
+            {"name": "媒体流新增", "type": "ss", "server": "media.example", "port": 10},
+        ]
+    )
+
+    candidate, report = incremental.build_candidate(
+        old,
+        new,
+        skill,
+        disney_pass_names=["new"],
+        verified_gpt_names=[
+            "媒体流新增",
+            "流媒体新增",
+            "🇭🇰香港新增",
+            "gpt-new",
+        ],
+        verified_gemini_names=["gemini-new"],
+    )
+
+    groups = {group["name"]: group for group in candidate["proxy-groups"]}
+    assert groups["GPT候选"]["proxies"] == ["us", "gpt-new", "媒体流新增"]
+    assert groups["GPT手动"]["proxies"] == [
+        "us", "gpt-new", "媒体流新增", "GPT候选"
+    ]
+    assert groups["Gemini候选"]["proxies"] == ["us", "gemini-new"]
+    assert groups["Gemini手动"]["proxies"] == ["us", "gemini-new", "Gemini候选"]
+    assert report["admitted_gpt_names"] == ["gpt-new", "媒体流新增"]
+    assert report["admitted_gemini_names"] == ["gemini-new"]
+
+
 def test_emergency_regenerates_idempotently_and_keeps_new_hk_unknown_nodes_out_of_ai_pool():
     skill = FakeSkill()
     old = _config()
