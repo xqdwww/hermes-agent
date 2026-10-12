@@ -201,7 +201,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.7.5"
+SKILL_VERSION = "2.7.6"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -4221,20 +4221,34 @@ def build_groups(
     manual_candidates: dict[str, list[str]] | None = None,
     verified_names: dict[str, Iterable[str]] | None = None,
     registry_controlled: Iterable[str] | None = None,
+    manual_region_blocked_names: dict[str, Iterable[str]] | None = None,
 ) -> list[dict[str, Any]]:
     verified_names = verified_names or {}
-    registry_controlled_set = set(registry_controlled or ())
+    manual_region_blocked_names = manual_region_blocked_names or {}
+    gpt_manual_blocked = set(manual_region_blocked_names.get("gpt", ()))
+    gemini_manual_blocked = set(manual_region_blocked_names.get("gemini", ()))
     gpt_nodes = filter_service_nodes(
         "gpt", gpt_nodes, verified_names=verified_names.get("gpt", ())
     )
+    gpt_nodes = [name for name in gpt_nodes if name not in gpt_manual_blocked]
     gemini_nodes = filter_service_nodes(
         "gemini", gemini_nodes, verified_names=verified_names.get("gemini", ())
     )
-    gpt_manual_nodes = ["GPT候选", *gpt_nodes]
-    if "gpt" in registry_controlled_set and gpt_nodes:
-        # The first saved preferred node is the concrete startup choice; the
-        # fallback remains available immediately after it.
-        gpt_manual_nodes = [gpt_nodes[0], "GPT候选", *gpt_nodes[1:]]
+    gemini_nodes = [name for name in gemini_nodes if name not in gemini_manual_blocked]
+    if not gpt_nodes:
+        raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:GPT")
+    if not gemini_nodes:
+        raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:GEMINI")
+    gpt_manual_nodes = [
+        name for name in ordered_unique(all_nodes) if name not in gpt_manual_blocked
+    ]
+    gpt_manual_nodes.append("GPT候选")
+    gemini_manual_nodes = [
+        name
+        for name in ordered_unique(all_nodes)
+        if name not in gemini_manual_blocked
+    ]
+    gemini_manual_nodes.append("Gemini候选")
     groups = [
         {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
         {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
@@ -4243,11 +4257,7 @@ def build_groups(
         {"name": "GPT手动", "type": "select", "proxies": gpt_manual_nodes},
         fallback_group("GPT候选", gpt_nodes),
         {"name": "Gemini专用", "type": "select", "proxies": ["Gemini手动", "Gemini候选"]},
-        # A transport health check cannot prove Google account/location
-        # eligibility.  Default the selector to the first functionally filtered
-        # concrete node; keep Gemini候选 available as an explicit transport-only
-        # failover choice instead of silently selecting a region-ineligible node.
-        {"name": "Gemini手动", "type": "select", "proxies": [*gemini_nodes, "Gemini候选"]},
+        {"name": "Gemini手动", "type": "select", "proxies": gemini_manual_nodes},
         fallback_group(
             "Gemini候选",
             gemini_nodes,
@@ -4295,7 +4305,15 @@ def build_groups(
                 verified_names=verified_names.get(service, ()),
             )
             target = groups_by_name[manual_name]["proxies"]
-            target.extend(name for name in candidates if name not in target)
+            blocked = (
+                gpt_manual_blocked if service == "gpt" else
+                gemini_manual_blocked if service == "gemini" else set()
+            )
+            target.extend(
+                name
+                for name in candidates
+                if name in all_nodes and name not in blocked and name not in target
+            )
     return groups
 
 
@@ -4490,15 +4508,25 @@ def restrict_ai_group_members(output: dict[str, Any]) -> None:
     history = {"GPT历史LKG", "Gemini历史LKG"}
     for prefix in ("GPT", "Gemini"):
         pool = groups[prefix + "候选"]
-        members = [name for name in pool["proxies"] if not re.search(
-            r"香港|🇭🇰|hong[\s_-]*kong|(?<![A-Za-z])hk(?![A-Za-z])", name, re.I
-        )]
+        members = [
+            name
+            for name in ordered_unique(pool["proxies"])
+            if name in node_set
+            and not re.search(
+                r"香港|🇭🇰|hong[\s_-]*kong|(?<![A-Za-z])hk(?![A-Za-z])",
+                name,
+                re.I,
+            )
+        ]
         if not members:
             raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES: " + prefix)
         pool["proxies"] = members
-        groups[prefix + "手动"]["proxies"] = [*members, prefix + "候选"]
+        manual_name = prefix + "手动"
+        manual_refs = set(groups[manual_name].get("proxies", []))
+        manual_nodes = [name for name in node_names if name in manual_refs]
+        groups[manual_name]["proxies"] = [*manual_nodes, prefix + "候选"]
         groups[prefix + "专用"]["proxies"] = [
-            prefix + "手动",
+            manual_name,
             prefix + "候选",
             EMERGENCY_GROUP_NAME,
         ]
@@ -4718,6 +4746,16 @@ def transform(
         manual_candidates=manual_candidates,
         verified_names=verified_names,
         registry_controlled=registry_group_services,
+        manual_region_blocked_names=(
+            {
+                service: service_selections[service].get(
+                    "manual_region_blocked_names", []
+                )
+                for service in AI_SERVICE_KEYS
+            }
+            if service_selections is not None
+            else None
+        ),
     )
     if service_selections is not None:
         groups_by_name = {group["name"]: group for group in output["proxy-groups"]}

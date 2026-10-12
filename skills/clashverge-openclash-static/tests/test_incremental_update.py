@@ -149,8 +149,9 @@ def test_build_candidate_replaces_objects_prunes_and_admits_only_disney_pass():
     assert "迪士尼历史LKG" in groups
     assert groups["GPT候选"]["proxies"] == ["us"]
     assert groups["Gemini候选"]["proxies"] == ["us"]
-    assert groups["GPT手动"]["proxies"] == ["us", "GPT候选"]
-    assert groups["Gemini手动"]["proxies"] == ["us", "Gemini候选"]
+    current_names = [proxy["name"] for proxy in new["proxies"]]
+    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
+    assert groups["Gemini手动"]["proxies"] == [*current_names, "Gemini候选"]
     assert groups["GPT专用"]["proxies"] == [
         "GPT手动", "GPT候选", "AI应急（未验证）"
     ]
@@ -202,11 +203,10 @@ def test_build_candidate_admits_snapshot_bound_ai_names_by_service_and_source_or
 
     groups = {group["name"]: group for group in candidate["proxy-groups"]}
     assert groups["GPT候选"]["proxies"] == ["us", "gpt-new", "媒体流新增"]
-    assert groups["GPT手动"]["proxies"] == [
-        "us", "gpt-new", "媒体流新增", "GPT候选"
-    ]
+    current_names = [proxy["name"] for proxy in new["proxies"]]
+    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
     assert groups["Gemini候选"]["proxies"] == ["us", "gemini-new"]
-    assert groups["Gemini手动"]["proxies"] == ["us", "gemini-new", "Gemini候选"]
+    assert groups["Gemini手动"]["proxies"] == [*current_names, "Gemini候选"]
     assert report["admitted_gpt_names"] == ["gpt-new", "媒体流新增"]
     assert report["admitted_gemini_names"] == ["gemini-new"]
 
@@ -240,8 +240,8 @@ def test_emergency_regenerates_idempotently_and_keeps_new_hk_unknown_nodes_out_o
     assert "stale-node" not in groups["AI应急（未验证）"]["proxies"]
     assert groups["GPT候选"]["proxies"] == ["us"]
     assert groups["Gemini候选"]["proxies"] == ["us"]
-    assert "🇭🇰新增" not in groups["GPT手动"]["proxies"]
-    assert "未知新增" not in groups["Gemini手动"]["proxies"]
+    assert "🇭🇰新增" in groups["GPT手动"]["proxies"]
+    assert "未知新增" in groups["Gemini手动"]["proxies"]
     assert groups["手动选择"]["proxies"][-2:] == ["🇭🇰新增", "未知新增"]
     assert groups["自动选择"]["proxies"][-2:] == ["🇭🇰新增", "未知新增"]
     assert candidate["proxy-groups"][-1]["name"] == "AI应急（未验证）"
@@ -307,3 +307,59 @@ def test_local_ai_invariant_rejects_hong_kong_injected_by_policy_hook():
         incremental.build_candidate(
             _config(), _config(new=True), MutatingSkill(), disney_pass_names=["new"]
         )
+
+
+def test_manual_ai_groups_keep_all_current_nodes_without_definitive_region_blocks():
+    skill = FakeSkill()
+    old = _config()
+    new = _config(new=True)
+    new["proxies"].append(
+        {
+            "name": "流媒体新增",
+            "type": "ss",
+            "server": "stream.example",
+            "port": 6,
+        }
+    )
+
+    candidate, _ = incremental.build_candidate(
+        old,
+        new,
+        skill,
+        disney_pass_names=["new"],
+    )
+
+    groups = {group["name"]: group for group in candidate["proxy-groups"]}
+    current_names = [proxy["name"] for proxy in new["proxies"]]
+    assert groups["GPT候选"]["proxies"] == ["us"]
+    assert groups["Gemini候选"]["proxies"] == ["us"]
+    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
+    assert groups["Gemini手动"]["proxies"] == [*current_names, "Gemini候选"]
+
+
+def test_service_specific_manual_region_block_removes_only_that_service_node():
+    skill = FakeSkill()
+    old = _config()
+    new = _config(new=True)
+
+    candidate, report = incremental.build_candidate(
+        old,
+        new,
+        skill,
+        disney_pass_names=["new"],
+        verified_gemini_names=["new"],
+        blocked_gemini_names=["new"],
+    )
+
+    groups = {group["name"]: group for group in candidate["proxy-groups"]}
+    current_names = [proxy["name"] for proxy in new["proxies"]]
+    assert groups["Gemini候选"]["proxies"] == ["us"]
+    assert groups["Gemini手动"]["proxies"] == [
+        name for name in current_names if name != "new"
+    ] + ["Gemini候选"]
+    assert groups["GPT候选"]["proxies"] == ["us"]
+    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
+    assert report["manual_region_blocked_names"] == {
+        "gpt": [],
+        "gemini": ["new"],
+    }

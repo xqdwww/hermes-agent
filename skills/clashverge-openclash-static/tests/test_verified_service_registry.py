@@ -95,7 +95,47 @@ def test_missing_registry_preserves_legacy_transform(monkeypatch, tmp_path):
     assert "🇯🇵日本-流媒体02" not in groups["GPT候选"]["proxies"]
 
 
-def test_registry_uses_identity_bound_order_and_manual_tiers(monkeypatch, tmp_path):
+def test_transform_manual_region_blocks_are_service_specific(monkeypatch, tmp_path):
+    data = sample_config()
+    selections = {
+        service: {
+            "automatic": ["🇨🇳台湾-住宅", "🇸🇬新节点"]
+            if service in {"gpt", "gemini"}
+            else ["🇸🇬新节点"],
+            "manual_candidates": [],
+            "historical_lkg": [],
+            "manual_region_blocked_names": [],
+        }
+        for service in converter.SERVICE_KEYS
+    }
+    selections["gpt"]["manual_region_blocked_names"] = ["🇸🇬新节点"]
+    selections["gemini"]["manual_region_blocked_names"] = ["🇯🇵日本-流媒体02"]
+
+    result = converter.transform(
+        copy.deepcopy(data), selections, use_verified_registry=False
+    )
+    groups = groups_by_name(result)
+
+    assert groups["GPT候选"]["proxies"] == ["🇨🇳台湾-住宅"]
+    assert groups["Gemini候选"]["proxies"] == [
+        "🇨🇳台湾-住宅",
+        "🇸🇬新节点",
+    ]
+    assert groups["GPT手动"]["proxies"] == [
+        "🇨🇳台湾-住宅",
+        "🇯🇵日本-流媒体02",
+        "GPT候选",
+    ]
+    assert groups["Gemini手动"]["proxies"] == [
+        "🇨🇳台湾-住宅",
+        "🇸🇬新节点",
+        "Gemini候选",
+    ]
+
+
+def test_registry_uses_identity_bound_order_and_broad_manual_visibility(
+    monkeypatch, tmp_path
+):
     data = sample_config()
     key = b"verified-registry-test-key-0123456789"
     entries = [
@@ -139,9 +179,9 @@ def test_registry_uses_identity_bound_order_and_manual_tiers(monkeypatch, tmp_pa
     assert groups["GPT手动"]["proxies"] == [
         "🇨🇳台湾-住宅",
         "🇯🇵日本-流媒体02",
+        "🇸🇬新节点",
         "GPT候选",
     ]
-    assert "🇸🇬新节点" not in groups["GPT手动"]["proxies"]
     assert "🇸🇬新节点" in groups["手动选择"]["proxies"]
     assert groups["Gemini候选"]["proxies"] == ["🇨🇳台湾-住宅"]
     # Disney remains based on its accepted legacy set, including the streaming node.
@@ -274,7 +314,7 @@ def test_registry_controlled_history_is_cleared_from_stale_selections(monkeypatc
 
 
 @pytest.mark.parametrize("blocked_reason", ["NEWER_MANUAL_FAIL", "NEWER_FUNCTIONAL_FAIL"])
-def test_newer_functional_or_manual_failure_removes_registry_manual_candidate(
+def test_newer_functional_or_manual_failure_only_removes_registry_candidate(
     monkeypatch, tmp_path, blocked_reason
 ):
     data = sample_config()
@@ -309,10 +349,13 @@ def test_newer_functional_or_manual_failure_removes_registry_manual_candidate(
         }
     )
     groups = groups_by_name(converter.transform(data, selections))
-    assert "🇸🇬新节点" not in groups["GPT手动"]["proxies"]
+    assert "🇸🇬新节点" not in groups["GPT候选"]["proxies"]
+    assert "🇸🇬新节点" in groups["GPT手动"]["proxies"]
 
 
-def test_streaming_override_requires_exact_registry_identity(monkeypatch, tmp_path):
+def test_streaming_override_requires_exact_registry_identity_for_candidates(
+    monkeypatch, tmp_path
+):
     data = sample_config()
     key = b"verified-registry-test-key-0123456789"
     entries = [
@@ -350,7 +393,8 @@ def test_streaming_override_requires_exact_registry_identity(monkeypatch, tmp_pa
     }
     data["proxies"].append(unmatched_stream)
     groups = groups_by_name(converter.transform(data))
-    assert "🇭🇰香港-流媒体99" not in groups["GPT手动"]["proxies"]
+    assert "🇭🇰香港-流媒体99" not in groups["GPT候选"]["proxies"]
+    assert "🇭🇰香港-流媒体99" in groups["GPT手动"]["proxies"]
 
 
 def test_present_registry_requires_existing_identity_key(monkeypatch, tmp_path):

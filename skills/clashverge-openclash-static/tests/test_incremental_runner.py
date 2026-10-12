@@ -40,6 +40,29 @@ def test_actual_use_admissions_require_current_exact_proof():
  assert r.actual_use_admissions(rows,m,['GPT-NEW','GEMINI-NEW','流媒体-NEW'],['GPT-NEW','GEMINI-NEW']) == {
      'gpt':['GPT-NEW'],'gemini':['GEMINI-NEW']}
 
+def test_manual_region_blocks_require_current_exact_failure_evidence():
+ m={'source_snapshot_id':'snap','source_hash':'hash','nodes':[
+     {'exact_node_id':'gpt-id','exact_node_name':'GPT-NODE'},
+     {'exact_node_id':'gemini-id','exact_node_name':'GEMINI-NODE'},
+ ]}
+ row=lambda service,name,node_id,**extra:{
+     'service':service,'node':name,'exact_node_id':node_id,
+     'source_snapshot_id':'snap','source_hash':'hash','result':'FAIL',
+     'method':'desktop-web-route-marker-v1','route_confirmed':True,
+     'error_category':'FAIL_REGION',**extra}
+ rows=[
+     row('gpt','GPT-NODE','gpt-id'),
+     row('gemini','GEMINI-NODE','gemini-id',error_category='FAIL_FORBIDDEN_LOCATION'),
+     row('gpt','GPT-NODE','gpt-id',source_hash='old-hash'),
+     row('gpt','GPT-NODE','wrong-id'),
+     row('gpt','GPT-NODE','gpt-id',result='SCREEN_NEGATIVE'),
+     row('gpt','GPT-NODE','gpt-id',error_category='FAIL_TRANSPORT'),
+     row('gpt','GPT-NODE','gpt-id',route_confirmed=False),
+     row('gpt','GPT-NODE','gpt-id',method='regionrestrictioncheck-sidecar-v8'),
+ ]
+ assert r.manual_region_blocked_names(rows,m) == {
+     'gpt':['GPT-NODE'],'gemini':['GEMINI-NODE']}
+
 def test_safe_functional_loader_preserves_actual_use_proof_booleans(tmp_path):
  payload={
      'schema_version':1,'service':'gpt','source_hash':'hash',
@@ -55,6 +78,30 @@ def test_safe_functional_loader_preserves_actual_use_proof_booleans(tmp_path):
  loaded=s.load_functional_results([path])
  assert loaded[0]['marker_verified'] is True
  assert loaded[0]['route_confirmed'] is False
+
+
+def test_restrict_ai_groups_preserves_valid_broad_manual_members():
+ data={
+  'proxies':[
+   {'name':'jp'}, {'name':'🇭🇰香港'}, {'name':'us'}, {'name':'流媒体节点'},
+  ],
+  'proxy-groups':[
+   {'name':'GPT专用','type':'select','proxies':['GPT手动','GPT候选','AI应急（未验证）']},
+   {'name':'GPT手动','type':'select','proxies':['jp','🇭🇰香港','us','流媒体节点','stale','GPT候选','GPT历史LKG']},
+   {'name':'GPT候选','type':'fallback','proxies':['us','stale']},
+   {'name':'Gemini专用','type':'select','proxies':['Gemini手动','Gemini候选','AI应急（未验证）']},
+   {'name':'Gemini手动','type':'select','proxies':['jp','🇭🇰香港','us','流媒体节点','stale','Gemini候选','Gemini历史LKG']},
+   {'name':'Gemini候选','type':'fallback','proxies':['us','stale']},
+   {'name':'GPT历史LKG','type':'fallback','proxies':['us']},
+   {'name':'Gemini历史LKG','type':'fallback','proxies':['us']},
+  ],
+ }
+ s.restrict_ai_group_members(data)
+ groups={group['name']:group for group in data['proxy-groups']}
+ assert groups['GPT候选']['proxies']==['us']
+ assert groups['Gemini候选']['proxies']==['us']
+ assert groups['GPT手动']['proxies']==['jp','🇭🇰香港','us','流媒体节点','GPT候选']
+ assert groups['Gemini手动']['proxies']==['jp','🇭🇰香港','us','流媒体节点','Gemini候选']
 
 @pytest.mark.parametrize('kind',['rrc','disney'])
 def test_subset_rejects_old_node_or_wrong_source(tmp_path,kind):

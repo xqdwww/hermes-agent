@@ -225,9 +225,11 @@ def _prepare_ai_groups(
     service: str,
     old_names: set[str],
     current_names: set[str],
+    current_order: Sequence[str],
     added_names: Sequence[str],
     verified_names: Iterable[str],
     measured_hk_names: set[str],
+    blocked_names: set[str],
     skill: Any,
 ) -> list[str]:
     candidate, manual, dedicated = _require_service_groups(
@@ -237,11 +239,9 @@ def _prepare_ai_groups(
         candidate["proxies"],
         old_names=old_names,
         current_names=current_names,
-        excluded_names=measured_hk_names,
+        excluded_names=measured_hk_names | blocked_names,
     )
-    candidate_refs = [
-        name for name in candidate_refs if not _is_hong_kong_label(name)
-    ]
+    candidate_refs = [name for name in candidate_refs if not _is_hong_kong_label(name)]
     verified_set = {
         name for name in (verified_names or ()) if isinstance(name, str)
     }
@@ -251,6 +251,7 @@ def _prepare_ai_groups(
         if name in verified_set
         and name in current_names
         and name not in measured_hk_names
+        and name not in blocked_names
         and not _is_hong_kong_label(name)
         and "流媒体" not in name
     )
@@ -264,9 +265,13 @@ def _prepare_ai_groups(
             "BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:"
             + service.upper(),
         )
-    concrete = _ordered_unique(candidate_refs)
     candidate["proxies"] = candidate_refs
-    manual["proxies"] = [*concrete, _SERVICE_GROUPS[service][0]]
+    manual_concrete = _ordered_unique(
+        name
+        for name in current_order
+        if name in current_names and name not in blocked_names
+    )
+    manual["proxies"] = [*manual_concrete, _SERVICE_GROUPS[service][0]]
     dedicated["proxies"] = [
         _SERVICE_GROUPS[service][1],
         _SERVICE_GROUPS[service][0],
@@ -516,12 +521,16 @@ def build_candidate(
     measured_hk_names: Iterable[str] = (),
     verified_gpt_names: Iterable[str] = (),
     verified_gemini_names: Iterable[str] = (),
+    blocked_gpt_names: Iterable[str] = (),
+    blocked_gemini_names: Iterable[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a candidate while carrying policy by exact display name.
 
     Only added names admitted by ``disney_pass_names`` enter the Disney pool.
     GPT/Gemini pools are carried from the baseline candidate groups and admit
     only names explicitly supplied as current-snapshot actual-use results.
+    Manual region blocks are service-specific exact names from definitive,
+    current-snapshot functional failures.
     """
 
     plan = plan_nodes(old_data, new_data, skill)
@@ -529,6 +538,7 @@ def build_candidate(
     new_proxies, new_by_name = _proxy_map(new_data, skill=skill, context="snapshot")
     old_names = set(old_by_name)
     current_names = set(new_by_name)
+    current_order = [str(proxy["name"]) for proxy in new_proxies]
     added_names = list(plan["added_names"])
 
     groups, group_by_name = _group_map(old_data, skill=skill)
@@ -551,14 +561,31 @@ def build_candidate(
         if isinstance(name, str) and name in current_names
     )
     measured_hk = set(measured_hk_ordered)
+    blocked_ordered = {
+        "gpt": _ordered_unique(
+            name
+            for name in blocked_gpt_names
+            if isinstance(name, str) and name in current_names
+        ),
+        "gemini": _ordered_unique(
+            name
+            for name in blocked_gemini_names
+            if isinstance(name, str) and name in current_names
+        ),
+    }
+    blocked_by_service = {
+        service: set(names) for service, names in blocked_ordered.items()
+    }
     admitted_gpt = _prepare_ai_groups(
         groups=group_by_name,
         service="gpt",
         old_names=old_names,
         current_names=current_names,
+        current_order=current_order,
         added_names=added_names,
         verified_names=verified_gpt_names,
         measured_hk_names=measured_hk,
+        blocked_names=blocked_by_service["gpt"],
         skill=skill,
     )
     admitted_gemini = _prepare_ai_groups(
@@ -566,9 +593,11 @@ def build_candidate(
         service="gemini",
         old_names=old_names,
         current_names=current_names,
+        current_order=current_order,
         added_names=added_names,
         verified_names=verified_gemini_names,
         measured_hk_names=measured_hk,
+        blocked_names=blocked_by_service["gemini"],
         skill=skill,
     )
     accepted_disney = _prepare_disney_group(
@@ -656,7 +685,12 @@ def build_candidate(
             _raise(skill, "INCREMENTAL_AI_CANDIDATE_GROUP_INVALID:" + service.upper())
         if manual is None or dedicated is None:
             _raise(skill, "INCREMENTAL_REQUIRED_GROUP_MISSING:" + service.upper())
-        if manual.get("proxies") != [*candidate_names, candidate_name]:
+        expected_manual_names = _ordered_unique(
+            name
+            for name in current_order
+            if name in current_names and name not in blocked_by_service[service]
+        )
+        if manual.get("proxies") != [*expected_manual_names, candidate_name]:
             _raise(skill, "INCREMENTAL_AI_MANUAL_GROUP_INVALID:" + service.upper())
         if dedicated.get("proxies") != [
             manual_name,
@@ -708,6 +742,9 @@ def build_candidate(
         "measured_hk_names": [
             name for name in measured_hk_ordered if name in old_names
         ],
+        "manual_region_blocked_names": {
+            service: list(names) for service, names in blocked_ordered.items()
+        },
         "old_service_tests": 0,
         "admission_explanations": {
             "same_name": "NAME_REUSED_NOT_RETESTED is carried historical policy, not fresh actual-use proof.",

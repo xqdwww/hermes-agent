@@ -85,8 +85,8 @@ exist).  No per-node wrapper groups are generated.
 | Group | Type | Content |
 |---|---|---|
 | GPT专用 | select | GPT手动, GPT自动 |
-| GPT手动 | select | GPT自动, then GPT candidate nodes (Japan → Taiwan → other) |
-| GPT自动 | fallback | GPT candidate nodes, sorted: Japan → Taiwan → other. |
+| GPT手动 | select | All current source nodes in source order except definitive GPT region blocks, then GPT候选 |
+| GPT候选 | fallback | Curated GPT candidate nodes, sorted: Japan → Taiwan → other. |
 
 GPT candidates come from the original GPT专用 group (intersected with static
 proxies).  When probes are used, only PASS nodes are included.
@@ -96,8 +96,8 @@ proxies).  When probes are used, only PASS nodes are included.
 | Group | Type | Content |
 |---|---|---|
 | Gemini专用 | select | Gemini手动, Gemini自动 |
-| Gemini手动 | select | Functionally filtered concrete nodes first, then Gemini自动 as an explicit transport-only fallback |
-| Gemini自动 | fallback | Only Japan, Taiwan, Hong Kong, Germany nodes. Sorted: Japan → Taiwan → Hong Kong → Germany. |
+| Gemini手动 | select | All current source nodes in source order except definitive Gemini region blocks, then Gemini候选 |
+| Gemini候选 | fallback | Curated Gemini candidate nodes. |
 
 When probes are active, all nodes are considered — only PASS nodes enter the
 group.  Manual calibration overrides can force specific nodes in or out.
@@ -213,10 +213,11 @@ counts are baseline evidence, not promises of permanent availability. Do not
 label CloudCode proof as Gemini Web or AI Studio proof, or guest ChatGPT proof
 as proof of paid models, Codex or authenticated OpenAI API.
 
-Exact registry matches may bypass the old `流媒体` name exclusion. Unverified
-nodes retain that exclusion. Prefer registry order and a concrete first node
-for GPT/Gemini manual selectors. Keep transport-only fallback available as an
-explicit choice; an HTTP health response is not actual model eligibility.
+Exact registry matches may bypass the old `流媒体` name exclusion in curated
+candidate pools. Unverified nodes retain that candidate exclusion. GPT/Gemini
+manual selectors preserve current source order and keep the curated candidate
+selector as an explicit choice; an HTTP health response is not actual model
+eligibility.
 
 Antigravity Manager connects to OpenClash through its native HTTP proxy pool;
 its gateway entry is `OpenClash · Gemini 已验证节点池`. Airport VLESS/Hysteria2
@@ -231,9 +232,10 @@ remove deleted nodes, and test only added names. `--full-retest` is the explicit
 full diagnostic option. With no additions, no RRC or Disney service probe runs.
 Existing candidate validation, activation health checks and rollback remain.
 
-GPT/Gemini manual selectors now show only their curated pool; unknown/failed
-manual tails and AI historical fallback groups are removed. Hong Kong-labelled
-entries are conservatively excluded (labels are not measured exit countries).
-Screening success never promotes a new AI node as actual-use verified. Carrying
-a same-name existing selection is recorded as untested policy reuse, including
-when its connection parameters change; saved actual-use evidence is not rewritten.
+GPT/Gemini manual selectors show all current source nodes. A node is removed
+from one service's manual selector only by exact current-snapshot,
+route-confirmed desktop Web evidence of a region/location failure for that
+service. Curated candidate pools remain strict: screening success never promotes
+a new AI node as actual-use verified. Carrying a same-name existing selection is
+recorded as untested policy reuse, including when its connection parameters
+change; saved actual-use evidence is not rewritten.

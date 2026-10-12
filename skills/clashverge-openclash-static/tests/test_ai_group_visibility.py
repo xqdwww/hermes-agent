@@ -13,16 +13,18 @@ def test_update_defaults_incremental_but_full_retest_explicit(command):
 
 def data():
  groups=[]
+ names=['Taiwan','香港住宅','🇭🇰测试','Hong Kong 1','HK-2','UNKNOWN','bad']
  for prefix in ['GPT','Gemini']:
-  groups.extend([{'name':prefix+'候选','proxies':['Taiwan','香港住宅','🇭🇰测试','Hong Kong 1','HK-2']},{'name':prefix+'手动','proxies':['UNKNOWN','bad','香港住宅',prefix+'历史LKG']},{'name':prefix+'专用','proxies':[prefix+'手动',prefix+'历史LKG']},{'name':prefix+'历史LKG','proxies':['bad']}])
+  groups.extend([{'name':prefix+'候选','proxies':['Taiwan','香港住宅','🇭🇰测试','Hong Kong 1','HK-2']},{'name':prefix+'手动','proxies':[*names,prefix+'历史LKG']},{'name':prefix+'专用','proxies':[prefix+'手动',prefix+'历史LKG']},{'name':prefix+'历史LKG','proxies':['bad']}])
  groups.append({'name':'手动选择','proxies':['Taiwan','香港住宅','UNKNOWN','bad']})
- return {'proxies':[{'name':name} for name in ['Taiwan','香港住宅','🇭🇰测试','Hong Kong 1','HK-2','UNKNOWN','bad']], 'proxy-groups':groups}
+ return {'proxies':[{'name':name} for name in names], 'proxy-groups':groups}
 
-def test_unknown_and_hk_not_reachable_from_ai_selectors_but_remain_general():
+def test_unknown_and_hk_remain_manual_but_not_ai_candidates():
  d=data();s.restrict_ai_group_members(d);g={x['name']:x for x in d['proxy-groups']}
+ names=[proxy['name'] for proxy in d['proxies']]
  for prefix in ['GPT','Gemini']:
   assert g[prefix+'候选']['proxies']==['Taiwan']
-  assert g[prefix+'手动']['proxies']==['Taiwan',prefix+'候选']
+  assert g[prefix+'手动']['proxies']==[*names,prefix+'候选']
   assert g[prefix+'专用']['proxies']==[prefix+'手动',prefix+'候选','AI应急（未验证）']
   assert prefix+'历史LKG' not in g
  assert g['AI应急（未验证）']['type']=='select'

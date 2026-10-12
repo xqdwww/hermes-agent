@@ -92,6 +92,53 @@ def actual_use_admissions(functional_results, manifest, added_names, eligible_na
     }
 
 
+def manual_region_blocked_names(functional_results, manifest):
+    """Return current-snapshot exact functional region blocks by service."""
+    current_nodes = [
+        item
+        for item in manifest.get('nodes', [])
+        if isinstance(item, dict)
+        and isinstance(item.get('exact_node_name'), str)
+        and isinstance(item.get('exact_node_id'), str)
+    ]
+    current_by_name = {
+        item['exact_node_name']: item['exact_node_id'] for item in current_nodes
+    }
+    snapshot_id = manifest.get('source_snapshot_id')
+    source_hash = manifest.get('source_hash')
+    blocked = {'gpt': set(), 'gemini': set()}
+    for item in functional_results:
+        if not isinstance(item, dict):
+            continue
+        service = item.get('service')
+        if service not in blocked:
+            continue
+        name = item.get('node', item.get('exact_node_name'))
+        node_id = item.get('exact_node_id')
+        if (
+            not isinstance(name, str)
+            or not isinstance(node_id, str)
+            or current_by_name.get(name) != node_id
+            or item.get('source_snapshot_id') != snapshot_id
+            or item.get('source_hash') != source_hash
+            or item.get('result') != 'FAIL'
+            or item.get('route_confirmed') is not True
+            or item.get('method') != 'desktop-web-route-marker-v1'
+            or item.get('error_category')
+            not in {'FAIL_REGION', 'FAIL_FORBIDDEN_LOCATION'}
+        ):
+            continue
+        blocked[service].add(name)
+    return {
+        service: [
+            item['exact_node_name']
+            for item in current_nodes
+            if item['exact_node_name'] in names
+        ]
+        for service, names in blocked.items()
+    }
+
+
 def run_incremental_update(args, skill):
     if not 0 < args.min_node_retention_ratio <= 1:
         raise skill.ConfigError('--min-node-retention-ratio must be in (0, 1].')
@@ -119,6 +166,9 @@ def run_incremental_update(args, skill):
     verified_ai_names = actual_use_admissions(
         functional_results, manifest, names, rrc_names
     )
+    region_blocked_names = manual_region_blocked_names(
+        functional_results, manifest
+    )
     report_path = directory / 'incremental-report.json'
     report = {'schema_version': 1, 'skill_version': skill.SKILL_VERSION,
               'source_snapshot_id': manifest['source_snapshot_id'], 'source_hash': manifest['source_hash'],
@@ -126,7 +176,8 @@ def run_incremental_update(args, skill):
               'started_at': skill.iso_now(), 'status': 'PREPARING',
               'service_probe_names': names,
               'ai_new_names_admitted': {'gpt': [], 'gemini': []},
-              'ai_evidence_policy': 'carry existing curated membership by name; admit added AI names only from current-snapshot desktop-web-route-marker-v1 proof; screening cannot admit new AI nodes'}
+              'manual_region_blocked_names': region_blocked_names,
+              'ai_evidence_policy': 'carry existing curated membership by name; admit added AI names only from current-snapshot desktop-web-route-marker-v1 proof; screening cannot admit new AI nodes; exclude only exact current-snapshot desktop-web-route-marker-v1 region failures from the matching service'}
     skill.atomic_write_json(report, report_path, private_parent=True)
     disney_pass = []
     script_dir = Path(skill.__file__).parent
@@ -166,6 +217,8 @@ def run_incremental_update(args, skill):
             measured_hk_names=hk_names,
             verified_gpt_names=set(verified_ai_names['gpt']),
             verified_gemini_names=set(verified_ai_names['gemini']),
+            blocked_gpt_names=set(region_blocked_names['gpt']),
+            blocked_gemini_names=set(region_blocked_names['gemini']),
         )
         skill.restrict_ai_group_members(candidate)
         skill.validate_config(candidate)
@@ -186,6 +239,9 @@ def run_incremental_update(args, skill):
             'gemini': list(admitted_report.get('gemini', ())),
         }
         report['measured_hk_exclusions'] = sorted(hk_names)
+        report['manual_region_blocked_names'] = selection_report.get(
+            'manual_region_blocked_names', region_blocked_names
+        )
         report['candidate_sha256'] = skill.sha256_file(output)
         report['candidate_path'] = str(output)
         if read_baseline(skill, args.host) != old_text:
