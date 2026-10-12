@@ -40,6 +40,80 @@ def test_actual_use_admissions_require_current_exact_proof():
  assert r.actual_use_admissions(rows,m,['GPT-NEW','GEMINI-NEW','流媒体-NEW'],['GPT-NEW','GEMINI-NEW']) == {
      'gpt':['GPT-NEW'],'gemini':['GEMINI-NEW']}
 
+
+def test_gemini_antigravity_hong_kong_pass_is_admitted_but_not_for_gpt():
+ m={'source_snapshot_id':'snap','source_hash':'hash','nodes':[
+     {'exact_node_id':'hk-id','exact_node_name':'🇭🇰香港-CloudCode'},
+ ]}
+ proof=lambda service,method:{
+     'service':service,'node':'🇭🇰香港-CloudCode','exact_node_id':'hk-id',
+     'source_snapshot_id':'snap','source_hash':'hash','result':'PASS',
+     'method':method,'marker_verified':True,'route_confirmed':True}
+ assert r.actual_use_admissions(
+     [proof('gemini','antigravity_inference')],
+     m,
+     ['🇭🇰香港-CloudCode'],
+     ['🇭🇰香港-CloudCode'],
+ ) == {'gpt': [], 'gemini': ['🇭🇰香港-CloudCode']}
+ assert r.actual_use_admissions(
+     [proof('gpt','antigravity_inference')],
+     m,
+     ['🇭🇰香港-CloudCode'],
+     ['🇭🇰香港-CloudCode'],
+ ) == {'gpt': [], 'gemini': []}
+
+
+def test_registry_preferred_names_require_current_exact_identity(monkeypatch, tmp_path):
+    key = b'incremental-registry-test-key-0123456789'
+    old_renamed = {
+        'name': 'old-renamed', 'type': 'ss', 'server': 'same.example', 'port': 1
+    }
+    old_same_name = {
+        'name': 'same-name', 'type': 'ss', 'server': 'old.example', 'port': 2
+    }
+    removed = {
+        'name': 'removed', 'type': 'ss', 'server': 'removed.example', 'port': 3
+    }
+    source = {
+        'proxies': [
+            {
+                'name': 'same-name',
+                'type': 'ss',
+                'server': 'new.example',
+                'port': 2,
+            },
+            {
+                'name': 'renamed-current',
+                'type': 'ss',
+                'server': 'same.example',
+                'port': 1,
+            },
+        ]
+    }
+    entries = [
+        {
+            'exact_node_id': s.stable_node_identity(proxy, key),
+            'node': proxy['name'],
+            'service': 'gpt',
+            'tier': 'preferred',
+            'enabled': True,
+            'tested_at': '2026-10-10T00:00:00+00:00',
+            'method': 'chatgpt_guest_generation',
+        }
+        for proxy in (old_renamed, old_same_name, removed)
+    ]
+    registry_path = tmp_path / 'verified-service-registry.json'
+    registry_path.write_text(json.dumps({'schema_version': 1, 'nodes': entries}))
+    key_path = tmp_path / 'source-identity.key'
+    key_path.write_bytes(key)
+    monkeypatch.setenv('OPENCLASH_VERIFIED_REGISTRY_PATH', str(registry_path))
+    monkeypatch.setattr(s, 'DEFAULT_SOURCE_IDENTITY_KEY', key_path)
+
+    assert r.verified_registry_preferred_names(s, source, key_path) == {
+        'gpt': ['renamed-current'],
+        'gemini': [],
+    }
+
 def test_manual_region_blocks_require_current_exact_failure_evidence():
  m={'source_snapshot_id':'snap','source_hash':'hash','nodes':[
      {'exact_node_id':'gpt-id','exact_node_name':'GPT-NODE'},
@@ -62,6 +136,24 @@ def test_manual_region_blocks_require_current_exact_failure_evidence():
  ]
  assert r.manual_region_blocked_names(rows,m) == {
      'gpt':['GPT-NODE'],'gemini':['GEMINI-NODE']}
+
+
+def test_gemini_antigravity_region_failure_blocks_manual_but_not_gpt():
+ m={'source_snapshot_id':'snap','source_hash':'hash','nodes':[
+     {'exact_node_id':'hk-id','exact_node_name':'🇭🇰香港-CloudCode'},
+ ]}
+ row=lambda service,method:{
+     'service':service,'node':'🇭🇰香港-CloudCode','exact_node_id':'hk-id',
+     'source_snapshot_id':'snap','source_hash':'hash','result':'FAIL',
+     'method':method,'route_confirmed':True,
+     'error_category':'FAIL_FORBIDDEN_LOCATION'}
+ assert r.manual_region_blocked_names(
+     [row('gemini','antigravity_inference')], m
+ ) == {'gpt': [], 'gemini': ['🇭🇰香港-CloudCode']}
+ assert r.manual_region_blocked_names(
+     [row('gpt','antigravity_inference')], m
+ ) == {'gpt': [], 'gemini': []}
+
 
 def test_safe_functional_loader_preserves_actual_use_proof_booleans(tmp_path):
  payload={
@@ -100,7 +192,7 @@ def test_restrict_ai_groups_preserves_valid_broad_manual_members():
  groups={group['name']:group for group in data['proxy-groups']}
  assert groups['GPT候选']['proxies']==['us']
  assert groups['Gemini候选']['proxies']==['us']
- assert groups['GPT手动']['proxies']==['jp','🇭🇰香港','us','流媒体节点','GPT候选']
+ assert groups['GPT手动']['proxies']==['jp','us','流媒体节点','GPT候选']
  assert groups['Gemini手动']['proxies']==['jp','🇭🇰香港','us','流媒体节点','Gemini候选']
 
 @pytest.mark.parametrize('kind',['rrc','disney'])

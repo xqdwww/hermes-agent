@@ -133,6 +133,52 @@ def test_transform_manual_region_blocks_are_service_specific(monkeypatch, tmp_pa
     ]
 
 
+def test_full_transform_excludes_hk_from_gpt_manual_but_keeps_gemini_manual(
+    monkeypatch, tmp_path
+):
+    data = sample_config()
+    data["proxies"].append(
+        {
+            "name": "Hong Kong exact",
+            "type": "ss",
+            "server": "hk.example.invalid",
+            "port": 4,
+        }
+    )
+    key = b"verified-registry-test-key-0123456789"
+    write_registry(
+        tmp_path,
+        monkeypatch,
+        data,
+        [
+            registry_entry(
+                data["proxies"][0],
+                key,
+                service="gpt",
+                tier="preferred",
+                tested_at="2026-09-08T05:00:00+00:00",
+            ),
+            registry_entry(
+                data["proxies"][-1],
+                key,
+                service="gemini",
+                tier="preferred",
+                tested_at="2026-09-08T05:01:00+00:00",
+            ),
+        ],
+        key=key,
+    )
+
+    groups = groups_by_name(
+        converter.transform(copy.deepcopy(data))
+    )
+
+    assert "Hong Kong exact" not in groups["GPT候选"]["proxies"]
+    assert "Hong Kong exact" not in groups["GPT手动"]["proxies"]
+    assert "Hong Kong exact" in groups["Gemini候选"]["proxies"]
+    assert "Hong Kong exact" in groups["Gemini手动"]["proxies"]
+
+
 def test_registry_uses_identity_bound_order_and_broad_manual_visibility(
     monkeypatch, tmp_path
 ):
@@ -394,7 +440,8 @@ def test_streaming_override_requires_exact_registry_identity_for_candidates(
     data["proxies"].append(unmatched_stream)
     groups = groups_by_name(converter.transform(data))
     assert "🇭🇰香港-流媒体99" not in groups["GPT候选"]["proxies"]
-    assert "🇭🇰香港-流媒体99" in groups["GPT手动"]["proxies"]
+    assert "🇭🇰香港-流媒体99" not in groups["GPT手动"]["proxies"]
+    assert "🇭🇰香港-流媒体99" in groups["Gemini手动"]["proxies"]
 
 
 def test_present_registry_requires_existing_identity_key(monkeypatch, tmp_path):

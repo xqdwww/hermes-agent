@@ -58,6 +58,9 @@ DEFAULT_VERGE_CANDIDATES = (
 PLACEHOLDER_NODES = {"使用前先更新订阅"}
 STREAMING_LABEL = "流媒体"
 STREAMING_LABEL_POLICY_REASON = "NODE_NAME_CONTAINS_STREAMING_LABEL"
+_HK_LABEL_RE = re.compile(
+    r"香港|🇭🇰|hong[\s_-]*kong|(?<![A-Za-z])hk(?![A-Za-z])", re.IGNORECASE
+)
 
 # Accepted working GPT candidates. Only names present in the current subscription are used.
 GPT_CANDIDATES = (
@@ -201,7 +204,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.7.6"
+SKILL_VERSION = "2.7.7"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -555,6 +558,12 @@ def filter_service_nodes(
         for name in values
         if STREAMING_LABEL not in name or name in verified
     ]
+
+
+def is_hong_kong_label(name: str) -> bool:
+    """Return whether a node name carries the conservative HK policy label."""
+
+    return bool(_HK_LABEL_RE.search(name))
 
 
 def normalize_node_name(name: str) -> str:
@@ -4230,7 +4239,11 @@ def build_groups(
     gpt_nodes = filter_service_nodes(
         "gpt", gpt_nodes, verified_names=verified_names.get("gpt", ())
     )
-    gpt_nodes = [name for name in gpt_nodes if name not in gpt_manual_blocked]
+    gpt_nodes = [
+        name
+        for name in gpt_nodes
+        if name not in gpt_manual_blocked and not is_hong_kong_label(name)
+    ]
     gemini_nodes = filter_service_nodes(
         "gemini", gemini_nodes, verified_names=verified_names.get("gemini", ())
     )
@@ -4240,7 +4253,9 @@ def build_groups(
     if not gemini_nodes:
         raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:GEMINI")
     gpt_manual_nodes = [
-        name for name in ordered_unique(all_nodes) if name not in gpt_manual_blocked
+        name
+        for name in ordered_unique(all_nodes)
+        if name not in gpt_manual_blocked and not is_hong_kong_label(name)
     ]
     gpt_manual_nodes.append("GPT候选")
     gemini_manual_nodes = [
@@ -4312,7 +4327,10 @@ def build_groups(
             target.extend(
                 name
                 for name in candidates
-                if name in all_nodes and name not in blocked and name not in target
+                if name in all_nodes
+                and name not in blocked
+                and name not in target
+                and not (service == "gpt" and is_hong_kong_label(name))
             )
     return groups
 
@@ -4512,18 +4530,19 @@ def restrict_ai_group_members(output: dict[str, Any]) -> None:
             name
             for name in ordered_unique(pool["proxies"])
             if name in node_set
-            and not re.search(
-                r"香港|🇭🇰|hong[\s_-]*kong|(?<![A-Za-z])hk(?![A-Za-z])",
-                name,
-                re.I,
-            )
+            and not (prefix == "GPT" and is_hong_kong_label(name))
         ]
         if not members:
             raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES: " + prefix)
         pool["proxies"] = members
         manual_name = prefix + "手动"
         manual_refs = set(groups[manual_name].get("proxies", []))
-        manual_nodes = [name for name in node_names if name in manual_refs]
+        manual_nodes = [
+            name
+            for name in node_names
+            if name in manual_refs
+            and not (prefix == "GPT" and is_hong_kong_label(name))
+        ]
         groups[manual_name]["proxies"] = [*manual_nodes, prefix + "候选"]
         groups[prefix + "专用"]["proxies"] = [
             manual_name,

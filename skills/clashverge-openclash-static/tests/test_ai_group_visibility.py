@@ -19,12 +19,21 @@ def data():
  groups.append({'name':'手动选择','proxies':['Taiwan','香港住宅','UNKNOWN','bad']})
  return {'proxies':[{'name':name} for name in names], 'proxy-groups':groups}
 
-def test_unknown_and_hk_remain_manual_but_not_ai_candidates():
+def test_gpt_hk_is_excluded_but_gemini_hk_remains_visible():
  d=data();s.restrict_ai_group_members(d);g={x['name']:x for x in d['proxy-groups']}
  names=[proxy['name'] for proxy in d['proxies']]
  for prefix in ['GPT','Gemini']:
-  assert g[prefix+'候选']['proxies']==['Taiwan']
-  assert g[prefix+'手动']['proxies']==[*names,prefix+'候选']
+  expected_candidate = (
+   ['Taiwan']
+   if prefix == 'GPT' else
+   ['Taiwan','香港住宅','🇭🇰测试','Hong Kong 1','HK-2']
+  )
+  assert g[prefix+'候选']['proxies']==expected_candidate
+  expected_manual = (
+   [name for name in names if not s.is_hong_kong_label(name)]
+   if prefix == 'GPT' else names
+  )
+  assert g[prefix+'手动']['proxies']==[*expected_manual,prefix+'候选']
   assert g[prefix+'专用']['proxies']==[prefix+'手动',prefix+'候选','AI应急（未验证）']
   assert prefix+'历史LKG' not in g
  assert g['AI应急（未验证）']['type']=='select'

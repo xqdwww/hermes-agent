@@ -148,9 +148,12 @@ def test_build_candidate_replaces_objects_prunes_and_admits_only_disney_pass():
     assert "Gemini历史LKG" not in groups
     assert "迪士尼历史LKG" in groups
     assert groups["GPT候选"]["proxies"] == ["us"]
-    assert groups["Gemini候选"]["proxies"] == ["us"]
+    assert groups["Gemini候选"]["proxies"] == ["🇭🇰香港旧", "us"]
     current_names = [proxy["name"] for proxy in new["proxies"]]
-    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
+    gpt_manual_names = [
+        name for name in current_names if not incremental._is_hong_kong_label(name)
+    ]
+    assert groups["GPT手动"]["proxies"] == [*gpt_manual_names, "GPT候选"]
     assert groups["Gemini手动"]["proxies"] == [*current_names, "Gemini候选"]
     assert groups["GPT专用"]["proxies"] == [
         "GPT手动", "GPT候选", "AI应急（未验证）"
@@ -204,11 +207,73 @@ def test_build_candidate_admits_snapshot_bound_ai_names_by_service_and_source_or
     groups = {group["name"]: group for group in candidate["proxy-groups"]}
     assert groups["GPT候选"]["proxies"] == ["us", "gpt-new", "媒体流新增"]
     current_names = [proxy["name"] for proxy in new["proxies"]]
-    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
-    assert groups["Gemini候选"]["proxies"] == ["us", "gemini-new"]
+    gpt_manual_names = [
+        name for name in current_names if not incremental._is_hong_kong_label(name)
+    ]
+    assert groups["GPT手动"]["proxies"] == [*gpt_manual_names, "GPT候选"]
+    assert groups["Gemini候选"]["proxies"] == ["🇭🇰香港旧", "us", "gemini-new"]
     assert groups["Gemini手动"]["proxies"] == [*current_names, "Gemini候选"]
     assert report["admitted_gpt_names"] == ["gpt-new", "媒体流新增"]
     assert report["admitted_gemini_names"] == ["gemini-new"]
+
+
+def test_build_candidate_reuses_registry_preferred_names_and_combines_fresh_results_in_source_order():
+    skill = FakeSkill()
+    old = _config()
+    new = _config(new=True)
+    new["proxies"][0]["name"] = "registry-renamed"
+    new["proxies"].extend(
+        [{"name": "fresh-gpt", "type": "ss", "server": "fresh.example", "port": 6}]
+    )
+
+    candidate, report = incremental.build_candidate(
+        old,
+        new,
+        skill,
+        disney_pass_names=["new"],
+        registry_gpt_names=["registry-renamed", "removed", "same-name"],
+        verified_gpt_names=["fresh-gpt"],
+    )
+
+    groups = {group["name"]: group for group in candidate["proxy-groups"]}
+    assert groups["GPT候选"]["proxies"] == [
+        "us",
+        "registry-renamed",
+        "fresh-gpt",
+    ]
+    assert report["registry_reused_names"] == {
+        "gpt": ["registry-renamed"],
+        "gemini": [],
+    }
+
+
+def test_hong_kong_registry_reuse_is_gpt_only_but_gemini_candidate_visible():
+    skill = FakeSkill()
+    old = _config()
+    new = _config(new=True)
+    new["proxies"].append(
+        {
+            "name": "🇭🇰香港验证",
+            "type": "ss",
+            "server": "hk-verified.example",
+            "port": 6,
+        }
+    )
+
+    candidate, _ = incremental.build_candidate(
+        old,
+        new,
+        skill,
+        disney_pass_names=["new"],
+        registry_gpt_names=["🇭🇰香港验证"],
+        registry_gemini_names=["🇭🇰香港验证"],
+    )
+
+    groups = {group["name"]: group for group in candidate["proxy-groups"]}
+    assert "🇭🇰香港验证" not in groups["GPT候选"]["proxies"]
+    assert "🇭🇰香港验证" not in groups["GPT手动"]["proxies"]
+    assert "🇭🇰香港验证" in groups["Gemini候选"]["proxies"]
+    assert "🇭🇰香港验证" in groups["Gemini手动"]["proxies"]
 
 
 def test_emergency_regenerates_idempotently_and_keeps_new_hk_unknown_nodes_out_of_ai_pool():
@@ -239,8 +304,9 @@ def test_emergency_regenerates_idempotently_and_keeps_new_hk_unknown_nodes_out_o
     assert "gone" not in groups["AI应急（未验证）"]["proxies"]
     assert "stale-node" not in groups["AI应急（未验证）"]["proxies"]
     assert groups["GPT候选"]["proxies"] == ["us"]
-    assert groups["Gemini候选"]["proxies"] == ["us"]
-    assert "🇭🇰新增" in groups["GPT手动"]["proxies"]
+    assert groups["Gemini候选"]["proxies"] == ["🇭🇰香港旧", "us"]
+    assert "🇭🇰新增" not in groups["GPT手动"]["proxies"]
+    assert "🇭🇰新增" in groups["Gemini手动"]["proxies"]
     assert "未知新增" in groups["Gemini手动"]["proxies"]
     assert groups["手动选择"]["proxies"][-2:] == ["🇭🇰新增", "未知新增"]
     assert groups["自动选择"]["proxies"][-2:] == ["🇭🇰新增", "未知新增"]
@@ -332,8 +398,11 @@ def test_manual_ai_groups_keep_all_current_nodes_without_definitive_region_block
     groups = {group["name"]: group for group in candidate["proxy-groups"]}
     current_names = [proxy["name"] for proxy in new["proxies"]]
     assert groups["GPT候选"]["proxies"] == ["us"]
-    assert groups["Gemini候选"]["proxies"] == ["us"]
-    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
+    assert groups["Gemini候选"]["proxies"] == ["🇭🇰香港旧", "us"]
+    gpt_manual_names = [
+        name for name in current_names if not incremental._is_hong_kong_label(name)
+    ]
+    assert groups["GPT手动"]["proxies"] == [*gpt_manual_names, "GPT候选"]
     assert groups["Gemini手动"]["proxies"] == [*current_names, "Gemini候选"]
 
 
@@ -353,12 +422,15 @@ def test_service_specific_manual_region_block_removes_only_that_service_node():
 
     groups = {group["name"]: group for group in candidate["proxy-groups"]}
     current_names = [proxy["name"] for proxy in new["proxies"]]
-    assert groups["Gemini候选"]["proxies"] == ["us"]
+    assert groups["Gemini候选"]["proxies"] == ["🇭🇰香港旧", "us"]
     assert groups["Gemini手动"]["proxies"] == [
         name for name in current_names if name != "new"
     ] + ["Gemini候选"]
     assert groups["GPT候选"]["proxies"] == ["us"]
-    assert groups["GPT手动"]["proxies"] == [*current_names, "GPT候选"]
+    gpt_manual_names = [
+        name for name in current_names if not incremental._is_hong_kong_label(name)
+    ]
+    assert groups["GPT手动"]["proxies"] == [*gpt_manual_names, "GPT候选"]
     assert report["manual_region_blocked_names"] == {
         "gpt": [],
         "gemini": ["new"],

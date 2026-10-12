@@ -175,14 +175,13 @@ def _is_hong_kong_label(name: str) -> bool:
 
 
 def eligible_ai_rrc_names(added_names: Iterable[str]) -> list[str]:
-    """Return added names that could enter GPT/Gemini RRC screening."""
+    """Return added names that could enter service-specific AI screening."""
 
     return [
         name
         for name in added_names
         if isinstance(name, str)
         and "流媒体" not in name
-        and not _is_hong_kong_label(name)
     ]
 
 
@@ -227,6 +226,7 @@ def _prepare_ai_groups(
     current_names: set[str],
     current_order: Sequence[str],
     added_names: Sequence[str],
+    registry_names: Iterable[str],
     verified_names: Iterable[str],
     measured_hk_names: set[str],
     blocked_names: set[str],
@@ -241,7 +241,19 @@ def _prepare_ai_groups(
         current_names=current_names,
         excluded_names=measured_hk_names | blocked_names,
     )
-    candidate_refs = [name for name in candidate_refs if not _is_hong_kong_label(name)]
+    if service == "gpt":
+        candidate_refs = [
+            name for name in candidate_refs if not _is_hong_kong_label(name)
+        ]
+    registry_set = {
+        name
+        for name in (registry_names or ())
+        if isinstance(name, str)
+        and name in current_names
+        and name not in measured_hk_names
+        and name not in blocked_names
+        and not (service == "gpt" and _is_hong_kong_label(name))
+    }
     verified_set = {
         name for name in (verified_names or ()) if isinstance(name, str)
     }
@@ -252,10 +264,19 @@ def _prepare_ai_groups(
         and name in current_names
         and name not in measured_hk_names
         and name not in blocked_names
-        and not _is_hong_kong_label(name)
+        and not (service == "gpt" and _is_hong_kong_label(name))
         and "流媒体" not in name
     )
-    candidate_refs = _ordered_unique([*candidate_refs, *admitted])
+    # Registry reuse and fresh actual-use admissions are both ordered by the
+    # current source snapshot.  Registry entries are already identity-bound by
+    # the runner; this function only applies service policy and current-name
+    # checks.
+    current_verified = [
+        name
+        for name in current_order
+        if name in registry_set or name in set(admitted)
+    ]
+    candidate_refs = _ordered_unique([*candidate_refs, *current_verified])
     # The candidate pool is the only automatic admission source.  Manual
     # concrete entries remain historical policy unless a current-snapshot,
     # actual-use result explicitly admits a new name.
@@ -269,7 +290,9 @@ def _prepare_ai_groups(
     manual_concrete = _ordered_unique(
         name
         for name in current_order
-        if name in current_names and name not in blocked_names
+        if name in current_names
+        and name not in blocked_names
+        and not (service == "gpt" and _is_hong_kong_label(name))
     )
     manual["proxies"] = [*manual_concrete, _SERVICE_GROUPS[service][0]]
     dedicated["proxies"] = [
@@ -521,6 +544,8 @@ def build_candidate(
     measured_hk_names: Iterable[str] = (),
     verified_gpt_names: Iterable[str] = (),
     verified_gemini_names: Iterable[str] = (),
+    registry_gpt_names: Iterable[str] = (),
+    registry_gemini_names: Iterable[str] = (),
     blocked_gpt_names: Iterable[str] = (),
     blocked_gemini_names: Iterable[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -540,6 +565,12 @@ def build_candidate(
     current_names = set(new_by_name)
     current_order = [str(proxy["name"]) for proxy in new_proxies]
     added_names = list(plan["added_names"])
+    registry_gpt_names = _ordered_unique(
+        name for name in (registry_gpt_names or ()) if isinstance(name, str)
+    )
+    registry_gemini_names = _ordered_unique(
+        name for name in (registry_gemini_names or ()) if isinstance(name, str)
+    )
 
     groups, group_by_name = _group_map(old_data, skill=skill)
     output = deepcopy(dict(old_data))
@@ -583,6 +614,7 @@ def build_candidate(
         current_names=current_names,
         current_order=current_order,
         added_names=added_names,
+        registry_names=registry_gpt_names,
         verified_names=verified_gpt_names,
         measured_hk_names=measured_hk,
         blocked_names=blocked_by_service["gpt"],
@@ -595,6 +627,7 @@ def build_candidate(
         current_names=current_names,
         current_order=current_order,
         added_names=added_names,
+        registry_names=registry_gemini_names,
         verified_names=verified_gemini_names,
         measured_hk_names=measured_hk,
         blocked_names=blocked_by_service["gemini"],
@@ -670,16 +703,27 @@ def build_candidate(
             "gpt": set(admitted_gpt),
             "gemini": set(admitted_gemini),
         }[service]
+        registry_names = {
+            "gpt": set(registry_gpt_names),
+            "gemini": set(registry_gemini_names),
+        }[service]
         if any(
             name in added_names
-            and (name not in admitted_names or name in measured_hk)
+            and (
+                (name not in admitted_names and name not in registry_names)
+                or name in measured_hk
+            )
             for name in candidate_names
         ):
             _raise(skill, "INCREMENTAL_NEW_AI_ADMISSION_FORBIDDEN:" + service.upper())
         if any(
             name not in current_names
-            or (name not in old_names and name not in admitted_names)
-            or _is_hong_kong_label(name)
+            or (
+                name not in old_names
+                and name not in admitted_names
+                and name not in registry_names
+            )
+            or (service == "gpt" and _is_hong_kong_label(name))
             for name in candidate_names
         ):
             _raise(skill, "INCREMENTAL_AI_CANDIDATE_GROUP_INVALID:" + service.upper())
@@ -688,7 +732,9 @@ def build_candidate(
         expected_manual_names = _ordered_unique(
             name
             for name in current_order
-            if name in current_names and name not in blocked_by_service[service]
+            if name in current_names
+            and name not in blocked_by_service[service]
+            and not (service == "gpt" and _is_hong_kong_label(name))
         )
         if manual.get("proxies") != [*expected_manual_names, candidate_name]:
             _raise(skill, "INCREMENTAL_AI_MANUAL_GROUP_INVALID:" + service.upper())
@@ -734,6 +780,24 @@ def build_candidate(
         "admitted_ai_names": {
             "gpt": list(admitted_gpt),
             "gemini": list(admitted_gemini),
+        },
+        "registry_reused_names": {
+            "gpt": [
+                name
+                for name in current_order
+                if name in set(registry_gpt_names)
+                and name in set(
+                    final_groups["GPT候选"].get("proxies", [])
+                )
+            ],
+            "gemini": [
+                name
+                for name in current_order
+                if name in set(registry_gemini_names)
+                and name in set(
+                    final_groups["Gemini候选"].get("proxies", [])
+                )
+            ],
         },
         "ai_new_names_admitted": {
             "gpt": list(admitted_gpt),

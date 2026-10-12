@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.7.6
+version: 2.7.7
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -87,12 +87,14 @@ No additions means zero RRC/Disney service probes. `--full-retest` explicitly
 selects the old full diagnostic workflow and is never selected automatically.
 
 AI manual selectors expose every current source node in source order plus their
-candidate selector. Exclude a node from one service's manual selector only when
+candidate selector, except that GPT手动 hard-excludes every Hong Kong-labelled
+node. Gemini manual remains service-independent and excludes a node only when
 the current snapshot has exact-node, route-confirmed desktop Web evidence of a
-region/location failure for that service. Screening outcomes, labels, transport
-failures, and unknown results do not remove manual choices. GPT/Gemini automatic
-candidate pools remain curated; Hong Kong-labelled nodes are conservatively
-excluded from those pools, and labels are NOT claims about actual exit geography.
+Gemini region/location failure. Screening outcomes, labels, transport failures,
+and unknown results do not remove Gemini manual choices. GPT/Gemini automatic
+candidate pools remain curated; GPT candidate pools exclude Hong Kong-labelled
+nodes, while Gemini candidates follow Gemini evidence and registry policy.
+Labels are NOT claims about actual exit geography.
 New RRC screen Yes is diagnostic only and cannot promote a new GPT/Gemini node.
 Actual-use proof must be service-specific: guest ChatGPT does not prove paid
 models/API/Codex, and Antigravity CloudCode does not prove Gemini Web eligibility.
@@ -106,7 +108,16 @@ activation instead of substituting unknown nodes or DIRECT.
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.7.6 restores broad GPT/Gemini manual selectors: they
+for this Skill. Version 2.7.7 hard-excludes Hong Kong-labelled nodes from both
+GPT候选 and GPT手动 in full and incremental generation paths. Incremental
+updates reuse enabled preferred registry records only after exact stable
+connection-identity matching against the current source snapshot; removed,
+stale, and same-name changed-identity records are ignored, and reused registry
+names combine with fresh actual-use PASS admissions in source order. Version
+fresh GPT admissions require the current desktop Web route marker; Gemini also
+accepts current `antigravity_inference` evidence when its marker and route are
+verified, and exact Gemini region/location failures from that method can block
+Gemini manual selection. Version 2.7.6 restores broad GPT/Gemini manual selectors: they
 contain all current source nodes except exact current-snapshot, route-confirmed
 desktop Web region/location failures for the matching service. Candidate pools
 remain curated. Version 2.7.5 lets the incremental updater admit a newly named
@@ -246,8 +257,13 @@ as proof of paid models, Codex or authenticated OpenAI API.
 Exact registry matches may bypass the old `流媒体` name exclusion in curated
 candidate pools. Unverified nodes retain that candidate exclusion. GPT/Gemini
 manual selectors preserve current source order and keep the curated candidate
-selector as an explicit choice; an HTTP health response is not actual model
-eligibility.
+selector as an explicit choice; GPT manual selection still hard-excludes every
+Hong Kong label while Gemini manual selection remains service-specific. During
+incremental updates, enabled preferred registry entries are reused only after
+the current source node matches the saved stable connection identity; removed
+nodes and same-name changed identities are ignored. Reused registry names and
+fresh actual-use PASS admissions are combined in current source order. An HTTP
+health response is not actual model eligibility.
 
 Antigravity Manager connects to OpenClash through its native HTTP proxy pool;
 its gateway entry is `OpenClash · Gemini 已验证节点池`. Airport VLESS/Hysteria2
@@ -279,7 +295,7 @@ candidate group merely because they passed historically.
 Rules:
 
 - Never generate `全局优先│...`, `GPT优先│...`, `Gemini优先│...`, `迪士尼优先│...`, or their full-width-bar variants.
-- GPT/Gemini manual groups list every current source node except a service-specific definitive current-snapshot region/location failure; the curated candidate group remains explicitly selectable.
+- GPT manual groups exclude Hong Kong-labelled nodes and service-specific definitive current-snapshot region/location failures; Gemini manual groups exclude only Gemini-specific definitive failures. The curated candidate group remains explicitly selectable.
 - Candidate groups are ordinary `fallback` groups; their size is never described as an automated probe-pass count.
 - All fallback groups use `https://www.gstatic.com/generate_204`, interval 60, lazy true, timeout 5000, and max-failed-times 1.
 - Global/GPT/Disney ordering is Japan → Taiwan → other nodes.

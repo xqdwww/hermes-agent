@@ -74,6 +74,14 @@ def actual_use_admissions(functional_results, manifest, added_names, eligible_na
         node_id = item.get('exact_node_id')
         if not isinstance(name, str) or not isinstance(node_id, str):
             continue
+        method_allowed = (
+            item.get('method') == 'desktop-web-route-marker-v1'
+            if service == 'gpt'
+            else item.get('method') in {
+                'desktop-web-route-marker-v1',
+                'antigravity_inference',
+            }
+        )
         if (
             item.get('result') == 'PASS'
             and item.get('source_snapshot_id') == snapshot_id
@@ -81,7 +89,7 @@ def actual_use_admissions(functional_results, manifest, added_names, eligible_na
             and name in added
             and name in eligible
             and current_ids.get(name) == node_id
-            and item.get('method') == 'desktop-web-route-marker-v1'
+            and method_allowed
             and item.get('marker_verified') is True
             and item.get('route_confirmed') is True
         ):
@@ -115,6 +123,14 @@ def manual_region_blocked_names(functional_results, manifest):
             continue
         name = item.get('node', item.get('exact_node_name'))
         node_id = item.get('exact_node_id')
+        method_allowed = (
+            item.get('method') == 'desktop-web-route-marker-v1'
+            if service == 'gpt'
+            else item.get('method') in {
+                'desktop-web-route-marker-v1',
+                'antigravity_inference',
+            }
+        )
         if (
             not isinstance(name, str)
             or not isinstance(node_id, str)
@@ -123,7 +139,7 @@ def manual_region_blocked_names(functional_results, manifest):
             or item.get('source_hash') != source_hash
             or item.get('result') != 'FAIL'
             or item.get('route_confirmed') is not True
-            or item.get('method') != 'desktop-web-route-marker-v1'
+            or not method_allowed
             or item.get('error_category')
             not in {'FAIL_REGION', 'FAIL_FORBIDDEN_LOCATION'}
         ):
@@ -136,6 +152,45 @@ def manual_region_blocked_names(functional_results, manifest):
             if item['exact_node_name'] in names
         ]
         for service, names in blocked.items()
+    }
+
+
+def verified_registry_preferred_names(skill, source_data, identity_key_path):
+    """Return current-source names matched to enabled preferred registry IDs.
+
+    The converter's registry context binds entries by the stable connection
+    identity HMAC.  Name-only records, removed nodes, and changed-identity
+    same-name nodes therefore never enter the incremental candidate seed.
+    """
+
+    empty = {'gpt': [], 'gemini': []}
+    build_context = getattr(skill, 'build_verified_service_registry_context', None)
+    resolve_path = getattr(skill, 'verified_service_registry_path', None)
+    proxy_loader = getattr(skill, 'static_proxy_objects', None)
+    if build_context is None or resolve_path is None or proxy_loader is None:
+        return empty
+    if not isinstance(source_data.get('proxies'), list) or not source_data['proxies']:
+        return empty
+    registry_path = Path(resolve_path())
+    if not registry_path.is_file():
+        return empty
+    proxies = proxy_loader(source_data)
+    context = build_context(
+        proxies,
+        registry_path=registry_path,
+        identity_key_path=identity_key_path,
+    )
+    if context is None:
+        return empty
+    source_names = [str(proxy['name']) for proxy in proxies]
+    preferred_order = context.get('preferred_order', {})
+    return {
+        service: [
+            name
+            for name in source_names
+            if name in set(preferred_order.get(service, ()))
+        ]
+        for service in ('gpt', 'gemini')
     }
 
 
@@ -159,12 +214,23 @@ def run_incremental_update(args, skill):
     helpers = runpy.run_path(str(Path(__file__).with_name('incremental_update.py')))
     plan = helpers['plan_nodes'](old, new, skill)
     names = plan['added_names']
-    rrc_names = helpers['eligible_ai_rrc_names'](names)
+    registry_preferred = verified_registry_preferred_names(
+        skill, new, args.source_identity_key
+    )
+    eligible_ai_names = helpers['eligible_ai_rrc_names'](names)
+    registry_names = set(registry_preferred['gpt']) | set(
+        registry_preferred['gemini']
+    )
+    rrc_names = [
+        name
+        for name in eligible_ai_names
+        if name not in registry_names
+    ]
     functional_results = skill.load_functional_results(
         getattr(args, 'functional_results', ())
     )
     verified_ai_names = actual_use_admissions(
-        functional_results, manifest, names, rrc_names
+        functional_results, manifest, names, eligible_ai_names
     )
     region_blocked_names = manual_region_blocked_names(
         functional_results, manifest
@@ -176,8 +242,9 @@ def run_incremental_update(args, skill):
               'started_at': skill.iso_now(), 'status': 'PREPARING',
               'service_probe_names': names,
               'ai_new_names_admitted': {'gpt': [], 'gemini': []},
+              'registry_preferred_names': registry_preferred,
               'manual_region_blocked_names': region_blocked_names,
-              'ai_evidence_policy': 'carry existing curated membership by name; admit added AI names only from current-snapshot desktop-web-route-marker-v1 proof; screening cannot admit new AI nodes; exclude only exact current-snapshot desktop-web-route-marker-v1 region failures from the matching service'}
+              'ai_evidence_policy': 'carry existing curated membership by name; admit added GPT names only from current-snapshot desktop-web-route-marker-v1 proof and Gemini names from current-snapshot desktop-web-route-marker-v1 or antigravity_inference proof; screening cannot admit new AI nodes; exclude only exact current-snapshot service-specific region failures from the matching service'}
     skill.atomic_write_json(report, report_path, private_parent=True)
     disney_pass = []
     script_dir = Path(skill.__file__).parent
@@ -195,7 +262,11 @@ def run_incremental_update(args, skill):
             if not names:
                 report['rrc_status'] = 'NO_ADDITIONS'
             elif not rrc_names:
-                report['rrc_status'] = 'NO_AI_ELIGIBLE_ADDITIONS'
+                report['rrc_status'] = (
+                    'NO_UNVERIFIED_AI_ADDITIONS'
+                    if registry_names.intersection(eligible_ai_names)
+                    else 'NO_AI_ELIGIBLE_ADDITIONS'
+                )
             else:
                 report['rrc_status'] = 'NEEDS_ACTUAL_USE_VERIFICATION_SINGLE_NEW_NODE'
         if names:
@@ -217,6 +288,8 @@ def run_incremental_update(args, skill):
             measured_hk_names=hk_names,
             verified_gpt_names=set(verified_ai_names['gpt']),
             verified_gemini_names=set(verified_ai_names['gemini']),
+            registry_gpt_names=registry_preferred['gpt'],
+            registry_gemini_names=registry_preferred['gemini'],
             blocked_gpt_names=set(region_blocked_names['gpt']),
             blocked_gemini_names=set(region_blocked_names['gemini']),
         )

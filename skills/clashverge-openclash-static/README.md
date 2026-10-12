@@ -1,9 +1,11 @@
 # Hermes Clash Verge → OpenClash Static Skill — Regional Fallback
 
-Current recovery policy (2.7.3): GPT/Gemini dedicated selectors include the
+Current recovery policy (2.7.7): GPT/Gemini dedicated selectors include the
 explicit manual **AI应急（未验证）** group with all current nodes. It never adds
 unverified nodes to curated pools or becomes an automatic fallback. Desktop
 Clash Verge must remain untouched when it is the user's working recovery path.
+GPT候选 and GPT手动 always exclude Hong Kong-labelled names; Gemini manual
+selection keeps the same source node unless Gemini-specific evidence blocks it.
 The historical fixed-group descriptions below are superseded by this optional
 recovery group plus the accepted history groups.
 
@@ -85,7 +87,7 @@ exist).  No per-node wrapper groups are generated.
 | Group | Type | Content |
 |---|---|---|
 | GPT专用 | select | GPT手动, GPT自动 |
-| GPT手动 | select | All current source nodes in source order except definitive GPT region blocks, then GPT候选 |
+| GPT手动 | select | All current source nodes in source order except Hong Kong labels and definitive GPT region blocks, then GPT候选 |
 | GPT候选 | fallback | Curated GPT candidate nodes, sorted: Japan → Taiwan → other. |
 
 GPT candidates come from the original GPT专用 group (intersected with static
@@ -216,14 +218,38 @@ as proof of paid models, Codex or authenticated OpenAI API.
 Exact registry matches may bypass the old `流媒体` name exclusion in curated
 candidate pools. Unverified nodes retain that candidate exclusion. GPT/Gemini
 manual selectors preserve current source order and keep the curated candidate
-selector as an explicit choice; an HTTP health response is not actual model
-eligibility.
+selector as an explicit choice; GPT manual selection still hard-excludes every
+Hong Kong label while Gemini manual selection remains service-specific. During
+incremental updates, enabled preferred registry entries are reused only after
+the current source node matches the saved stable connection identity; removed
+nodes and same-name changed identities are ignored. Reused registry names and
+fresh actual-use PASS admissions are combined in current source order. An HTTP
+health response is not actual model eligibility.
 
 Antigravity Manager connects to OpenClash through its native HTTP proxy pool;
 its gateway entry is `OpenClash · Gemini 已验证节点池`. Airport VLESS/Hysteria2
 credentials stay in OpenClash. The gateway follows the existing narrow
 CloudCode rules, so updating this shared routing pool updates the reverse
 proxy's usable choices without duplicating airport subscriptions in Manager.
+
+## 2.7.7: GPT Hong Kong exclusion and identity-bound incremental reuse
+
+GPT候选 and GPT手动 exclude every current node whose name matches the existing
+Hong Kong label predicate (`香港`, `🇭🇰`, Hong Kong, or standalone `HK`). Gemini
+manual selection remains service-independent and keeps the same current node
+unless Gemini-specific definitive evidence blocks it; Gemini candidates follow
+Gemini evidence and registry policy. These service-specific rules are applied
+by both full transforms and incremental candidate generation.
+
+Incremental updates load the installed verified-service registry and reuse only
+enabled preferred entries whose stable connection identity matches a node in the
+current source snapshot. Removed entries, stale identities, and same-name nodes
+with changed connection parameters are ignored. Exact registry reuse and fresh
+actual-use PASS admissions are merged in current source order; neither requires
+retesting the reused node. Fresh GPT admissions require the current desktop
+Web route marker; Gemini also accepts current `antigravity_inference` evidence
+when its marker and route are verified. Gemini region/location manual blocks
+may use the same exact-snapshot CloudCode failure evidence.
 
 ## 2.7.0: name-based incremental updates
 
@@ -232,7 +258,8 @@ remove deleted nodes, and test only added names. `--full-retest` is the explicit
 full diagnostic option. With no additions, no RRC or Disney service probe runs.
 Existing candidate validation, activation health checks and rollback remain.
 
-GPT/Gemini manual selectors show all current source nodes. A node is removed
+GPT/Gemini manual selectors show all current source nodes, with the 2.7.7 GPT
+Hong Kong-label exclusion applied. A node is removed
 from one service's manual selector only by exact current-snapshot,
 route-confirmed desktop Web evidence of a region/location failure for that
 service. Curated candidate pools remain strict: screening success never promotes
