@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.7.7
+version: 2.7.8
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -17,6 +17,14 @@ prerequisites:
 # Clash Verge → OpenClash Static Configuration
 
 Use this Skill when the user asks to update OpenClash from the current Clash Verge effective configuration.
+
+## Incident lessons (2.7.8)
+
+Before node audit or recovery, AntiGravity integration, activation, or debugging a
+service that passes health checks but fails real generation, read
+[references/incident-lessons.md](references/incident-lessons.md). It records the
+operational invariants and stop/restore sequence from the 2026-10-12
+OpenClash/AntiGravity incident.
 
 ## Isolated refresh network state (2.7.3)
 
@@ -108,7 +116,16 @@ activation instead of substituting unknown nodes or DIRECT.
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.7.7 hard-excludes Hong Kong-labelled nodes from both
+for this Skill. Version 2.7.8 records the 2026-10-12 OpenClash/AntiGravity
+incident lessons in [references/incident-lessons.md](references/incident-lessons.md):
+preserve the GPT control path and desktop/router attribution, require real
+CloudCode generation plus an end-to-end AntiGravity request, use the proven
+system-default-via-OpenClash architecture with narrow CloudCode routing, keep
+selector/default state restart-safe, protect masked secrets and fixed-length
+GOCSPX extraction, and require atomic backups, reversible official-app upgrades,
+secret-free evidence, and final `/health`, `/v1/models`, and marker-based
+`/v1/chat/completions` acceptance. Version 2.7.7 hard-excludes Hong Kong-labelled
+nodes from both
 GPT候选 and GPT手动 in full and incremental generation paths. Incremental
 updates reuse enabled preferred registry records only after exact stable
 connection-identity matching against the current source snapshot; removed,
@@ -247,10 +264,11 @@ unchanged connections can. Saved positive evidence has no automatic age expiry.
 Newer explicit actual-use failures, transport failures and recapture safeguards
 remain authoritative. The report distinguishes reused proof from a fresh test.
 
-For the current 2026-09-08 registry, GPT has 15 ChatGPT anonymous-generation
-preferred nodes; Gemini has 12 Antigravity/CloudCode-generation preferred nodes
-and 19 manually selectable successful but less consistent candidates. These
-counts are baseline evidence, not promises of permanent availability. Do not
+Read current matched candidate and manual counts from the generated report;
+never copy registry totals or an older snapshot's counts into an availability
+claim. Registry files can retain unmatched historical identities, and group
+counts can change with the source snapshot. These records are evidence, not
+promises of permanent availability. Do not
 label CloudCode proof as Gemini Web or AI Studio proof, or guest ChatGPT proof
 as proof of paid models, Codex or authenticated OpenAI API.
 
@@ -265,11 +283,11 @@ nodes and same-name changed identities are ignored. Reused registry names and
 fresh actual-use PASS admissions are combined in current source order. An HTTP
 health response is not actual model eligibility.
 
-Antigravity Manager connects to OpenClash through its native HTTP proxy pool;
-its gateway entry is `OpenClash · Gemini 已验证节点池`. Airport VLESS/Hysteria2
-credentials stay in OpenClash. The gateway follows the existing narrow
-CloudCode rules, so updating this shared routing pool updates the reverse
-proxy's usable choices without duplicating airport subscriptions in Manager.
+Antigravity Manager uses system-default networking while its internal upstream
+and native proxy pool are disabled; OpenClash narrowly routes the production,
+daily, and daily-sandbox CloudCode domains through `Gemini专用`. Native
+upstream or proxy-pool modes require independent OAuth and model-path proof
+before use. Airport VLESS/Hysteria2 credentials stay in OpenClash.
 
 ## Accepted policy
 

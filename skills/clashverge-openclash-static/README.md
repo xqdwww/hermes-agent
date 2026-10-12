@@ -1,6 +1,6 @@
 # Hermes Clash Verge → OpenClash Static Skill — Regional Fallback
 
-Current recovery policy (2.7.7): GPT/Gemini dedicated selectors include the
+Current recovery policy (2.7.8): GPT/Gemini dedicated selectors include the
 explicit manual **AI应急（未验证）** group with all current nodes. It never adds
 unverified nodes to curated pools or becomes an automatic fallback. Desktop
 Clash Verge must remain untouched when it is the user's working recovery path.
@@ -8,6 +8,10 @@ GPT候选 and GPT手动 always exclude Hong Kong-labelled names; Gemini manual
 selection keeps the same source node unless Gemini-specific evidence blocks it.
 The historical fixed-group descriptions below are superseded by this optional
 recovery group plus the accepted history groups.
+
+Before node audit or recovery, AntiGravity integration, activation, or debugging
+a service that passes health checks but fails real generation, read the focused
+[incident lessons](references/incident-lessons.md).
 
 
 Export Clash Verge's effective Mihomo config, convert it into a static OpenClash
@@ -208,10 +212,11 @@ unchanged connections can. Saved positive evidence has no automatic age expiry.
 Newer explicit actual-use failures, transport failures and recapture safeguards
 remain authoritative. The report distinguishes reused proof from a fresh test.
 
-For the current 2026-09-08 registry, GPT has 15 ChatGPT anonymous-generation
-preferred nodes; Gemini has 12 Antigravity/CloudCode-generation preferred nodes
-and 19 manually selectable successful but less consistent candidates. These
-counts are baseline evidence, not promises of permanent availability. Do not
+Read current matched candidate and manual counts from the generated report;
+never copy registry totals or an older snapshot's counts into an availability
+claim. Registry files can retain unmatched historical identities, and group
+counts can change with the source snapshot. These records are evidence, not
+promises of permanent availability. Do not
 label CloudCode proof as Gemini Web or AI Studio proof, or guest ChatGPT proof
 as proof of paid models, Codex or authenticated OpenAI API.
 
@@ -226,11 +231,11 @@ nodes and same-name changed identities are ignored. Reused registry names and
 fresh actual-use PASS admissions are combined in current source order. An HTTP
 health response is not actual model eligibility.
 
-Antigravity Manager connects to OpenClash through its native HTTP proxy pool;
-its gateway entry is `OpenClash · Gemini 已验证节点池`. Airport VLESS/Hysteria2
-credentials stay in OpenClash. The gateway follows the existing narrow
-CloudCode rules, so updating this shared routing pool updates the reverse
-proxy's usable choices without duplicating airport subscriptions in Manager.
+Antigravity Manager uses system-default networking while its internal upstream
+and native proxy pool are disabled; OpenClash narrowly routes the production,
+daily, and daily-sandbox CloudCode domains through `Gemini专用`. Native
+upstream or proxy-pool modes require independent OAuth and model-path proof
+before use. Airport VLESS/Hysteria2 credentials stay in OpenClash.
 
 ## 2.7.7: GPT Hong Kong exclusion and identity-bound incremental reuse
 
