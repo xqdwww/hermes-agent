@@ -1,6 +1,6 @@
 # Hermes Clash Verge → OpenClash Static Skill — Regional Fallback
 
-Current recovery policy (2.7.8): GPT/Gemini dedicated selectors include the
+Current recovery policy (2.7.10): GPT/Gemini dedicated selectors include the
 explicit manual **AI应急（未验证）** group with all current nodes. It never adds
 unverified nodes to curated pools or becomes an automatic fallback. Desktop
 Clash Verge must remain untouched when it is the user's working recovery path.
@@ -54,17 +54,20 @@ python3 scripts/clashverge_to_openclash.py all
 - **Gemini manual calibration overrides**: exact node-name overrides (`PASS` /
   `FAIL`) take precedence over probe results — for nodes where probe
   classification is unreliable.  Mismatches print `PROBE_OVERRIDE_MISMATCH`.
-- **Probe-based service filtering**: run an isolated Mihomo instance to test
-  each node for GPT, Gemini, and Disney+ reachability.  Only PASS nodes enter
-  the corresponding groups.
+- **Service-specific AI filtering**: GPT/Gemini candidates require their
+  accepted evidence. Disney candidates are selected only by SG/TW/JP/US labels
+  and never run a Disney probe.
 - **Gemini US handling**: when probes are available, US nodes can enter Gemini
   if they pass the probe and are not overridden.  In legacy (no-probe) mode,
   US nodes are excluded via region-name filtering.
 - **Antigravity routing**: the production, daily, and daily-sandbox CloudCode
   hostnames use exact `Gemini专用` rules.  No broad `googleapis.com` suffix is
   captured.
-- **Disney media detection**: nodes matching `流媒体` or `媒体流` are
-  automatically added to Disney candidates.
+- **Disney static region policy**: every current SG/TW/JP/US-labelled node is
+  added to Disney candidates without testing; Disney manual keeps all nodes.
+- **Selector ownership**: activation disables OpenClash `stream_auto_select` in
+  the rollback-protected UCI transaction. Its streaming-unlock worker otherwise
+  retests Disney/Google/OpenAI and overwrites the fixed managed selectors.
 - **Idempotent**: running twice on the same input produces identical output.
   Old skill-generated groups (including legacy wrappers) are detected and removed.
 - **Safe dry-run**: the `dry-run` subcommand never writes files, never calls
@@ -82,7 +85,7 @@ exist).  No per-node wrapper groups are generated.
 
 | Group | Type | Content |
 |---|---|---|
-| 默认代理 | select | 手动选择, 自动选择 |
+| 默认代理 | select | 自动选择, 手动选择 |
 | 手动选择 | select | 自动选择, then all static nodes (Japan → Taiwan → other) |
 | 自动选择 | fallback | All static nodes, sorted: Japan → Taiwan → other. Health check every 60 s. |
 
@@ -90,8 +93,8 @@ exist).  No per-node wrapper groups are generated.
 
 | Group | Type | Content |
 |---|---|---|
-| GPT专用 | select | GPT手动, GPT自动 |
-| GPT手动 | select | All current source nodes in source order except Hong Kong labels and definitive GPT region blocks, then GPT候选 |
+| GPT专用 | select | GPT手动, GPT候选 |
+| GPT手动 | select | GPT候选 nodes first, then all other current nodes except Hong Kong labels and definitive GPT region blocks, then GPT候选 |
 | GPT候选 | fallback | Curated GPT candidate nodes, sorted: Japan → Taiwan → other. |
 
 GPT candidates come from the original GPT专用 group (intersected with static
@@ -101,8 +104,8 @@ proxies).  When probes are used, only PASS nodes are included.
 
 | Group | Type | Content |
 |---|---|---|
-| Gemini专用 | select | Gemini手动, Gemini自动 |
-| Gemini手动 | select | All current source nodes in source order except definitive Gemini region blocks, then Gemini候选 |
+| Gemini专用 | select | Gemini手动, Gemini候选 |
+| Gemini手动 | select | Gemini候选 nodes first, then all other current nodes except definitive Gemini region blocks, then Gemini候选 |
 | Gemini候选 | fallback | Curated Gemini candidate nodes. |
 
 When probes are active, all nodes are considered — only PASS nodes enter the
@@ -112,18 +115,18 @@ group.  Manual calibration overrides can force specific nodes in or out.
 
 | Group | Type | Content |
 |---|---|---|
-| 迪士尼 | select | 迪士尼手动, 迪士尼自动 |
-| 迪士尼手动 | select | 迪士尼自动, then Disney candidate nodes (Japan → Taiwan → other) |
-| 迪士尼自动 | fallback | Disney candidates, sorted: Japan → Taiwan → other. |
+| 迪士尼 | select | 迪士尼手动, 迪士尼候选 |
+| 迪士尼手动 | select | Disney candidate nodes first, then every other current node, then 迪士尼候选 |
+| 迪士尼候选 | fallback | Every current SG/TW/JP/US-labelled node; no service probe. |
 
-Disney candidates = original 迪士尼 group static nodes + nodes matching
-`流媒体` or `媒体流`, then filtered by probe results (when available).
+Disney candidates are derived from the current subscription by the static
+SG/TW/JP/US label policy. Availability testing is left to fallback health checks.
 
 ### Behaviour
 
 **Automatic mode:**
-- Select an automatic group (e.g. `自动选择`, `GPT自动`, `Gemini自动`,
-  `迪士尼自动`).
+- Select a fallback group (e.g. `自动选择`, `GPT候选`, `Gemini候选`,
+  `迪士尼候选`).
 - Nodes within the automatic group are checked in order via standard `fallback`.
   If a node fails health checks, the next node in the list is used automatically.
 - The order respects region priority: Japan first, then Taiwan, then other
@@ -135,7 +138,8 @@ Disney candidates = original 迪士尼 group static nodes + nodes matching
 **Manual mode:**
 - Select a manual group (e.g. `手动选择`, `GPT手动`, `Gemini手动`,
   `迪士尼手动`).
-- Each manual group lists its auto group first, followed by direct static nodes.
+- Specialist manual groups list curated candidate nodes first, followed by the
+  rest of their allowed direct nodes and the candidate fallback selector.
 - Choose a specific static node to fix traffic to that node.
 - When using manual mode, **the selected node is used as-is** — it will NOT
   automatically switch on failure.
@@ -147,10 +151,10 @@ Disney candidates = original 迪士尼 group static nodes + nodes matching
 ## Manual selection guidance
 
 - **Global**: open `手动选择` → pick a specific node or `自动选择` for failover.
-- **GPT**: open `GPT手动` → pick a specific node or `GPT自动` for failover.
-- **Gemini**: open `Gemini手动` → pick a specific node or `Gemini自动` for failover.
-- **Disney**: open `迪士尼手动` → pick a specific node or `迪士尼自动` for failover.
-- **Full auto**: select `自动选择`, `GPT自动`, `Gemini自动`, or `迪士尼自动`
+- **GPT**: open `GPT手动` → pick a specific node or `GPT候选` for failover.
+- **Gemini**: open `Gemini手动` → pick a specific node or `Gemini候选` for failover.
+- **Disney**: open `迪士尼手动` → pick a specific node or `迪士尼候选` for failover.
+- **Full auto**: select `自动选择`, `GPT候选`, `Gemini候选`, or `迪士尼候选`
   directly — the fallback group handles failover.
 
 ## Transform a specific file
@@ -222,8 +226,9 @@ as proof of paid models, Codex or authenticated OpenAI API.
 
 Exact registry matches may bypass the old `流媒体` name exclusion in curated
 candidate pools. Unverified nodes retain that candidate exclusion. GPT/Gemini
-manual selectors preserve current source order and keep the curated candidate
-selector as an explicit choice; GPT manual selection still hard-excludes every
+manual selectors put curated candidates first, then preserve current source
+order for other allowed nodes and keep the candidate selector as an explicit
+choice; GPT manual selection still hard-excludes every
 Hong Kong label while Gemini manual selection remains service-specific. During
 incremental updates, enabled preferred registry entries are reused only after
 the current source node matches the saved stable connection identity; removed
@@ -260,8 +265,39 @@ may use the same exact-snapshot CloudCode failure evidence.
 
 Ordinary updates replace same-name node parameters without service retesting,
 remove deleted nodes, and test only added names. `--full-retest` is the explicit
-full diagnostic option. With no additions, no RRC or Disney service probe runs.
+full diagnostic option. With no additions, no RRC service probe runs. Disney
+never runs a service probe.
 Existing candidate validation, activation health checks and rollback remain.
+
+For added or renamed Gemini nodes, run the calibrated actual-use probe and pass
+its private result file to `update-candidate`:
+
+```bash
+python3 scripts/clashverge_to_openclash.py probe-gemini-actual \
+  --source-snapshot /path/to/source-snapshot.json \
+  --output /private/path/gemini-actual-results.json \
+  --calibration-node 'known-good-node' \
+  --node 'added-or-renamed-node'
+```
+
+The command uses the installed `agy` model selection unless `--model` is
+explicitly supplied. It stops before testing targets unless calibration proves
+both marker generation and CloudCode route attribution. Authentication, quota,
+transport, timeout, and unclassified failures are retained as UNKNOWN and do
+not prune the Gemini candidate pool.
+
+The production candidate names are the ordinary-update seed. An identity-bound
+registry miss cannot delete a same-name carried candidate; the registry supplies
+reusable proof and additions, while removal requires a deleted source name or an
+exact current-snapshot, route-confirmed service region failure. A sudden candidate
+count drop therefore stops acceptance until the last accepted pool is reconciled.
+
+Gemini full repairs calibrate one known-good node through the installed
+`agy`/AntiGravity client before the batch. The probe uses a currently advertised
+model and requires both a unique generated marker and CloudCode route
+attribution. Global rate-limit, authentication, transport, and timeout results
+are inconclusive and never prune the saved candidate pool; this prevents an
+obsolete hard-coded model alias from being mistaken for node failure.
 
 GPT/Gemini manual selectors show all current source nodes, with the 2.7.7 GPT
 Hong Kong-label exclusion applied. A node is removed

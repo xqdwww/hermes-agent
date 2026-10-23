@@ -98,27 +98,22 @@ GEMINI_CANDIDATES = (
     "🇺🇸美国拉斯维加斯-hy2",
 )
 
-# Accepted Disney set from the final reviewed profile.
-DISNEY_CANDIDATES = (
-    "🇨🇳台湾-住宅",
-    "🇺🇸美国-住宅",
-    "🇭🇰香港aws高速01",
-    "🇸🇬新加坡aws高速01",
-    "🇸🇬新加坡aws高速02",
-    "🇯🇵日本aws高速01",
-    "🇯🇵日本aws高速02",
-    "🇨🇳香港原生htk高速01",
-    "🇨🇳香港原生htk高速02",
-    "🇨🇳香港hkb家宽01",
-    "🇰🇷韩国aws01",
-    "🇯🇵日本-流媒体02",
-    "🇰🇷韩国-流媒体01",
-    "新加坡-媒体流01",
-    "🇨🇳香港原生hkt01-hy2",
-    "🇺🇸美国住宅-hy2",
-    "🇺🇸美国迈阿密-hy2",
-    "🇺🇸美国拉斯维加斯-hy2",
+DISNEY_SUPPORTED_REGION_MARKERS = (
+    "新加坡",
+    "台湾",
+    "日本",
+    "美国",
+    "🇸🇬",
+    "🇹🇼",
+    "🇯🇵",
+    "🇺🇸",
 )
+
+
+def is_disney_region_name(name: str) -> bool:
+    """Return whether a label is eligible for the static Disney region policy."""
+
+    return any(marker in name for marker in DISNEY_SUPPORTED_REGION_MARKERS)
 
 SERVICE_RULES = (
     # GPT / ChatGPT
@@ -204,7 +199,7 @@ CLASH_VERGE_TOP_LEVEL_RUNTIME_KEYS = {
     "tproxy-port",
 }
 # === Version guard ===
-SKILL_VERSION = "2.7.8"
+SKILL_VERSION = "2.7.10"
 REQUIRED_MIN_VERSION = "2.4.1"
 SKILL_NAME = "clashverge-openclash-static"
 RUNTIME_SYNC_COMMIT_FILE = ".canonical-commit"
@@ -215,6 +210,16 @@ REMOTE_HEALTH_CONSECUTIVE_SUCCESSES = 2
 LAN_HEALTH_DEADLINE_SECONDS = 30
 ROLLBACK_NETWORK_DEADLINE_SECONDS = 30
 LAN_HEALTH_URL = "https://www.baidu.com/"
+ACTIVATION_SELECTOR_NAMES = (
+    "默认代理",
+    "手动选择",
+    "GPT专用",
+    "GPT手动",
+    "Gemini专用",
+    "Gemini手动",
+    "迪士尼",
+    "迪士尼手动",
+)
 REMOTE_SIDECAR_MIXED_PORT = 17890
 REMOTE_SIDECAR_CONTROLLER_PORT = 19090
 REMOTE_SIDECAR_UID = 65534
@@ -4252,20 +4257,27 @@ def build_groups(
         raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:GPT")
     if not gemini_nodes:
         raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:GEMINI")
-    gpt_manual_nodes = [
-        name
-        for name in ordered_unique(all_nodes)
-        if name not in gpt_manual_blocked and not is_hong_kong_label(name)
-    ]
+    gpt_manual_nodes = ordered_unique(
+        [
+            *gpt_nodes,
+            *(
+                name
+                for name in all_nodes
+                if name not in gpt_manual_blocked and not is_hong_kong_label(name)
+            ),
+        ]
+    )
     gpt_manual_nodes.append("GPT候选")
-    gemini_manual_nodes = [
-        name
-        for name in ordered_unique(all_nodes)
-        if name not in gemini_manual_blocked
-    ]
+    gemini_manual_nodes = ordered_unique(
+        [
+            *gemini_nodes,
+            *(name for name in all_nodes if name not in gemini_manual_blocked),
+        ]
+    )
     gemini_manual_nodes.append("Gemini候选")
+    disney_manual_nodes = ordered_unique([*disney_nodes, *all_nodes])
     groups = [
-        {"name": "默认代理", "type": "select", "proxies": ["手动选择", "自动选择"]},
+        {"name": "默认代理", "type": "select", "proxies": ["自动选择", "手动选择"]},
         {"name": "手动选择", "type": "select", "proxies": ["自动选择", *all_nodes]},
         fallback_group("自动选择", all_nodes),
         {"name": "GPT专用", "type": "select", "proxies": ["GPT手动", "GPT候选"]},
@@ -4280,7 +4292,7 @@ def build_groups(
             max_failed_times=GEMINI_FALLBACK_MAX_FAILED_TIMES,
         ),
         {"name": "迪士尼", "type": "select", "proxies": ["迪士尼手动", "迪士尼候选"]},
-        {"name": "迪士尼手动", "type": "select", "proxies": ["迪士尼候选", *disney_nodes]},
+        {"name": "迪士尼手动", "type": "select", "proxies": [*disney_manual_nodes, "迪士尼候选"]},
         fallback_group("迪士尼候选", disney_nodes),
     ]
     for service, group_name, selector_name in (
@@ -4537,12 +4549,17 @@ def restrict_ai_group_members(output: dict[str, Any]) -> None:
         pool["proxies"] = members
         manual_name = prefix + "手动"
         manual_refs = set(groups[manual_name].get("proxies", []))
-        manual_nodes = [
-            name
-            for name in node_names
-            if name in manual_refs
-            and not (prefix == "GPT" and is_hong_kong_label(name))
-        ]
+        manual_nodes = ordered_unique(
+            [
+                *members,
+                *(
+                    name
+                    for name in node_names
+                    if name in manual_refs
+                    and not (prefix == "GPT" and is_hong_kong_label(name))
+                ),
+            ]
+        )
         groups[manual_name]["proxies"] = [*manual_nodes, prefix + "候选"]
         groups[prefix + "专用"]["proxies"] = [
             manual_name,
@@ -4626,8 +4643,10 @@ def transform(
                 gemini=True,
             )
         disney_nodes = stable_region_sort(
-            resolve_candidates(names, DISNEY_CANDIDATES, label="Disney"), source_order
+            [name for name in names if is_disney_region_name(name)], source_order
         )
+        if not disney_nodes:
+            raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:DISNEY")
         if registry:
             manual_candidates = {service: [] for service in SERVICE_KEYS}
             for service in AI_SERVICE_KEYS:
@@ -4726,7 +4745,11 @@ def transform(
                 service_selections["gemini"]["automatic"],
                 verified_names=verified_names["gemini"],
             )
-        disney_nodes = list(service_selections["disney"]["automatic"])
+        disney_nodes = stable_region_sort(
+            [name for name in names if is_disney_region_name(name)], source_order
+        )
+        if not disney_nodes:
+            raise ConfigError("BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:DISNEY")
         if not (registry and "gpt" in controlled_services):
             gpt_nodes = [name for name in gpt_nodes if name not in selection_blocked["gpt"]]
         if not (registry and "gemini" in controlled_services):
@@ -5126,6 +5149,197 @@ def verify_remote_health(
     ) from last_error
 
 
+def _remote_controller_json_command(path: str) -> str:
+    """Build a router-local controller request without exporting its secret."""
+
+    return (
+        "controller_port=\"$(uci -q get openclash.config.cn_port 2>/dev/null || true)\"; "
+        "case \"$controller_port\" in ''|*[!0-9]*) exit 1 ;; esac; "
+        "dashboard_secret=\"$(uci -q get openclash.config.dashboard_password "
+        "2>/dev/null || true)\"; "
+        "curl -fsS --connect-timeout 2 --max-time 5 "
+        "-H \"Authorization: Bearer ${dashboard_secret}\" "
+        f"\"http://127.0.0.1:${{controller_port}}{path}\""
+    )
+
+
+def read_remote_selector_state(
+    host: str,
+    *,
+    deadline_seconds: int = 15,
+    poll_interval_seconds: int = 1,
+) -> dict[str, str]:
+    """Read managed selector choices through the router-local controller."""
+
+    if deadline_seconds < 1 or poll_interval_seconds < 1:
+        raise ConfigError("ACTIVATION_SELECTOR_READ_INVALID_WAIT")
+    deadline = time.monotonic() + deadline_seconds
+    last_error: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            result = ssh_command(
+                host,
+                "OPENCLASH_SELECTOR_READ=1; set -e; "
+                + _remote_controller_json_command("/proxies"),
+                capture=True,
+            )
+            payload = json.loads(result.stdout or "")
+            proxies = payload.get("proxies") if isinstance(payload, dict) else None
+            if not isinstance(proxies, dict):
+                raise ConfigError("ACTIVATION_SELECTOR_STATE_INVALID")
+            selections: dict[str, str] = {}
+            for name in ACTIVATION_SELECTOR_NAMES:
+                entry = proxies.get(name)
+                if not isinstance(entry, dict):
+                    raise ConfigError(f"ACTIVATION_SELECTOR_MISSING:{name}")
+                selected = entry.get("now")
+                members = entry.get("all")
+                if not isinstance(selected, str) or not isinstance(members, list):
+                    raise ConfigError(f"ACTIVATION_SELECTOR_INVALID:{name}")
+                selections[name] = selected
+            return selections
+        except (
+            subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            ConfigError,
+        ) as exc:
+            last_error = exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+    raise ConfigError("ACTIVATION_SELECTOR_CAPTURE_FAILED") from last_error
+
+
+def restore_remote_selector_state(
+    host: str,
+    selections: dict[str, str],
+) -> dict[str, str]:
+    """Restore still-valid selector/member pairs and verify exact readback."""
+
+    read_remote_selector_state(host)
+    restored: dict[str, str] = {}
+    restore_order = tuple(
+        group for group in ACTIVATION_SELECTOR_NAMES if group != "默认代理"
+    ) + ("默认代理",)
+    for group in restore_order:
+        member = selections.get(group)
+        if member is None:
+            continue
+        payload_result = ssh_command(
+            host,
+            "OPENCLASH_SELECTOR_MEMBERS=1; set -e; "
+            + _remote_controller_json_command("/proxies"),
+            capture=True,
+        )
+        try:
+            payload = json.loads(payload_result.stdout or "")
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"ACTIVATION_SELECTOR_INVALID:{group}") from exc
+        entry = payload.get("proxies", {}).get(group, {})
+        members = entry.get("all") if isinstance(entry, dict) else None
+        if not isinstance(members, list):
+            raise ConfigError(f"ACTIVATION_SELECTOR_INVALID:{group}")
+        if member not in members:
+            continue
+        path = "/proxies/" + urllib.parse.quote(group, safe="")
+        body = json.dumps({"name": member}, ensure_ascii=False, separators=(",", ":"))
+        command = (
+            "OPENCLASH_SELECTOR_RESTORE=1; set -e; "
+            "controller_port=\"$(uci -q get openclash.config.cn_port 2>/dev/null || true)\"; "
+            "case \"$controller_port\" in ''|*[!0-9]*) exit 1 ;; esac; "
+            "dashboard_secret=\"$(uci -q get openclash.config.dashboard_password "
+            "2>/dev/null || true)\"; "
+            "curl -fsS --connect-timeout 2 --max-time 5 -X PUT "
+            "-H \"Authorization: Bearer ${dashboard_secret}\" "
+            "-H 'Content-Type: application/json' "
+            f"--data {quote_remote(body)} "
+            f"\"http://127.0.0.1:${{controller_port}}{path}\" >/dev/null"
+        )
+        try:
+            ssh_command(host, command, capture=True)
+        except subprocess.CalledProcessError as exc:
+            raise ConfigError(f"ACTIVATION_SELECTOR_RESTORE_FAILED:{group}") from exc
+        restored[group] = member
+    readback = read_remote_selector_state(host)
+    mismatched = [
+        group for group, member in restored.items() if readback.get(group) != member
+    ]
+    if mismatched:
+        raise ConfigError(
+            "ACTIVATION_SELECTOR_READBACK_FAILED:" + ",".join(mismatched)
+        )
+    return restored
+
+
+def verify_remote_service_routes(
+    host: str,
+    *,
+    deadline_seconds: int = 30,
+    poll_interval_seconds: int = 1,
+) -> None:
+    """Verify GPT and Gemini destinations through the active authenticated proxy."""
+
+    command = (
+        "OPENCLASH_SERVICE_ROUTE_CHECK=1; set -e; "
+        "proxy_port=''; "
+        "for option in mixed_port http_port; do "
+        "candidate=\"$(uci -q get \"openclash.config.$option\" 2>/dev/null || true)\"; "
+        "case \"$candidate\" in ''|*[!0-9]*) ;; *) proxy_port=\"$candidate\"; break ;; esac; "
+        "done; case \"$proxy_port\" in ''|*[!0-9]*) exit 1 ;; esac; "
+        "proxy_auth_user=''; proxy_auth_password=''; "
+        "for auth_index in 0 1 2 3 4 5 6 7; do "
+        "auth_enabled=\"$(uci -q get \"openclash.@authentication[$auth_index].enabled\" "
+        "2>/dev/null || true)\"; [ \"$auth_enabled\" = '1' ] || continue; "
+        "proxy_auth_user=\"$(uci -q get \"openclash.@authentication[$auth_index].username\" "
+        "2>/dev/null || true)\"; "
+        "proxy_auth_password=\"$(uci -q get \"openclash.@authentication[$auth_index].password\" "
+        "2>/dev/null || true)\"; [ -n \"$proxy_auth_user\" ] && break; done; "
+        "probe_route() { route_url=\"$1\"; "
+        "if [ -n \"$proxy_auth_user\" ]; then "
+        "curl --proxy \"http://127.0.0.1:${proxy_port}\" "
+        "--proxy-user \"${proxy_auth_user}:${proxy_auth_password}\" "
+        "--connect-timeout 4 --max-time 12 --silent --show-error "
+        "--output /dev/null --write-out '%{http_code}' \"$route_url\"; "
+        "else curl --proxy \"http://127.0.0.1:${proxy_port}\" "
+        "--connect-timeout 4 --max-time 12 --silent --show-error "
+        "--output /dev/null --write-out '%{http_code}' \"$route_url\"; fi; }; "
+        "chatgpt_code=\"$(probe_route https://chatgpt.com/)\"; "
+        "gemini_code=\"$(probe_route https://gemini.google.com/)\"; "
+        "case \"$chatgpt_code\" in 2??|3??|401|403) ;; *) exit 1 ;; esac; "
+        "case \"$gemini_code\" in 2??|3??|401|403) ;; *) exit 1 ;; esac; "
+        "printf 'chatgpt=%s gemini=%s\\n' \"$chatgpt_code\" \"$gemini_code\""
+    )
+    deadline = time.monotonic() + deadline_seconds
+    last_error: subprocess.CalledProcessError | None = None
+    while time.monotonic() < deadline:
+        try:
+            ssh_command(host, command, capture=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+    raise ConfigError("ACTIVATION_SERVICE_ROUTE_CHECK_FAILED") from last_error
+
+
+def verify_external_selector_automation_disabled(host: str) -> None:
+    """Ensure OpenClash cannot retest services and overwrite managed selectors."""
+
+    command = (
+        "OPENCLASH_SELECTOR_AUTOMATION_CHECK=1; set -e; "
+        "[ \"$(uci -q get openclash.config.stream_auto_select 2>/dev/null || true)\" = '0' ]; "
+        "! pgrep -f '^/usr/bin/lua /usr/share/openclash/openclash_streaming_unlock.lua ' "
+        ">/dev/null 2>&1"
+    )
+    try:
+        ssh_command(host, command, capture=True)
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError("ACTIVATION_EXTERNAL_SELECTOR_AUTOMATION_ACTIVE") from exc
+
+
 def verify_lan_client_egress(
     *,
     deadline_seconds: int = LAN_HEALTH_DEADLINE_SECONDS,
@@ -5484,7 +5698,6 @@ def activate_uploaded_candidate(
             "REMOTE_STOPPED_DATAPLANE_INCONSISTENT: repair stale OpenClash "
             "DNS/firewall/policy-route/TUN state before activation"
         )
-
     digest_command = (
         "OPENCLASH_CANDIDATE_REJECTION_CHECK=1; set -e; "
         f"[ -f {quote_remote(candidate.candidate_path)} ]; "
@@ -5499,6 +5712,9 @@ def activate_uploaded_candidate(
     rejection = REJECTED_CANDIDATE_SHA256.get(candidate_sha)
     if rejection:
         raise ConfigError(f"{rejection}: candidate activation is permanently blocked")
+    original_selectors = (
+        read_remote_selector_state(host) if original_running else {}
+    )
 
     transaction = DeploymentTransaction(
         remote_path=remote_path,
@@ -5578,7 +5794,9 @@ def activate_uploaded_candidate(
     activate_cmd = (
         "OPENCLASH_ACTIVATION_START=1; set -e; "
         f"uci set openclash.config.config_path={quote_remote(remote_path)}; "
-        "uci set openclash.config.enable='1'; uci commit openclash; "
+        "uci set openclash.config.enable='1'; "
+        "uci set openclash.config.stream_auto_select='0'; "
+        "uci commit openclash; "
         + service_action
     )
     try:
@@ -5589,9 +5807,20 @@ def activate_uploaded_candidate(
             core_path=core_path,
             expected_config_path=candidate.candidate_path,
         )
+        verify_external_selector_automation_disabled(host)
+        if original_selectors:
+            restore_remote_selector_state(host, original_selectors)
+        verify_remote_service_routes(host)
         verify_lan_client_egress()
     except (subprocess.CalledProcessError, ConfigError) as exc:
-        rollback_remote_deployment(host, transaction=transaction)
+        try:
+            rollback_remote_deployment(host, transaction=transaction)
+            if original_selectors:
+                restore_remote_selector_state(host, original_selectors)
+        except ConfigError as rollback_exc:
+            raise ConfigError(
+                "HEALTH_CHECK_FAILED_AND_ROLLBACK_SELECTOR_RESTORE_FAILED"
+            ) from rollback_exc
         raise ConfigError("HEALTH_CHECK_FAILED_ROLLED_BACK") from exc
 
     return remote_path
@@ -5771,14 +6000,12 @@ def orchestrate_formal_candidate_update(args: argparse.Namespace) -> dict[str, A
 
     script_dir = Path(__file__).resolve().parent
     rrc_path = run_dir / "regioncheck-full.json"
-    disney_path = run_dir / "disney-full-chain.json"
     cache_dir = Path(
         getattr(args, "probe_cache_dir", DEFAULT_PROBE_ARTIFACT_CACHE_DIR)
     ).expanduser().resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(cache_dir, 0o700)
     rrc_cache_path = cache_dir / "latest-regioncheck.json"
-    disney_cache_path = cache_dir / "latest-disney.json"
     evidence_ttl = int(
         getattr(args, "probe_evidence_ttl", DEFAULT_PROBE_EVIDENCE_TTL_SECONDS)
     )
@@ -5821,38 +6048,9 @@ def orchestrate_formal_candidate_update(args: argparse.Namespace) -> dict[str, A
         journal["updated_at"] = iso_now()
         atomic_write_json(journal, journal_path, private_parent=True)
 
-        if not _disney_artifact_complete(disney_path, manifest):
-            command = [
-                sys.executable,
-                str(script_dir / "disney_service_probe.py"),
-                "--skill-script",
-                str(Path(__file__).resolve()),
-                "--source-snapshot",
-                str(manifest_path),
-                "--output",
-                str(disney_path),
-                "--host",
-                args.host,
-                "--core-path",
-                args.core_path,
-                "--evidence-ttl",
-                str(evidence_ttl),
-            ]
-            try:
-                load_json_object(disney_cache_path)
-            except ConfigError:
-                pass
-            else:
-                command.extend(["--import-report", str(disney_cache_path)])
-            run_probe_command(command)
-        if not _disney_artifact_complete(disney_path, manifest):
-            raise ConfigError("STOP_FORMAL_UPDATE_DISNEY_ARTIFACT_INCOMPLETE")
-        atomic_write_json(
-            load_json_object(disney_path),
-            disney_cache_path,
-            private_parent=True,
+        journal.setdefault("stages", {})["DISNEY_POLICY"] = (
+            "POLICY_STATIC_REGIONS_NO_PROBE"
         )
-        journal.setdefault("stages", {})["DISNEY_FULL_CHAIN"] = "COMPLETE"
         journal["updated_at"] = iso_now()
         atomic_write_json(journal, journal_path, private_parent=True)
 
@@ -5862,7 +6060,7 @@ def orchestrate_formal_candidate_update(args: argparse.Namespace) -> dict[str, A
             previous_source_snapshot=args.previous_source_snapshot,
             manual_results=args.manual_results,
             previous_manual_results=args.previous_manual_results,
-            functional_results=[disney_path, *args.functional_results],
+            functional_results=list(args.functional_results),
             state_path=args.state_path,
             source_identity_key=args.source_identity_key,
             workdir=run_dir / "candidate",
@@ -6332,7 +6530,8 @@ def build_parser() -> argparse.ArgumentParser:
     update_p = sub.add_parser(
         "update-candidate",
         help=(
-            "Refresh one snapshot, run mature RRC and Disney probes, then prepare "
+            "Refresh one snapshot, run the bounded RRC workflow for new AI names, "
+            "apply the static no-probe Disney region policy, then prepare "
             "one candidate without activation."
         ),
     )
@@ -6423,6 +6622,38 @@ def build_parser() -> argparse.ArgumentParser:
     add_source_args(probe_p)
     probe_p.add_argument("--update-lkg", action="store_true")
     add_probe_args(probe_p)
+
+    gemini_actual_p = sub.add_parser(
+        "probe-gemini-actual",
+        help=(
+            "Run snapshot-bound Antigravity actual-use calibration and Gemini node probing."
+        ),
+    )
+    gemini_actual_p.add_argument("--source-snapshot", type=Path, required=True)
+    gemini_actual_p.add_argument("--output", type=Path, required=True)
+    gemini_actual_p.add_argument(
+        "--calibration-node",
+        action="append",
+        required=True,
+        help="Known-good calibration node name; repeat in preferred order.",
+    )
+    gemini_actual_p.add_argument(
+        "--node",
+        action="append",
+        help="Target node name; repeat to select a subset. Defaults to all snapshot nodes.",
+    )
+    gemini_actual_p.add_argument(
+        "--workers",
+        type=int,
+        choices=(1, 2, 3),
+        default=3,
+    )
+    gemini_actual_p.add_argument("--host", default="root@192.168.10.1")
+    gemini_actual_p.add_argument(
+        "--core-path", default="/etc/openclash/core/clash_meta"
+    )
+    gemini_actual_p.add_argument("--agy-command", default="agy")
+    gemini_actual_p.add_argument("--model")
 
     reconcile_p = sub.add_parser(
         "reconcile-probe",
@@ -6763,6 +6994,29 @@ def main() -> int:
             print_probe_summary(args.probe_report)
             print(f"lkg_updated={str(args.update_lkg).lower()}")
             print("router_contacted=false")
+            return 0
+
+        if args.command == "probe-gemini-actual":
+            from antigravity_actual_probe import run_probe
+
+            report = run_probe(
+                source_snapshot=args.source_snapshot,
+                output=args.output,
+                calibration_nodes=args.calibration_node,
+                target_nodes=args.node,
+                workers=args.workers,
+                host=args.host,
+                core_path=args.core_path,
+                agy_command=args.agy_command,
+                model=args.model,
+                skill=sys.modules[__name__],
+            )
+            results = report["results"]
+            print(f"probe_report={args.output.expanduser().resolve()}")
+            print(f"nodes_tested={len(results)}")
+            print(f"pass_count={sum(item.get('result') == 'PASS' for item in results)}")
+            print(f"fail_count={sum(item.get('result') == 'FAIL' for item in results)}")
+            print(f"unknown_count={sum(item.get('result') == 'UNKNOWN' for item in results)}")
             return 0
 
         if args.command == "reconcile-probe":

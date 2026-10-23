@@ -1,7 +1,7 @@
 ---
 name: clashverge-openclash-static
 description: Safely refresh and deploy static OpenClash profiles.
-version: 2.7.8
+version: 2.7.10
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -18,7 +18,7 @@ prerequisites:
 
 Use this Skill when the user asks to update OpenClash from the current Clash Verge effective configuration.
 
-## Incident lessons (2.7.8)
+## Incident lessons (2.7.10)
 
 Before node audit or recovery, AntiGravity integration, activation, or debugging a
 service that passes health checks but fails real generation, read
@@ -91,11 +91,12 @@ The read-only production baseline is captured after source refresh; candidate
 upload still never writes production, and activation remains a separate healthy,
 rollback-protected transaction. Candidate configuration/egress health checks are
 retained; they are not repeated service eligibility tests of all existing nodes.
-No additions means zero RRC/Disney service probes. `--full-retest` explicitly
+No additions means zero RRC service probes. Disney admission never runs a
+service probe. `--full-retest` explicitly
 selects the old full diagnostic workflow and is never selected automatically.
 
-AI manual selectors expose every current source node in source order plus their
-candidate selector, except that GPT手动 hard-excludes every Hong Kong-labelled
+AI manual selectors put the curated candidate nodes first, followed by every
+other current source node and their candidate selector. GPT手动 hard-excludes every Hong Kong-labelled
 node. Gemini manual remains service-independent and excludes a node only when
 the current snapshot has exact-node, route-confirmed desktop Web evidence of a
 Gemini region/location failure. Screening outcomes, labels, transport failures,
@@ -107,16 +108,71 @@ New RRC screen Yes is diagnostic only and cannot promote a new GPT/Gemini node.
 Actual-use proof must be service-specific: guest ChatGPT does not prove paid
 models/API/Codex, and Antigravity CloudCode does not prove Gemini Web eligibility.
 Single new-node updates do not retest old sentinels to satisfy RRC's two-node
-calibration: record NEEDS_ACTUAL_USE_VERIFICATION and test Disney only. Do not
+calibration: record NEEDS_ACTUAL_USE_VERIFICATION and apply only the static
+Disney region-label policy. Do not
 claim unperformed AI generation tests passed. Known same-name pool membership is
 carried policy rather than proof of current usability; users can request explicit
 functional retesting when a carried node fails. Empty required pools block
 activation instead of substituting unknown nodes or DIRECT.
 
+Never intersect an existing candidate group with the identity-bound registry in
+a way that shrinks the carried name set. Registry identity matches add reusable
+proof and current actual-use PASS results may add candidates; registry misses do
+not delete same-name carried candidates. Remove a carried name only when it left
+the source or exact current-snapshot, route-confirmed evidence proves a
+service-specific region/location failure. Treat an unexplained candidate-count
+drop as a stopped update until the previous accepted pool and current source are
+reconciled.
+
+Before a Gemini full repair, calibrate the actual-use probe on one known-good
+node. Use the installed `agy`/AntiGravity client and a currently advertised
+model, require a unique response marker and CloudCode route attribution, and
+then test the bounded batch. A global `RESOURCE_EXHAUSTED`, authentication,
+transport, or timeout result must not prune candidates; a hard-coded obsolete
+CloudCode model alias can produce that global failure even when account quota is
+available.
+
+For added or renamed Gemini nodes, generate snapshot-bound actual-use evidence
+with the integrated probe before `update-candidate`:
+
+```bash
+python3 scripts/clashverge_to_openclash.py probe-gemini-actual \
+  --source-snapshot /path/to/source-snapshot.json \
+  --output /private/path/gemini-actual-results.json \
+  --calibration-node 'known-good-node' \
+  --node 'added-or-renamed-node'
+
+python3 scripts/clashverge_to_openclash.py update-candidate \
+  --source-snapshot /path/to/source-snapshot.json \
+  --functional-results /private/path/gemini-actual-results.json \
+  --no-activate
+```
+
+Omit `--model` to use the model selected by the installed `agy` configuration;
+use `--model` only for a deliberately chosen currently advertised model. The
+probe must calibrate a PASS with both a unique marker and CloudCode route before
+testing targets. Region/location denial is definitive only with matching route
+evidence. Authentication, quota, transport, timeout, and unclassified failures
+are UNKNOWN and cannot remove a candidate. The report is private mode 0600 and
+contains no prompt, response body, token, or raw command output.
+
 ## Upgrade record
 
 The front-matter `version` field is the authoritative release-version source
-for this Skill. Version 2.7.8 records the 2026-10-12 OpenClash/AntiGravity
+for this Skill. Version 2.7.10 fails candidate generation when a policy or
+registry regression removes a still-current carried GPT/Gemini candidate without
+an allowed service-specific exclusion, and records the expected/missing carried
+names in the audit report. It also adds the calibrated `probe-gemini-actual`
+command for bounded AntiGravity inference checks without a hard-coded model
+alias; ambiguous account, quota, and transport failures remain UNKNOWN. Version
+2.7.9 removes the obsolete Disney full-chain subprocess,
+admits Disney candidates solely by the static SG/TW/JP/US label policy without
+a Disney or shared-RRC service gate, and keeps Disney manual broader than
+the curated candidate pool. It orders GPT/Gemini manual selectors candidate
+first, preserves still-valid managed selector choices across activation, and
+requires both ChatGPT and Gemini routed transport checks before committing an
+activation. Two-sentinel RRC calibration still requires two distinct exit
+HMACs; shared-egress aliases fail closed. Version 2.7.8 records the 2026-10-12 OpenClash/AntiGravity
 incident lessons in [references/incident-lessons.md](references/incident-lessons.md):
 preserve the GPT control path and desktop/router attribution, require real
 CloudCode generation plus an end-to-end AntiGravity request, use the proven
@@ -247,7 +303,7 @@ network state instead of treating an intermediate mismatch as rollback failure.
 Version 2.4.0 made the router-installed RegionRestrictionCheck the formal
 GPT/Gemini/Disney screening backend. Hermes freezes the source, orchestrates the
 external tool through the isolated candidate sidecar, fuses snapshot-bound manual
-and full-chain evidence, builds the candidate, and keeps activation as a separate
+evidence, applies the no-probe Disney region policy, builds the candidate, and keeps activation as a separate
 transaction. The browser probe remains historical experimental code and is not a
 candidate or activation gate. Do not add Playwright or operate the dedicated
 logged-in profile from this Skill.
@@ -274,8 +330,9 @@ as proof of paid models, Codex or authenticated OpenAI API.
 
 Exact registry matches may bypass the old `流媒体` name exclusion in curated
 candidate pools. Unverified nodes retain that candidate exclusion. GPT/Gemini
-manual selectors preserve current source order and keep the curated candidate
-selector as an explicit choice; GPT manual selection still hard-excludes every
+manual selectors put curated candidates first, then preserve current source
+order for other allowed nodes and keep the candidate selector as an explicit
+choice; GPT manual selection still hard-excludes every
 Hong Kong label while Gemini manual selection remains service-specific. During
 incremental updates, enabled preferred registry entries are reused only after
 the current source node matches the saved stable connection identity; removed
@@ -317,15 +374,15 @@ Rules:
 - Candidate groups are ordinary `fallback` groups; their size is never described as an automated probe-pass count.
 - All fallback groups use `https://www.gstatic.com/generate_204`, interval 60, lazy true, timeout 5000, and max-failed-times 1.
 - Global/GPT/Disney ordering is Japan → Taiwan → other nodes.
-- Gemini ordering is Japan → Taiwan → Hong Kong → Germany → other nodes.
+- Gemini candidate ordering is Japan → Taiwan → Hong Kong → Germany → other nodes.
 - Remove the placeholder node named `使用前先更新订阅`.
 - The historical GPT/Gemini/Disney candidate sets seed last-known-good state on the first run. Do not restore the old binary GPT probe.
 - Run the installed RegionRestrictionCheck through one temporary loopback Mihomo sidecar, serial selector switching, exact controller read-back, per-node connection reset, and explicit `-P` proxy binding. Never copy or update the external script.
 - Use `MANUAL_FUNCTIONAL_PASS`, `MANUAL_FUNCTIONAL_FAIL`, `SCREEN_PASS`, `SCREEN_NEGATIVE`, `PASS_WITH_SCREEN_FALSE_NEGATIVE`, `LKG_FALLBACK`, and `UNKNOWN` as evidence semantics. Display conflicts and LKG-only membership separately.
-- GPT candidates accept current `SCREEN_PASS` or current identity-bound manual functional PASS, but not an explicit current transport failure. Gemini candidates accept current `SCREEN_PASS`, current identity-bound manual functional PASS, or `PASS_WITH_SCREEN_FALSE_NEGATIVE`; exclude manual FAIL and conflicts. Disney candidates prefer current full-chain `PASS_SUPPORTED_REGION`; a full-chain hard failure outranks RegionRestrictionCheck.
+- GPT candidates accept current `SCREEN_PASS` or current identity-bound manual functional PASS, but not an explicit current transport failure. Gemini candidates accept current `SCREEN_PASS`, current identity-bound manual functional PASS, or `PASS_WITH_SCREEN_FALSE_NEGATIVE`; exclude manual FAIL and conflicts. Disney candidates are every current SG/TW/JP/US-labelled node; no Disney or shared-RRC service gate runs for admission.
 - Never treat Google reachability, Gemini HTTP 200, a login redirect, an API response, old LKG, or an old override as definitive Gemini Web generation proof.
 - Never treat a Disney homepage, TLS, CDN, or HTTP 200 response as Disney support proof.
-- New UNKNOWN AI nodes enter GPT/Gemini manual groups but never enter curated candidate groups without qualifying proof. Disney retains its separate full-chain evidence policy.
+- New UNKNOWN AI nodes enter GPT/Gemini manual groups but never enter curated candidate groups without qualifying proof. Disney manual remains broad while its candidate pool follows the static region-label policy only.
 - If a primary service group is empty, stop candidate generation with `BLOCKED_NO_CURRENT_SERVICE_CANDIDATES`; never silently substitute LKG or default routing.
 - Preserve ordinary source rules, rename the old target `顺畅网络` to `默认代理`, regenerate narrow GPT/Gemini/Disney rules, and finish with exactly `MATCH,默认代理`.
 - Remove Clash Verge-only controller/listener/profile fields, temporary probe/controller fields, and `/tmp/verge` paths if present. Preserve a general top-level `tun` section because it may carry user network semantics.
@@ -366,8 +423,9 @@ python3 scripts/clashverge_to_openclash.py update-candidate \
   --upload
 ```
 
-This runs RegionRestrictionCheck and the Disney full chain through isolated
-router sidecars, uploads one immutable candidate, validates it, and leaves UCI,
+This runs RegionRestrictionCheck through an isolated router sidecar for the AI
+screening workflow, applies the no-probe static Disney region policy, uploads one
+immutable candidate, validates it, and leaves UCI,
 the selected production YAML, service state, firewall, policy routes, DNS, and
 TUN untouched. `all --deploy --no-activate` is a compatibility alias for this
 same mature workflow. Never use `all --deploy --activate`; it is rejected before
@@ -375,14 +433,21 @@ refresh and router contact. Activate the verified immutable candidate with the
 independent `activate` subcommand using the paths and snapshot printed by the
 candidate update only when the user request includes activation. An existing
 request to update and activate is sufficient; no repeat approval is needed.
+Activation must set `openclash.config.stream_auto_select=0` inside the backed-up
+UCI transaction before restart. OpenClash's streaming-unlock automation probes
+Disney, Google, and OpenAI after startup and rewrites selectors, which conflicts
+with the frozen candidate policy and the Disney no-probe requirement. Verify the
+global automation is disabled and no streaming-unlock Lua process remains before
+restoring the managed selectors. Rollback restores the original UCI file.
 
 When previous snapshot-bound manual evidence exists, pass both
 `--previous-source-snapshot` and `--previous-manual-results`. The formal workflow
 migrates it only after exact connection-identity equality; omission means the
 old manual evidence is not current evidence. A failed run prints a private
 `formal_update_journal_path`. Resume from its frozen snapshot with
-`update-candidate --source-snapshot <manifest> ...`; complete RRC or Disney
-artifacts bound to that snapshot are verified and skipped instead of rerun.
+`update-candidate --source-snapshot <manifest> ...`; complete RRC artifacts
+bound to that snapshot are verified and skipped instead of rerun. Disney has no
+probe artifact in the current policy.
 
 For an already frozen snapshot and completed RRC run, use the resumable path.
 It never refreshes, reruns RRC, or activates; rerunning the same command verifies
@@ -484,15 +549,9 @@ generation PASS may admit that node as `PASS_WITH_SCREEN_FALSE_NEGATIVE`.
 Do not run `browser_service_probe.py` in the formal workflow. Keep the dedicated
 profile untouched; it is not an activation prerequisite.
 
-The Disney probe performs devices → token → GraphQL → supported-location → final
-redirect. It stores neither transient credentials nor response bodies:
-
-```bash
-python3 scripts/disney_service_probe.py \
-  --skill-script scripts/clashverge_to_openclash.py \
-  --source-snapshot /path/to/source-snapshot.json \
-  --output /private/path/disney-functional-results.json
-```
+Disney candidate admission runs no Disney probe. It includes every current node
+whose label matches Singapore, Taiwan, Japan, or the United States; the broad
+Disney manual group continues to expose all current nodes.
 
 Pass one or more result files to `all`, `probe`, or `reconcile-probe` with
 repeatable `--functional-results`. Each result must match the snapshot ID/hash,
@@ -564,13 +623,13 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 - Validate the temporary YAML with the selected Mihomo core before startup. After startup, confirm runtime mode and final rule through the controller and read `GLOBAL`; `GLOBAL.now=DIRECT` is harmless in rule mode because requests explicitly use the temporary mixed proxy and `MATCH` targets `PROBE`.
 - Requests are serial per node, use a fresh curl process, connect timeout 3 seconds, total timeout 8 seconds, at most two attempts, and a 15-minute round deadline. The selector wait is 0.75 seconds.
 - Before control attribution or RegionRestrictionCheck, try the Google and Cloudflare 204 endpoints with the same runner-scoped proxy. Only when both bounded checks fail, record node-local `ATTRIBUTION_UNAVAILABLE` at `TRANSPORT_PREFLIGHT` and skip the expensive path; this is UNKNOWN evidence, not a service failure.
-- Cache only complete, production-preserving, zero-mismatch RRC reports and safe Disney reports under `~/.hermes/state/clashverge-openclash-static/probe-cache/`. Reuse requires an exact stable node identity, matching probe method/tool hash, and evidence age no greater than 12 hours. Never reuse an RRC result unless two distinct cached exits can be selected and retested as current-run sentinels. Never reuse Disney transport failures or unknown results.
+- Cache only complete, production-preserving, zero-mismatch RRC reports under `~/.hermes/state/clashverge-openclash-static/probe-cache/`. Reuse requires an exact stable node identity, matching probe method/tool hash, and evidence age no greater than 12 hours. Never reuse an RRC result unless two distinct cached exits can be selected and retested as current-run sentinels. Legacy Disney evidence is ignored for current candidate admission.
 - GPT 403 challenge evidence is `CHALLENGE_UNKNOWN`, never `FAIL_REGION` without explicit region text.
 - Manual calibration requires exact raw name, exact HMAC node ID, exact service, exact source snapshot, test time, and method. Store these separately; newer definitive actual-use evidence takes precedence over older screening evidence.
 - RegionRestrictionCheck is screening evidence. ChatGPT/Gemini `Yes` is `SCREEN_PASS`; Gemini `No` is `SCREEN_NEGATIVE`. Bind any manual override to the exact snapshot and stable node ID. Never require browser automation for candidate generation or activation.
 - Resolve the RegionRestrictionCheck runner proxy once and use that same explicit loopback URL for every router-side control request and `regioncheck -M 4 -P`. Make the first post-selector request a best-effort connection discard with no evidence semantics. Then query the bounded ipify, ifconfig.co, ipinfo, Cloudflare trace, and AWS check-IP IPv4 backends in order with fresh curl processes; accept only a public IPv4 and persist only a run-keyed HMAC.
 - Record `ATTRIBUTION_MATCH` only when the control and RegionRestrictionCheck exits are comparable and agree. A single node with no usable control backend or no comparable RegionRestrictionCheck provider is `ATTRIBUTION_UNAVAILABLE`: emit no service evidence and continue. Retry an explicit mismatch once, then stop with `STOP_RRC_PROXY_ATTRIBUTION_MISMATCH`. When the existing consecutive or ratio thresholds indicate systematic failure, run the expensive two-sentinel confirmation only on the first signal, every five additional unavailable nodes, and once at the end if unconfirmed evidence remains. A failed sentinel confirmation still stops the run.
-- Disney probing must POST `/devices`, obtain an assertion, POST `/token`, distinguish `forbidden-location` and HTTP 403, POST `/graph/v1/device/graphql`, parse `countryCode` and `inSupportedLocation`, and reject final `disneyplus.com` redirects containing `preview` or `unavailable`. Persist no assertion, token, refresh token, or response body. Until that full chain runs, emit `UNKNOWN_INCOMPLETE_PROBE`, not PASS.
+- Disney candidate admission is a no-probe label policy: include current Singapore, Taiwan, Japan, and United States labels; expose all current nodes in Disney manual; never claim those labels are live Disney service proof.
 - Egress persistence is limited to country, ASN, and a run-keyed HMAC prefix. Mark `PROBABLE_TUN_OR_UPSTREAM_RECAPTURE` only when at least three `BASE_PASS` nodes span at least two declared regions and every eligible node has the same complete signature. Transport failures do not participate; a guarded run cannot change LKG or service groups.
 - Temporary YAML, response bodies, headers, logs, Mihomo, PID, SSH tunnel, and lock are cleaned in `finally`. Candidate-probe failure must occur before the activation transaction and must never invoke production rollback.
 
@@ -587,7 +646,7 @@ Report only paths and counts. Never print the YAML body or connection secrets.
 
 5. Sidecar-test the candidate before activation. Its DNS and proxy listeners are loopback-only and it must not enable TUN, TPROXY, policy routing, firewall integration, or LAN access.
 6. Activation is the transaction boundary. Only here read the real active YAML path from UCI and back up that active YAML, the destination state, `/etc/config/openclash`, `/etc/config/dhcp`, `/etc/config/firewall`, enabled/running/core state, and full diagnostic snapshots of IPv4/IPv6 rules, table 354, OpenClash nft state, and utun state.
-7. Atomically copy the immutable candidate into the production config path, set UCI, enable OpenClash, and commit. Restart an originally running service, but treat the init-script exit code as advisory because procd may report `service delete: Not found`; check actual running state and issue one `start` fallback when needed. The bounded Layer 0–3 health checks remain authoritative.
+7. Atomically copy the immutable candidate into the production config path, set UCI, enable OpenClash, disable `stream_auto_select`, and commit. Restart an originally running service, but treat the init-script exit code as advisory because procd may report `service delete: Not found`; check actual running state and issue one `start` fallback when needed. The bounded Layer 0–3 health checks remain authoritative.
 8. After restart, poll once per second against a 110-second remote-health deadline and require two consecutive complete passes. Each pass verifies enabled/running service state, the core process, selected-config path and exact candidate bytes, Mihomo syntax, controller and mixed/HTTP listeners, router DNS and HTTP 204, and proxy HTTP 204. When an enabled OpenClash authentication section exists, read it only inside the remote shell and pipe an escaped curl-config line over stdin; never place credentials in argv, stdout, logs, or reports. Apply the same consecutive-pass rule to LAN egress.
 9. On install, restart, or health failure, first stop OpenClash while its live DNS/firewall rollback bookkeeping still exists. In a rollback `finally` path, restore the destination and original active YAML states, OpenClash/DHCP/firewall UCI, reload firewall and dnsmasq, and restore the original enabled/running service state. A procd `service delete: Not found` must not skip later recovery steps. Capture absent rule/table/TUN state as an empty section instead of a shell error.
 10. Post-rollback health is layered: actual OpenClash core process state (Layer 0), restored Mihomo config test (Layer 1), authentication-aware proxy listener/egress or absence of stale fwmark/table 354/nft redirect state (Layer 2), and transparent egress from the LAN machine running the deployment (Layer 3). Poll the restored network snapshot to a separate bounded deadline and judge the final stable state, not an intermediate firewall/dnsmasq reload state. Compare OpenClash nft snapshot lines in sorted order so firewall reload declaration reordering does not become a false rollback failure while rule-set additions/removals still fail. `curl --noproxy '*'` disables explicit proxy variables only; it is deliberately not claimed to bypass router transparent interception. Return an explicit `ROLLBACK_FAILED` status only if a required final state still fails at its deadline.

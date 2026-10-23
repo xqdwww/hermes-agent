@@ -49,6 +49,26 @@ def test_gemini_fallback_uses_antigravity_health_and_hysteresis() -> None:
     assert gemini["max-failed-times"] == 2
 
 
+def test_rrc_auto_calibration_rejects_two_names_on_one_exit() -> None:
+    attempts = [
+        {
+            "exact_node_name": "node-a",
+            "status": "ATTRIBUTION_MATCH",
+            "output_complete": True,
+            "result_count": len(REGIONCHECK.SERVICE_LABELS),
+            "control_exit_ip_hmac": "same-exit",
+        },
+        {
+            "exact_node_name": "node-b",
+            "status": "ATTRIBUTION_MATCH",
+            "output_complete": True,
+            "result_count": len(REGIONCHECK.SERVICE_LABELS),
+            "control_exit_ip_hmac": "same-exit",
+        },
+    ]
+    assert REGIONCHECK.auto_calibration_sentinels(attempts) == ["node-a"]
+
+
 def test_gemini_manual_defaults_to_first_functionally_filtered_node() -> None:
     groups = CONVERTER.build_groups(
         ["tw02-node", "tw-node", "us-node"],
@@ -57,7 +77,9 @@ def test_gemini_manual_defaults_to_first_functionally_filtered_node() -> None:
         ["us-node"],
     )
     manual = {group["name"]: group for group in groups}["Gemini手动"]
-    assert manual["proxies"][:3] == ["tw02-node", "tw-node", "Gemini候选"]
+    assert manual["proxies"] == [
+        "tw02-node", "tw-node", "us-node", "Gemini候选"
+    ]
 
 
 def test_disney_safe_report_allows_redacted_token_stage() -> None:
@@ -379,19 +401,14 @@ def test_formal_update_runs_rrc_disney_then_candidate_preparation(tmp_path: Path
         result = CONVERTER.orchestrate_formal_candidate_update(args)
 
     assert result["status"] == "READY_FOR_EXPLICIT_ACTIVATE_APPROVAL"
-    assert len(commands) == 2
+    assert len(commands) == 1
     assert commands[0][1].endswith("regioncheck_service_probe.py")
     assert "--auto-calibrate" in commands[0]
     assert "--import-report" in commands[0]
     assert commands[0][commands[0].index("--evidence-ttl") + 1] == str(12 * 60 * 60)
-    assert commands[1][1].endswith("disney_service_probe.py")
-    assert "--import-report" in commands[1]
-    assert commands[1][commands[1].index("--evidence-ttl") + 1] == str(12 * 60 * 60)
     assert len(prepared) == 1
     assert prepared[0].rrc_results.name == "regioncheck-full.json"
-    assert [path.name for path in prepared[0].functional_results] == [
-        "disney-full-chain.json"
-    ]
+    assert prepared[0].functional_results == []
     assert prepared[0].upload is True
 
     commands.clear()

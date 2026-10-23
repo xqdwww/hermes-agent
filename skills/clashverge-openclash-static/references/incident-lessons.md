@@ -1,4 +1,4 @@
-# OpenClash/AntiGravity incident lessons (2.7.8)
+# OpenClash/AntiGravity incident lessons (2.7.10)
 
 Read this reference before node audit or recovery, AntiGravity integration,
 activation, or debugging a service that passes health checks but fails real
@@ -25,6 +25,16 @@ is not proof of a different service, account, or current route.
    exact-name carried policy without retesting; after an observed live failure,
    however, recovery must leave the current route on a fresh live pass.
 
+   Candidate membership and identity-bound proof are separate records. The
+   current production candidate group is the authoritative name-based seed for
+   an ordinary same-name update. A changed connection identity may stop an old
+   registry proof from matching, but it must never subtract that same name from
+   the carried candidate group. Reconcile a repaired pool as: current accepted
+   candidate names plus current exact-identity actual-use passes, minus removed
+   names and exact current-snapshot definitive service region failures. An
+   unexplained pool-count collapse is a regression to investigate, not proof
+   that the missing nodes became unusable.
+
 3. **Use service-specific actual-use proof.** GPT candidate admission requires
    a real GPT generation on the exact current desktop route; HTTP health,
    RegionRestrictionCheck, login redirects, or another OpenAI surface do not
@@ -34,6 +44,17 @@ is not proof of a different service, account, or current route.
    transport or screening evidence only. CloudCode proof does not prove Gemini
    Web or AI Studio eligibility. Keep GPT Hong Kong-labelled nodes out of both
    the GPT candidate pool and GPT manual group, including on recovery paths.
+
+   For AntiGravity, do not hard-code a historical CloudCode model alias in the
+   probe. Model aliases can disappear while the account still has quota, and
+   CloudCode can then return `RESOURCE_EXHAUSTED` for every route. Calibrate one
+   known-good node first through the installed `agy`/AntiGravity client with a
+   model currently advertised by that client, require a unique generated marker
+   and a CloudCode connection-chain match, then run the bounded node batch. If
+   calibration fails globally, classify the run as account/model-path failure
+   and do not alter candidate membership. Authentication, transport, timeout,
+   and rate-limit outcomes are inconclusive; only a route-confirmed explicit
+   region/location rejection may remove a Gemini candidate.
 
 4. **Route the right CloudCode endpoints.** Production, daily, and
    daily-sandbox CloudCode endpoints are distinct paths. Route and validate

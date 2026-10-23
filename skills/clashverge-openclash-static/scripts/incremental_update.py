@@ -204,6 +204,31 @@ def _filtered_concrete(
     )
 
 
+def _expected_carried_names(
+    refs: Sequence[Any],
+    *,
+    current_names: set[str],
+    current_order: Sequence[str],
+    blocked_names: set[str],
+    measured_hk_names: set[str],
+    service: str,
+) -> list[str]:
+    """Return baseline candidate names that policy permits carrying forward."""
+
+    baseline_names = {
+        name for name in refs if isinstance(name, str)
+    }
+    return [
+        name
+        for name in current_order
+        if name in baseline_names
+        and name in current_names
+        and name not in blocked_names
+        and name not in measured_hk_names
+        and not (service == "gpt" and _is_hong_kong_label(name))
+    ]
+
+
 def _require_service_groups(
     groups: Mapping[str, dict[str, Any]], *, service: str, skill: Any
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -288,11 +313,16 @@ def _prepare_ai_groups(
         )
     candidate["proxies"] = candidate_refs
     manual_concrete = _ordered_unique(
-        name
-        for name in current_order
-        if name in current_names
-        and name not in blocked_names
-        and not (service == "gpt" and _is_hong_kong_label(name))
+        [
+            *candidate_refs,
+            *(
+                name
+                for name in current_order
+                if name in current_names
+                and name not in blocked_names
+                and not (service == "gpt" and _is_hong_kong_label(name))
+            ),
+        ]
     )
     manual["proxies"] = [*manual_concrete, _SERVICE_GROUPS[service][0]]
     dedicated["proxies"] = [
@@ -308,6 +338,7 @@ def _prepare_disney_group(
     groups: Mapping[str, dict[str, Any]],
     old_names: set[str],
     current_names: set[str],
+    current_order: Sequence[str],
     added_names: Sequence[str],
     disney_pass_names: Iterable[str],
     skill: Any,
@@ -315,28 +346,21 @@ def _prepare_disney_group(
     candidate, manual, dedicated = _require_service_groups(
         groups, service="disney", skill=skill
     )
-    baseline_candidate = _filtered_concrete(
-        candidate["proxies"],
-        old_names=old_names,
-        current_names=current_names,
-        excluded_names=set(),
-    )
-    baseline_manual = _filtered_concrete(
-        manual["proxies"],
-        old_names=old_names,
-        current_names=current_names,
-        excluded_names=set(),
-    )
     added_set = set(added_names)
     passed = _ordered_unique(
         name
         for name in disney_pass_names
         if isinstance(name, str) and name in added_set and name in current_names
     )
-    pool = _ordered_unique([*baseline_candidate, *passed])
+    disney_region_predicate = getattr(skill, "is_disney_region_name", None)
+    if not callable(disney_region_predicate):
+        disney_region_predicate = lambda _name: True
+    pool = _ordered_unique(
+        name for name in current_order if disney_region_predicate(name)
+    )
     if not pool:
         _raise(skill, "BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:DISNEY")
-    manual_concrete = _ordered_unique([*baseline_manual, *passed])
+    manual_concrete = _ordered_unique([*pool, *current_order])
     candidate["proxies"] = pool
     manual["proxies"] = [*manual_concrete, "迪士尼候选"]
     dedicated["proxies"] = ["迪士尼手动", "迪士尼候选"]
@@ -551,7 +575,8 @@ def build_candidate(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a candidate while carrying policy by exact display name.
 
-    Only added names admitted by ``disney_pass_names`` enter the Disney pool.
+    Disney membership is supplied by the controller's static supported-region
+    policy; it does not represent probe results despite the legacy argument name.
     GPT/Gemini pools are carried from the baseline candidate groups and admit
     only names explicitly supplied as current-snapshot actual-use results.
     Manual region blocks are service-specific exact names from definitive,
@@ -573,6 +598,12 @@ def build_candidate(
     )
 
     groups, group_by_name = _group_map(old_data, skill=skill)
+    baseline_candidate_refs = {
+        service: list(
+            group_by_name.get(_SERVICE_GROUPS[service][0], {}).get("proxies", [])
+        )
+        for service in ("gpt", "gemini")
+    }
     output = deepcopy(dict(old_data))
     output["proxies"] = deepcopy(new_proxies)
     output["proxy-groups"] = groups
@@ -607,6 +638,17 @@ def build_candidate(
     blocked_by_service = {
         service: set(names) for service, names in blocked_ordered.items()
     }
+    expected_carried_names = {
+        service: _expected_carried_names(
+            baseline_candidate_refs[service],
+            current_names=current_names,
+            current_order=current_order,
+            blocked_names=blocked_by_service[service],
+            measured_hk_names=measured_hk,
+            service=service,
+        )
+        for service in ("gpt", "gemini")
+    }
     admitted_gpt = _prepare_ai_groups(
         groups=group_by_name,
         service="gpt",
@@ -637,6 +679,7 @@ def build_candidate(
         groups=group_by_name,
         old_names=old_names,
         current_names=current_names,
+        current_order=current_order,
         added_names=added_names,
         disney_pass_names=disney_pass_names,
         skill=skill,
@@ -649,6 +692,14 @@ def build_candidate(
         added_names=added_names,
         skill=skill,
     )
+    default_group = group_by_name.get("默认代理")
+    if isinstance(default_group, dict):
+        default_members = default_group.get("proxies")
+        if isinstance(default_members, list) and "自动选择" in default_members:
+            default_group["proxies"] = [
+                "自动选择",
+                *(member for member in default_members if member != "自动选择"),
+            ]
     # Add a temporary current-source emergency group so references from the
     # dedicated selectors validate during pruning.  It is regenerated again
     # after the policy hook to cover no-op test doubles and stale snapshots.
@@ -684,14 +735,34 @@ def build_candidate(
 
     # A no-op or test double policy helper must not weaken the local invariant.
     final_groups = {group["name"]: group for group in output["proxy-groups"]}
+    missing_carried_names = {"gpt": [], "gemini": []}
     for service in ("gpt", "gemini"):
         candidate_name, manual_name, dedicated_name = _SERVICE_GROUPS[service]
         candidate = final_groups.get(candidate_name)
         manual = final_groups.get(manual_name)
         dedicated = final_groups.get(dedicated_name)
+        candidate_refs = (
+            candidate.get("proxies")
+            if isinstance(candidate, dict)
+            else None
+        )
+        candidate_name_set = {
+            name for name in candidate_refs if isinstance(name, str)
+        } if isinstance(candidate_refs, list) else set()
+        missing = [
+            name
+            for name in expected_carried_names[service]
+            if name not in candidate_name_set
+        ]
+        missing_carried_names[service] = missing
+        if missing:
+            _raise(
+                skill,
+                "INCREMENTAL_CARRIED_CANDIDATE_MISSING:"
+                f"{service.upper()}:" + ",".join(missing),
+            )
         if not candidate or not candidate.get("proxies"):
             _raise(skill, "BLOCKED_NO_CURRENT_SERVICE_CANDIDATES:" + service.upper())
-        candidate_refs = candidate.get("proxies")
         if not isinstance(candidate_refs, list) or any(
             not isinstance(name, str) for name in candidate_refs
         ):
@@ -730,11 +801,16 @@ def build_candidate(
         if manual is None or dedicated is None:
             _raise(skill, "INCREMENTAL_REQUIRED_GROUP_MISSING:" + service.upper())
         expected_manual_names = _ordered_unique(
-            name
-            for name in current_order
-            if name in current_names
-            and name not in blocked_by_service[service]
-            and not (service == "gpt" and _is_hong_kong_label(name))
+            [
+                *candidate_names,
+                *(
+                    name
+                    for name in current_order
+                    if name in current_names
+                    and name not in blocked_by_service[service]
+                    and not (service == "gpt" and _is_hong_kong_label(name))
+                ),
+            ]
         )
         if manual.get("proxies") != [*expected_manual_names, candidate_name]:
             _raise(skill, "INCREMENTAL_AI_MANUAL_GROUP_INVALID:" + service.upper())
@@ -809,12 +885,20 @@ def build_candidate(
         "manual_region_blocked_names": {
             service: list(names) for service, names in blocked_ordered.items()
         },
+        "expected_carried_names": {
+            service: list(names)
+            for service, names in expected_carried_names.items()
+        },
+        "missing_carried_names": {
+            service: list(names)
+            for service, names in missing_carried_names.items()
+        },
         "old_service_tests": 0,
         "admission_explanations": {
             "same_name": "NAME_REUSED_NOT_RETESTED is carried historical policy, not fresh actual-use proof.",
             "parameter_changed": "PARAMETERS_CHANGED_NOT_RETESTED replaces the complete proxy object without service retest.",
             "added": "ADDED_PENDING_VERIFICATION is never promoted to GPT/Gemini from screening; only explicit actual-use proof can admit it.",
-            "disney": "Only full PASS_SUPPORTED_REGION results supplied by the controller enter Disney.",
+            "disney": "Every current node with a Singapore, Taiwan, Japan, or United States region label enters Disney without probing.",
             "hong_kong": "Labels and exact-identity measured HK exclusions are policy filters, not exit-IP proof.",
         },
         "group_counts": group_counts,

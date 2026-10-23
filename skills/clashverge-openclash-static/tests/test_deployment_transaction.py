@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -55,6 +57,19 @@ def transaction(*, running: bool = True) -> MODULE.DeploymentTransaction:
         original_network_artifacts=running,
         original_tun_present=running,
     )
+
+
+def selector_state() -> dict[str, str]:
+    return {
+        "默认代理": "自动选择",
+        "手动选择": "safe-node",
+        "GPT专用": "GPT手动",
+        "GPT手动": "safe-node",
+        "Gemini专用": "Gemini手动",
+        "Gemini手动": "safe-node",
+        "迪士尼": "迪士尼手动",
+        "迪士尼手动": "safe-node",
+    }
 
 
 def test_runtime_version_matches_authoritative_skill_frontmatter() -> None:
@@ -352,12 +367,15 @@ def test_activation_failure_rolls_back_running_state() -> None:
 
     with (
         patch.object(MODULE, "read_remote_openclash_state", return_value=remote_state(running=True)),
+        patch.object(MODULE, "read_remote_selector_state", return_value=selector_state()),
+        patch.object(MODULE, "restore_remote_selector_state") as restore_selectors,
         patch.object(MODULE, "ssh_command", side_effect=fake_ssh),
         patch.object(MODULE, "rollback_remote_deployment") as rollback,
     ):
         with pytest.raises(MODULE.ConfigError, match="HEALTH_CHECK_FAILED_ROLLED_BACK"):
             MODULE.activate_uploaded_candidate(candidate, host="router", core_path="/core")
     rollback.assert_called_once()
+    restore_selectors.assert_called_once_with("router", selector_state())
     saved = rollback.call_args.kwargs["transaction"]
     assert saved.original_running is True
     assert saved.original_active_path == "/etc/openclash/config/old.yaml"
@@ -408,8 +426,12 @@ def test_activation_success_preserves_running_and_stopped_entry_semantics(
         patch.object(
             MODULE, "read_remote_openclash_state", return_value=remote_state(running=running)
         ),
+        patch.object(MODULE, "read_remote_selector_state", return_value=selector_state()),
+        patch.object(MODULE, "restore_remote_selector_state") as restore_selectors,
         patch.object(MODULE, "ssh_command", side_effect=fake_ssh),
         patch.object(MODULE, "verify_remote_health") as health,
+        patch.object(MODULE, "verify_external_selector_automation_disabled") as selector_automation,
+        patch.object(MODULE, "verify_remote_service_routes") as service_routes,
         patch.object(MODULE, "verify_lan_client_egress") as lan_health,
         patch.object(MODULE, "rollback_remote_deployment") as rollback,
     ):
@@ -420,8 +442,114 @@ def test_activation_success_preserves_running_and_stopped_entry_semantics(
     assert result == "/etc/openclash/config/new.yaml"
     assert f"/etc/init.d/openclash {expected_action}" in "\n".join(commands)
     assert health.call_args.kwargs["expected_config_path"] == candidate.candidate_path
+    selector_automation.assert_called_once_with("router")
+    service_routes.assert_called_once_with("router")
     lan_health.assert_called_once()
+    if running:
+        restore_selectors.assert_called_once_with("router", selector_state())
+    else:
+        restore_selectors.assert_not_called()
     rollback.assert_not_called()
+    joined = "\n".join(commands)
+    assert "stream_auto_select='0'" in joined
+
+
+def test_external_selector_automation_must_be_disabled_and_stopped() -> None:
+    with patch.object(MODULE, "ssh_command", return_value=completed()) as ssh:
+        MODULE.verify_external_selector_automation_disabled("router")
+    command = ssh.call_args.args[1]
+    assert "stream_auto_select" in command
+    assert "openclash_streaming_unlock.lua" in command
+
+
+def test_selector_capture_reads_only_managed_choices() -> None:
+    proxies = {
+        name: {"now": selector_state()[name], "all": [selector_state()[name]]}
+        for name in MODULE.ACTIVATION_SELECTOR_NAMES
+    }
+    with patch.object(
+        MODULE,
+        "ssh_command",
+        return_value=completed(json.dumps({"proxies": proxies}, ensure_ascii=False)),
+    ) as ssh:
+        assert MODULE.read_remote_selector_state("router") == selector_state()
+    command = ssh.call_args.args[1]
+    assert "OPENCLASH_SELECTOR_READ=1" in command
+    assert "dashboard_password" in command
+    assert "Bearer ${dashboard_secret}" in command
+
+
+def test_selector_restore_skips_removed_member_and_verifies_readback() -> None:
+    payload = {
+        "proxies": {
+            "GPT手动": {"now": "safe", "all": ["safe", "other"]},
+            "Gemini手动": {"now": "safe", "all": ["safe"]},
+        }
+    }
+    commands: list[str] = []
+
+    def fake_ssh(_host: str, command: str, **_kwargs):
+        commands.append(command)
+        return completed(json.dumps(payload, ensure_ascii=False))
+
+    with (
+        patch.object(
+            MODULE,
+            "read_remote_selector_state",
+            side_effect=[selector_state(), {**selector_state(), "GPT手动": "safe"}],
+        ),
+        patch.object(MODULE, "ssh_command", side_effect=fake_ssh),
+    ):
+        restored = MODULE.restore_remote_selector_state(
+            "router", {"GPT手动": "safe", "Gemini手动": "removed"}
+        )
+
+    assert restored == {"GPT手动": "safe"}
+    puts = [command for command in commands if "SELECTOR_RESTORE" in command]
+    assert len(puts) == 1
+    assert urllib.parse.quote("GPT手动", safe="") in puts[0]
+
+
+def test_selector_restore_applies_default_parent_last() -> None:
+    state = selector_state()
+    payload = {
+        "proxies": {
+            name: {"now": member, "all": [member]}
+            for name, member in state.items()
+        }
+    }
+    commands: list[str] = []
+
+    def fake_ssh(_host: str, command: str, **_kwargs):
+        commands.append(command)
+        return completed(json.dumps(payload, ensure_ascii=False))
+
+    with (
+        patch.object(MODULE, "read_remote_selector_state", side_effect=[state, state]),
+        patch.object(MODULE, "ssh_command", side_effect=fake_ssh),
+    ):
+        assert MODULE.restore_remote_selector_state("router", state) == {
+            **{name: state[name] for name in MODULE.ACTIVATION_SELECTOR_NAMES[1:]},
+            "默认代理": state["默认代理"],
+        }
+
+    puts = [command for command in commands if "SELECTOR_RESTORE" in command]
+    assert len(puts) == len(MODULE.ACTIVATION_SELECTOR_NAMES)
+    assert urllib.parse.quote("默认代理", safe="") in puts[-1]
+
+
+def test_service_route_check_requires_both_destinations() -> None:
+    commands: list[str] = []
+
+    def fake_ssh(_host: str, command: str, **_kwargs):
+        commands.append(command)
+        return completed("chatgpt=403 gemini=200\n")
+
+    with patch.object(MODULE, "ssh_command", side_effect=fake_ssh):
+        MODULE.verify_remote_service_routes("router")
+    assert "https://chatgpt.com/" in commands[0]
+    assert "https://gemini.google.com/" in commands[0]
+    assert "451" not in commands[0]
 
 
 def test_rollback_finally_restores_firewall_dns_and_service_after_copy_failure() -> None:

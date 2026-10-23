@@ -269,16 +269,8 @@ def run_incremental_update(args, skill):
                 )
             else:
                 report['rrc_status'] = 'NEEDS_ACTUAL_USE_VERIFICATION_SINGLE_NEW_NODE'
-        if names:
-            disney_path = directory / 'added-disney.json'
-            if not disney_path.exists():
-                command = [sys.executable, str(script_dir / 'disney_service_probe.py'), '--skill-script', str(Path(skill.__file__).resolve()), '--source-snapshot', str(manifest_path), '--output', str(disney_path), '--host', args.host, '--core-path', args.core_path]
-                for item in manifest['nodes']:
-                    if item['exact_node_name'] in names:
-                        command.extend(['--only-node-id', item['exact_node_id']])
-                skill.run_probe_command(command)
-            disney = validate_subset_report(skill, disney_path, manifest, names, 'disney')
-            disney_pass = [r['exact_node_name'] for r in disney['nodes'] if r.get('result') == 'PASS_SUPPORTED_REGION']
+        disney_pass = [name for name in names if skill.is_disney_region_name(name)]
+        report['disney_policy'] = 'POLICY_STATIC_REGIONS_NO_PROBE'
         hk_names = measured_hk_baseline_names(skill, old, args.source_identity_key)
         candidate, selection_report = helpers['build_candidate'](
             old,

@@ -192,8 +192,8 @@ def test_restrict_ai_groups_preserves_valid_broad_manual_members():
  groups={group['name']:group for group in data['proxy-groups']}
  assert groups['GPT候选']['proxies']==['us']
  assert groups['Gemini候选']['proxies']==['us']
- assert groups['GPT手动']['proxies']==['jp','us','流媒体节点','GPT候选']
- assert groups['Gemini手动']['proxies']==['jp','🇭🇰香港','us','流媒体节点','Gemini候选']
+ assert groups['GPT手动']['proxies']==['us','jp','流媒体节点','GPT候选']
+ assert groups['Gemini手动']['proxies']==['us','jp','🇭🇰香港','流媒体节点','Gemini候选']
 
 @pytest.mark.parametrize('kind',['rrc','disney'])
 def test_subset_rejects_old_node_or_wrong_source(tmp_path,kind):
@@ -238,7 +238,9 @@ def test_orchestration_tests_only_new_names_and_never_calls_old_sentinels(tmp_pa
  result=r.run_incremental_update(args,s)
  assert events[:2]==['freeze','read_baseline']
  expected_rrc=u.eligible_ai_rrc_names(added)
- assert len(commands)==(0 if not added else 1 if len(expected_rrc)<2 else 2)
+ assert len(commands)==(1 if len(expected_rrc)>=2 else 0)
+ assert all(not command[1].endswith('disney_service_probe.py') for command in commands)
+ assert result['disney_policy']=='POLICY_STATIC_REGIONS_NO_PROBE'
  expected_status = (
   'NO_ADDITIONS' if not added else
   'NO_AI_ELIGIBLE_ADDITIONS' if not expected_rrc else
